@@ -1,5 +1,5 @@
-#include "batterywidget.h"
-#include "widgetlibrarydialog.h"
+#include "widgets/batterywidget.h"
+#include "ui/widgetlibrarydialog.h"
 
 #include <QApplication>
 #include <QAction>
@@ -1510,9 +1510,7 @@ void BatteryWidget::showAboutDialog()
     auto* title = new QLabel(QStringLiteral("macdowsOS Widget"), &dialog);
     title->setStyleSheet(QStringLiteral("font-size:20px; font-weight:600;"));
     layout->addWidget(title);
-    auto* text = new QLabel(QStringLiteral("Qt 6 · Liquid Glass desktop widget\n"
-                                           "实时读取 Windows 电量与已连接外设。\n"
-                                           "玻璃材质由 QtGlassFlow 驱动，背景仅采样当前壁纸。"), &dialog);
+    auto* text = new QLabel(QStringLiteral("雾蓝回针MistBlueSt 版本 0.1.0 beta"), &dialog);
     text->setStyleSheet(QStringLiteral("color:#aab5c8; line-height:1.4;"));
     text->setWordWrap(true);
     layout->addWidget(text);

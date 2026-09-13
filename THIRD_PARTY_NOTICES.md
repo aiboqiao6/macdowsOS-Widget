@@ -8,8 +8,8 @@ macdowsOS Widget 尊重并保留所使用开源项目的版权、许可和免责
 - 上游仓库：https://github.com/SuperSiyer/QtGlassFlow
 - 集成基准提交：`c87f4ac980df1a01b4c885b876ad8eacad717c28`
 - 许可证：GNU General Public License v3.0（GPL-3.0-only）
-- 上游源码：`macdowsOS Widget/third_party/QtGlassFlow/`
-- 完整许可文本：`macdowsOS Widget/third_party/QtGlassFlow/LICENSE`
+- 上游源码：`third_party/QtGlassFlow/`
+- 完整许可文本：`third_party/QtGlassFlow/LICENSE`
 
 ### 修改声明
 
@@ -20,6 +20,7 @@ macdowsOS Widget 尊重并保留所使用开源项目的版权、许可和免责
 - 增加玻璃透明度、背景模糊程度和渲染分辨率控制。
 - 优化 FBO、纹理复用、模糊流程和按需刷新调度。
 - 调整 SDF 圆角、边缘高光、折射与原生像素尺度计算。
+- 将内嵌源码统一移至根目录 third_party，仅由 Visual Studio 主工程构建；移出上游示例、Wiki、图片和独立打包/构建配置。
 
 修改文件顶部保留了醒目的修改日期和许可指引。QtGlassFlow 的上游许可文本没有被删除或替换。
 

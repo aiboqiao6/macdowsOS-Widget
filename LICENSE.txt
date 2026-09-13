@@ -7,7 +7,7 @@ source file states otherwise.
 
 The complete, unmodified license text is included at:
 
-    macdowsOS Widget/third_party/QtGlassFlow/LICENSE
+    third_party/QtGlassFlow/LICENSE
 
 When redistributing this project, keep that license, the upstream copyright
 and disclaimer notices, the corresponding source code, and the modification

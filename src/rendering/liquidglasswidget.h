@@ -1,6 +1,6 @@
 #pragma once
 
-#include "third_party/QtGlassFlow/src/qtglassflowscene.h"
+#include "qtglassflowscene.h"
 
 #include <QPoint>
 #include <QImage>

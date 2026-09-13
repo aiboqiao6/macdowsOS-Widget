@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -60,6 +60,11 @@
     <Import Project="$(QtMsBuild)\Qt.props" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)obj\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>macdowsOSWidget</TargetName>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
@@ -70,8 +75,10 @@
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(QtInstallDir)\include\QtNetwork;$(QtInstallDir)\include\QtOpenGLWidgets;$(QtInstallDir)\include\QtOpenGL;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>QT_NETWORK_LIB;QT_OPENGL_LIB;QT_OPENGLWIDGETS_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)third_party\QtGlassFlow\src;$(QtInstallDir)\include\QtNetwork;$(QtInstallDir)\include\QtOpenGLWidgets;$(QtInstallDir)\include\QtOpenGL;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>NOMINMAX;QT_NETWORK_LIB;QT_OPENGL_LIB;QT_OPENGLWIDGETS_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -88,10 +95,12 @@
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
       <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <AdditionalIncludeDirectories>$(QtInstallDir)\include\QtNetwork;$(QtInstallDir)\include\QtOpenGLWidgets;$(QtInstallDir)\include\QtOpenGL;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>QT_NETWORK_LIB;QT_OPENGL_LIB;QT_OPENGLWIDGETS_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)third_party\QtGlassFlow\src;$(QtInstallDir)\include\QtNetwork;$(QtInstallDir)\include\QtOpenGLWidgets;$(QtInstallDir)\include\QtOpenGL;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>NOMINMAX;QT_NETWORK_LIB;QT_OPENGL_LIB;QT_OPENGLWIDGETS_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -105,25 +114,31 @@
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="main.cpp" />
-    <ClCompile Include="batterywidget.cpp" />
-    <ClCompile Include="widgetlibrarydialog.cpp" />
-    <ClCompile Include="liquidglasswidget.cpp" />
+    <ClCompile Include="src/app/main.cpp" />
+    <ClCompile Include="src/widgets/batterywidget.cpp" />
+    <ClCompile Include="src/ui/widgetlibrarydialog.cpp" />
+    <ClCompile Include="src/rendering/liquidglasswidget.cpp" />
     <ClCompile Include="third_party\QtGlassFlow\src\qtglassflowscene.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="batterywidget.h" />
-    <ClInclude Include="liquidglasswidget.h" />
+    <ClInclude Include="src/widgets/batterywidget.h" />
+    <ClInclude Include="src/rendering/liquidglasswidget.h" />
   </ItemGroup>
   <ItemGroup>
     <QtRcc Include="third_party\QtGlassFlow\src\shaders.qrc" />
   </ItemGroup>
   <ItemGroup>
     <QtMoc Include="third_party\QtGlassFlow\src\qtglassflowscene.h" />
-    <QtMoc Include="widgetlibrarydialog.h" />
+    <QtMoc Include="src/ui/widgetlibrarydialog.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="README.md" />
+    <None Include="LICENSE.txt" />
+    <None Include="THIRD_PARTY_NOTICES.md" />
+    <None Include="third_party\QtGlassFlow\src\shaders\scene_vertex.glsl" />
+    <None Include="third_party\QtGlassFlow\src\shaders\scene_fragment.glsl" />
+    <None Include="third_party\QtGlassFlow\src\shaders\blur_vertex.glsl" />
+    <None Include="third_party\QtGlassFlow\src\shaders\blur_fragment.glsl" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Condition="Exists('$(QtMsBuild)\qt.targets')">

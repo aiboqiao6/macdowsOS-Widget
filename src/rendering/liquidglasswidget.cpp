@@ -1,4 +1,4 @@
-#include "liquidglasswidget.h"
+#include "rendering/liquidglasswidget.h"
 
 #include <QGuiApplication>
 #include <QHideEvent>

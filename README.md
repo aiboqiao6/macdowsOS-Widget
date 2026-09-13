@@ -71,18 +71,21 @@ Battery / Weather / Clock / Dictionary
 
 ## 构建
 
-环境要求：Windows 10/11、Qt 6.4+（Core、Gui、Widgets、Network、OpenGL、OpenGLWidgets）、Visual Studio 2022 MSVC x64、C++17、CMake 3.21+。
+环境要求：Windows 10/11、Visual Studio 2022（桌面 C++ 开发工作负载）、Qt VS Tools、Qt 6.4+ MSVC x64、C++17。
+工程当前选择的 Qt 配置名称为 `6.11.1_msvc2022_64`；可在 VS 的 Qt Project Settings 中切换到本机安装的 MSVC x64 版本。
 
-在源码目录执行：
+1. 打开仓库根目录的 `macdowsOS Widget.sln`。
+2. 选择 `Release | x64`，生成解决方案。
+3. 运行 `bin/x64/Release/macdowsOSWidget.exe`。
+
+也可在 VS 2022 Developer PowerShell 中执行：
 
 ```powershell
-cmake -S . -B build
-cmake --build build --config Release --parallel
+msbuild "macdowsOS Widget.sln" /m /p:Configuration=Release /p:Platform=x64
 ```
 
-工程的 Post-Build 会调用 `windeployqt`，将 Qt 运行库和平台插件复制到 `build/Release`。也可以使用 Qt Creator 打开 `CMakeLists.txt`，或用 Visual Studio 的 Qt VS Tools 选择 MSVC x64 配置。
-
-产物：`macdowsOS Widget/macdowsOS Widget/build/Release/macdowsOSWidget.exe`
+编译中间文件统一写入 `obj/x64/<配置>/`，程序及 Qt 运行库写入 `bin/x64/<配置>/`。Post-Build 调用 `windeployqt` 部署运行库。
+项目仅维护 Visual Studio 构建入口。
 
 ## 使用与设置
 
@@ -108,7 +111,7 @@ cmake --build build --config Release --parallel
 
 QtGlassFlow 源码及修改后的渲染代码直接编译进 `macdowsOSWidget.exe`。本项目及其分发版本按 **GNU General Public License v3.0（GPL-3.0）** 提供，并保留上游版权、许可证与免责声明。
 
-上游项目：[SuperSiyer/QtGlassFlow](https://github.com/SuperSiyer/QtGlassFlow) ；源码位于 `macdowsOS Widget/third_party/QtGlassFlow/`，完整许可证文本位于该目录的 `LICENSE` 文件。
+上游项目：[SuperSiyer/QtGlassFlow](https://github.com/SuperSiyer/QtGlassFlow) ；源码位于 `third_party/QtGlassFlow/`，完整许可证文本位于该目录的 `LICENSE` 文件。
 
 分发包含 QtGlassFlow 代码的版本时，请：
 
@@ -124,23 +127,34 @@ Apple、macOS 及其相关名称和标识是 Apple Inc. 的商标。本项目是
 ## 目录结构
 
 ```text
-macdowsOS Widget/
-├─ CMakeLists.txt
-├─ main.cpp
-├─ batterywidget.cpp/.h
-├─ liquidglasswidget.cpp/.h
-├─ widgetlibrarydialog.cpp/.h
-└─ third_party/QtGlassFlow/
-   ├─ LICENSE
-   └─ src/                    # OpenGL/GLSL 液态玻璃底层
+macdowsOS Widget/             # 仓库根目录
+├─ macdowsOS Widget.sln       # Visual Studio 入口
+├─ macdowsOS Widget.vcxproj
+├─ macdowsOS Widget.vcxproj.filters
+├─ src/
+│  ├─ app/                   # 程序入口
+│  ├─ widgets/               # 小组件、数据与布局管理
+│  ├─ ui/                    # 组件库界面
+│  └─ rendering/             # 通用玻璃窗口层
+├─ third_party/QtGlassFlow/
+│  ├─ LICENSE
+│  ├─ README.md              # 来源、版本及集成说明
+│  └─ src/                   # 渲染源码、qrc 与 GLSL
+├─ README.md
+├─ LICENSE.txt
+├─ THIRD_PARTY_NOTICES.md
+├─ bin/                      # 生成的程序和运行库（忽略）
+└─ obj/                      # 编译中间文件（忽略）
 ```
+
+第三方源码直接编译进应用，由主仓库统一管理；上游示例、Wiki、Linux 打包文件和独立构建配置不参与项目。
+`batterywidget.cpp/.h` 目前还包含天气、时钟、词典和组件管理逻辑，本次按现有职责归档，后续可继续拆分。
 
 ## 已知限制
 
 - 外设电量是否可见取决于 Windows 驱动是否公开 `System.Devices.BatteryLife`。
 - 天气和词典需要网络；离线时组件保留，但显示不可用状态。
 - 玻璃背景默认采样壁纸；添加小组件页面会额外采样其后方已合成桌面内容。
-- 当前主渲染路径为 OpenGL，`build-vulkan.disabled` 仅作为历史实验目录保留，不参与默认构建。
 
 ---
 

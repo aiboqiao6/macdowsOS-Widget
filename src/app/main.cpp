@@ -1,4 +1,4 @@
-#include "batterywidget.h"
+#include "widgets/batterywidget.h"
 
 #include <QApplication>
 #include <QFontDatabase>

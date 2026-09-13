@@ -1,4 +1,4 @@
-#include "widgetlibrarydialog.h"
+#include "ui/widgetlibrarydialog.h"
 
 #include <QApplication>
 #include <QCursor>

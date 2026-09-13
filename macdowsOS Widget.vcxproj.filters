@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="docs" />
+    <Filter Include="src" />
+    <Filter Include="src\app" />
+    <Filter Include="src\rendering" />
+    <Filter Include="src\ui" />
+    <Filter Include="src\widgets" />
+    <Filter Include="third_party" />
+    <Filter Include="third_party\QtGlassFlow" />
+    <Filter Include="third_party\QtGlassFlow\shaders" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src/app/main.cpp">
+      <Filter>src\app</Filter>
+    </ClCompile>
+    <ClCompile Include="src/widgets/batterywidget.cpp">
+      <Filter>src\widgets</Filter>
+    </ClCompile>
+    <ClInclude Include="src/widgets/batterywidget.h">
+      <Filter>src\widgets</Filter>
+    </ClInclude>
+    <ClCompile Include="src/ui/widgetlibrarydialog.cpp">
+      <Filter>src\ui</Filter>
+    </ClCompile>
+    <QtMoc Include="src/ui/widgetlibrarydialog.h">
+      <Filter>src\ui</Filter>
+    </QtMoc>
+    <ClCompile Include="src/rendering/liquidglasswidget.cpp">
+      <Filter>src\rendering</Filter>
+    </ClCompile>
+    <ClInclude Include="src/rendering/liquidglasswidget.h">
+      <Filter>src\rendering</Filter>
+    </ClInclude>
+    <ClCompile Include="third_party\QtGlassFlow\src\qtglassflowscene.cpp">
+      <Filter>third_party\QtGlassFlow</Filter>
+    </ClCompile>
+    <QtMoc Include="third_party\QtGlassFlow\src\qtglassflowscene.h">
+      <Filter>third_party\QtGlassFlow</Filter>
+    </QtMoc>
+    <QtRcc Include="third_party\QtGlassFlow\src\shaders.qrc">
+      <Filter>third_party\QtGlassFlow\shaders</Filter>
+    </QtRcc>
+    <None Include="third_party\QtGlassFlow\src\shaders\scene_vertex.glsl">
+      <Filter>third_party\QtGlassFlow\shaders</Filter>
+    </None>
+    <None Include="third_party\QtGlassFlow\src\shaders\scene_fragment.glsl">
+      <Filter>third_party\QtGlassFlow\shaders</Filter>
+    </None>
+    <None Include="third_party\QtGlassFlow\src\shaders\blur_vertex.glsl">
+      <Filter>third_party\QtGlassFlow\shaders</Filter>
+    </None>
+    <None Include="third_party\QtGlassFlow\src\shaders\blur_fragment.glsl">
+      <Filter>third_party\QtGlassFlow\shaders</Filter>
+    </None>
+    <None Include="README.md">
+      <Filter>docs</Filter>
+    </None>
+    <None Include="LICENSE.txt">
+      <Filter>docs</Filter>
+    </None>
+    <None Include="THIRD_PARTY_NOTICES.md">
+      <Filter>docs</Filter>
+    </None>
+  </ItemGroup>
+</Project>

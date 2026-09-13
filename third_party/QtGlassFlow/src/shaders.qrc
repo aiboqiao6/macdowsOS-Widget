@@ -1,0 +1,8 @@
+<RCC>
+    <qresource prefix="/qtglassflow">
+        <file>shaders/scene_vertex.glsl</file>
+        <file>shaders/scene_fragment.glsl</file>
+        <file>shaders/blur_vertex.glsl</file>
+        <file>shaders/blur_fragment.glsl</file>
+    </qresource>
+</RCC>

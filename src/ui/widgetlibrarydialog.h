@@ -1,6 +1,6 @@
 #pragma once
 
-#include "liquidglasswidget.h"
+#include "rendering/liquidglasswidget.h"
 
 #include <QList>
 #include <QImage>
