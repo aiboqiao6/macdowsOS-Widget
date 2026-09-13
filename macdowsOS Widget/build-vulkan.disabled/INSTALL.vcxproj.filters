@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="D:\DEV\macdowsOS Widgets\macdowsOS Widget\macdowsOS Widget\build-vulkan\CMakeFiles\0f36258d201bef022376b9f54288d62d\INSTALL_force.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{8E42DF22-165E-3957-9656-DCB7CF12D2DD}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

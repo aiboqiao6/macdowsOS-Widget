@@ -1,0 +1,4 @@
+D:/DEV/macdowsOS Widgets/macdowsOS Widget/macdowsOS Widget/build/CMakeFiles/macdowsOSWidget.dir
+D:/DEV/macdowsOS Widgets/macdowsOS Widget/macdowsOS Widget/build/CMakeFiles/INSTALL.dir
+D:/DEV/macdowsOS Widgets/macdowsOS Widget/macdowsOS Widget/build/CMakeFiles/ALL_BUILD.dir
+D:/DEV/macdowsOS Widgets/macdowsOS Widget/macdowsOS Widget/build/CMakeFiles/ZERO_CHECK.dir
