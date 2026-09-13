@@ -134,7 +134,6 @@
   <ItemGroup>
     <None Include="README.md" />
     <None Include="LICENSE.txt" />
-    <None Include="THIRD_PARTY_NOTICES.md" />
     <None Include="third_party\QtGlassFlow\src\shaders\scene_vertex.glsl" />
     <None Include="third_party\QtGlassFlow\src\shaders\scene_fragment.glsl" />
     <None Include="third_party\QtGlassFlow\src\shaders\blur_vertex.glsl" />

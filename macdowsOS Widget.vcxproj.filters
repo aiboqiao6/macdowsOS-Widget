@@ -60,8 +60,5 @@
     <None Include="LICENSE.txt">
       <Filter>docs</Filter>
     </None>
-    <None Include="THIRD_PARTY_NOTICES.md">
-      <Filter>docs</Filter>
-    </None>
   </ItemGroup>
 </Project>
