@@ -57,8 +57,5 @@
     <None Include="README.md">
       <Filter>docs</Filter>
     </None>
-    <None Include="LICENSE.txt">
-      <Filter>docs</Filter>
-    </None>
   </ItemGroup>
 </Project>
