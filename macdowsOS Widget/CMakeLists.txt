@@ -60,3 +60,13 @@ if (WIN32)
 endif()
 
 install(TARGETS macdowsOSWidget RUNTIME DESTINATION .)
+
+# GPL-3.0/third-party notices must accompany redistributions that include
+# the embedded QtGlassFlow source. Keep the complete upstream license text
+# next to the installed executable.
+install(FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../LICENSE.txt"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../THIRD_PARTY_NOTICES.md"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/QtGlassFlow/LICENSE"
+    DESTINATION .
+)

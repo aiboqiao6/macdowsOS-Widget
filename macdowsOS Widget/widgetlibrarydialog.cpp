@@ -180,6 +180,14 @@ protected:
         const auto updatePreview = [this]() {
             const QPoint cursor = QCursor::pos();
             const bool outsideLibrary = !m_owner->geometry().contains(cursor);
+            // The drag loop can wake at 60 Hz even when the pointer is
+            // stationary. Avoid repeating grid occupancy searches and overlay
+            // repaints until the cursor actually enters a new cell.
+            if (cursor == m_lastPreviewCursor
+                && outsideLibrary == m_lastPreviewOutside)
+                return;
+            m_lastPreviewCursor = cursor;
+            m_lastPreviewOutside = outsideLibrary;
             m_owner->notifyWidgetDragPreview(m_kind, cursor, outsideLibrary);
         };
         QObject::connect(&previewTimer, &QTimer::timeout, m_owner, updatePreview);
@@ -187,6 +195,8 @@ protected:
         previewTimer.start();
         drag.exec(Qt::CopyAction);
         previewTimer.stop();
+        m_lastPreviewCursor = QPoint(-1, -1);
+        m_lastPreviewOutside = false;
         m_owner->notifyWidgetDragPreview(m_kind, QCursor::pos(), false);
 
         const QPoint globalPos = QCursor::pos();
@@ -200,6 +210,8 @@ private:
     QString m_subtitle;
     int m_kind = 0;
     QPoint m_press;
+    QPoint m_lastPreviewCursor{-1, -1};
+    bool m_lastPreviewOutside = false;
     WidgetLibraryDialog* m_owner = nullptr;
 };
 
@@ -218,6 +230,12 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     setGlassRadius(26.0);
     setBlurRadius(6.0f);
     setBlurIterations(3);
+    // The gallery is much larger than a desktop card. Its glass is already
+    // strongly blurred, so a 60% internal buffer is visually equivalent at
+    // native window size while cutting FBO fill-rate and texture bandwidth by
+    // about 27% compared with the shared 70% default.
+    setRenderScale(0.60f);
+    setLowLatencyRenderingEnabled(true);
     setNoiseAmount(0.008f);
     setRefractionPower(1.32f);
     Qt::WindowFlags flags = windowFlags();
@@ -231,14 +249,19 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     m_renderTimer.setTimerType(Qt::PreciseTimer);
     m_renderTimer.setInterval(16);
     connect(&m_renderTimer, &QTimer::timeout, this, [this]() {
-        // QtGlassFlow's idle coalescing is ideal for desktop cards, but this
-        // gallery is an animated surface: keep its shader/composite at 60 Hz
-        // while it is open so refraction and the live slide feel continuous.
-        if (isVisible())
+        // Geometry and glass composition stay at 60 Hz. The cached desktop
+        // canvas is cropped locally on these cheap frames; screen capture is
+        // intentionally handled by the slower timer below.
+        if (isVisible()) {
+            updateBackdropFrame();
             update();
+        }
     });
     m_liveBackdropTimer.setTimerType(Qt::PreciseTimer);
-    m_liveBackdropTimer.setInterval(16); // animation-time capture/render at 60 Hz
+    // Keep the backdrop source live at the same 60 Hz cadence as the glass
+    // compositor. The expensive full-size conversion is avoided below by
+    // capturing one fixed canvas and reducing it before the texture upload.
+    m_liveBackdropTimer.setInterval(16);
     connect(&m_liveBackdropTimer, &QTimer::timeout,
             this, &WidgetLibraryDialog::refreshBackdrop);
     setAttribute(Qt::WA_TranslucentBackground, true);
@@ -390,18 +413,116 @@ void WidgetLibraryDialog::prepareBackdrop()
     const int targetX = area.left() + (area.width() - targetWidth) / 2;
     const int targetY = area.bottom() - targetHeight - 8;
     m_backdropRect = QRect(targetX, targetY, targetWidth, targetHeight);
+    // Capture one fixed strip covering every visible position of the panel.
+    // During the slide, changing geometry is serviced by a memory crop rather
+    // than another full QScreen::grabWindow call on every rendered frame.
+    m_backdropCaptureRect = QRect(targetX, targetY, targetWidth,
+                                  qMax(1, area.bottom() - targetY + 1));
     setGeometry(m_backdropRect);
 
     // The gallery is hidden at this point. grabWindow(0) therefore captures
     // the already-composited desktop, including editor/terminal windows, but
     // cannot capture the gallery itself. QtGlassFlow performs the blur and
     // refraction from this image using the same shader/FBO path as cards.
-    const QPixmap backdrop = screen->grabWindow(0, targetX, targetY,
-                                                targetWidth, targetHeight);
+    const QPixmap backdrop = screen->grabWindow(0,
+                                                m_backdropCaptureRect.x(),
+                                                m_backdropCaptureRect.y(),
+                                                m_backdropCaptureRect.width(),
+                                                m_backdropCaptureRect.height());
     if (!backdrop.isNull()) {
-        m_lastBackdropImage = backdrop.toImage();
-        setBackgroundImage(m_lastBackdropImage);
+        m_lastRawCapture = backdrop.toImage();
+        m_backdropCanvas = reducedCapture(m_lastRawCapture,
+                                          m_backdropCaptureRect.size());
+        m_lastBackdropGeometry = QRect();
+        updateBackdropFrame();
     }
+}
+
+QImage WidgetLibraryDialog::reducedCapture(const QImage& source,
+                                            const QSize& logicalSize) const
+{
+    if (source.isNull() || logicalSize.isEmpty())
+        return {};
+    // QScreen::grabWindow may return logical or physical pixels depending on
+    // the Windows DPI-awareness mode. Derive the reduced target from the
+    // pixels actually returned instead of assuming the dialog's DPR (which is
+    // not reliable before the window is shown).
+    const QSize targetSize(qMax(1, qRound(source.width() * renderScale())),
+                           qMax(1, qRound(source.height() * renderScale())));
+    QImage image = source;
+    if (image.size() != targetSize) {
+        // The following multi-pass Gaussian blur removes the small sampling
+        // difference, so a fast reduction produces the same final material
+        // without paying for a full-resolution smooth scale first.
+        image = image.scaled(targetSize, Qt::IgnoreAspectRatio,
+                             Qt::FastTransformation);
+    }
+    return image.convertToFormat(QImage::Format_RGBA8888);
+}
+
+void WidgetLibraryDialog::updateBackdropFrame()
+{
+    if (m_backdropCanvas.isNull() || m_backdropCaptureRect.isNull())
+        return;
+    const QRect currentGeometry = geometry();
+    if (currentGeometry == m_lastBackdropGeometry)
+        return;
+
+    const qreal sx = m_backdropCanvas.width()
+                     / qreal(m_backdropCaptureRect.width());
+    const qreal sy = m_backdropCanvas.height()
+                     / qreal(m_backdropCaptureRect.height());
+    const QSize frameSize(qMax(1, qRound(currentGeometry.width() * sx)),
+                          qMax(1, qRound(currentGeometry.height() * sy)));
+    const QRect requested(qRound((currentGeometry.x() - m_backdropCaptureRect.x()) * sx),
+                          qRound((currentGeometry.y() - m_backdropCaptureRect.y()) * sy),
+                          frameSize.width(), frameSize.height());
+    const QRect source = requested.intersected(m_backdropCanvas.rect());
+
+    QImage frame(frameSize, QImage::Format_RGBA8888);
+    frame.fill(Qt::transparent);
+    if (!source.isEmpty()) {
+        QPainter painter(&frame);
+        const QRect destination(source.x() - requested.x(),
+                                source.y() - requested.y(),
+                                source.width(), source.height());
+        painter.drawImage(destination, m_backdropCanvas, source);
+
+        // A DPI rounding difference or a screen capture clipped at an edge
+        // must never expose the transparent clear color as a black strip.
+        // Extend only the missing edge pixels from the nearest captured row or
+        // column; the correctly aligned interior is left untouched.
+        const QRect full = frame.rect();
+        if (destination.left() > full.left()) {
+            painter.drawImage(QRect(full.left(), destination.top(),
+                                    destination.left(), destination.height()),
+                              m_backdropCanvas,
+                              QRect(source.left(), source.top(), 1, source.height()));
+        }
+        if (destination.right() < full.right()) {
+            painter.drawImage(QRect(destination.right() + 1, destination.top(),
+                                    full.right() - destination.right(), destination.height()),
+                              m_backdropCanvas,
+                              QRect(source.right(), source.top(), 1, source.height()));
+        }
+        if (destination.top() > full.top()) {
+            painter.drawImage(QRect(destination.left(), full.top(),
+                                    destination.width(), destination.top()),
+                              m_backdropCanvas,
+                              QRect(source.left(), source.top(), source.width(), 1));
+        }
+        if (destination.bottom() < full.bottom()) {
+            painter.drawImage(QRect(destination.left(), destination.bottom() + 1,
+                                    destination.width(), full.bottom() - destination.bottom()),
+                              m_backdropCanvas,
+                              QRect(source.left(), source.bottom(), source.width(), 1));
+        }
+    }
+    m_lastBackdropGeometry = currentGeometry;
+    if (frame == m_lastBackdropImage)
+        return;
+    m_lastBackdropImage = frame;
+    setBackgroundImage(m_lastBackdropImage);
 }
 
 void WidgetLibraryDialog::enableCaptureExclusion()
@@ -419,34 +540,40 @@ void WidgetLibraryDialog::enableCaptureExclusion()
 
 void WidgetLibraryDialog::refreshBackdrop()
 {
-    if (!isVisible() || !m_captureExcluded || m_backdropRect.isNull())
+    if (!isVisible() || !m_captureExcluded || m_backdropCaptureRect.isNull())
         return;
-    // Follow the slide geometry while the panel is entering/leaving. Once a
-    // frame is completely below the work area, keep sampling the last valid
-    // rectangle so the animation never flashes an empty black texture.
-    QRect captureRect = geometry();
-    QScreen* screen = QGuiApplication::screenAt(captureRect.center());
+    // Always refresh the same animation canvas. Its current-window crop is
+    // updated independently at 60 Hz by m_renderTimer, avoiding a blocking
+    // desktop capture on every presentation frame.
+    QScreen* screen = QGuiApplication::screenAt(m_backdropCaptureRect.center());
     if (!screen)
         screen = QGuiApplication::primaryScreen();
     if (!screen)
         return;
 
-    if (!captureRect.intersects(screen->geometry()))
-        captureRect = m_backdropRect;
-
-    const QPixmap backdrop = screen->grabWindow(0, captureRect.x(), captureRect.y(),
-                                                captureRect.width(), captureRect.height());
+    const QPixmap backdrop = screen->grabWindow(0,
+                                                m_backdropCaptureRect.x(),
+                                                m_backdropCaptureRect.y(),
+                                                m_backdropCaptureRect.width(),
+                                                m_backdropCaptureRect.height());
     if (!backdrop.isNull()) {
-        const QImage image = backdrop.toImage();
-        // QScreen::grabWindow is still needed to detect external window
-        // changes, but avoid invalidating the OpenGL blur cache when the
-        // captured pixels are identical. This keeps the coarse idle sampler
-        // cheap while preserving live updates when something behind the panel
-        // really changes.
-        if (image == m_lastBackdropImage)
+        const QImage raw = backdrop.toImage();
+        // During a slide the same fixed canvas is sampled repeatedly. Avoid
+        // scaling and format conversion when the desktop pixels did not
+        // change; only the cheap local crop still needs to advance.
+        if (raw == m_lastRawCapture) {
+            updateBackdropFrame();
+            update();
             return;
-        m_lastBackdropImage = image;
-        setBackgroundImage(m_lastBackdropImage);
+        }
+        m_lastRawCapture = raw;
+        const QImage image = reducedCapture(raw, m_backdropCaptureRect.size());
+        if (image != m_backdropCanvas) {
+            m_backdropCanvas = image;
+            m_lastBackdropGeometry = QRect();
+        }
+        updateBackdropFrame();
+        update();
     }
 }
 
@@ -461,9 +588,9 @@ void WidgetLibraryDialog::showEvent(QShowEvent* event)
     m_renderTimer.setTimerType(Qt::PreciseTimer);
     m_renderTimer.setInterval(16);
     m_renderTimer.start();
-    m_liveBackdropTimer.setTimerType(Qt::PreciseTimer);
-    m_liveBackdropTimer.setInterval(16);
-    m_liveBackdropTimer.start();
+    // Reuse the prepared backdrop canvas during the slide; grabWindow is a
+    // blocking desktop capture and causes visible animation stalls.
+    m_liveBackdropTimer.stop();
     // The reusable base places desktop cards at the bottom of the z-order.
     // The gallery is an interactive tool window and must be above the cards.
     raise();
@@ -500,6 +627,17 @@ void WidgetLibraryDialog::showEvent(QShowEvent* event)
                 m_renderTimer.stop();
                 m_liveBackdropTimer.setTimerType(Qt::CoarseTimer);
                 m_liveBackdropTimer.setInterval(1000);
+                m_liveBackdropTimer.start();
+            }
+        });
+        connect(m_slideAnimation, &QPropertyAnimation::valueChanged,
+                this, [this](const QVariant&) {
+            // QPropertyAnimation advances geometry before the next timer
+            // wake-up. Crop and schedule the new frame immediately to remove
+            // one 16 ms presentation cycle of input-to-glass latency.
+            if (isVisible()) {
+                updateBackdropFrame();
+                update();
             }
         });
     }
@@ -565,9 +703,9 @@ void WidgetLibraryDialog::closeGallery()
     m_renderTimer.setTimerType(Qt::PreciseTimer);
     m_renderTimer.setInterval(16);
     m_renderTimer.start();
-    m_liveBackdropTimer.setTimerType(Qt::PreciseTimer);
-    m_liveBackdropTimer.setInterval(16);
-    m_liveBackdropTimer.start();
+    // Reuse the prepared backdrop canvas during the slide; grabWindow is a
+    // blocking desktop capture and causes visible animation stalls.
+    m_liveBackdropTimer.stop();
     m_slideAnimation->setStartValue(current);
     m_slideAnimation->setEndValue(endRect);
     m_slideAnimation->start();

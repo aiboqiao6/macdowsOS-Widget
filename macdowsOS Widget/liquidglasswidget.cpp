@@ -523,14 +523,14 @@ void LiquidGlassWidget::captureDesktopBackdrop()
     // used by QtGlassFlow avoids an unnecessarily large screenshot/upload,
     // while bilinear sampling keeps the final card dimensions unchanged.
     const qreal captureScale = renderScale();
-    QImage sample(QSize(qMax(1, qRound(width() * dpr * captureScale)),
-                        qMax(1, qRound(height() * dpr * captureScale))),
-                  QImage::Format_RGBA8888);
-    {
-        QPainter painter(&sample);
-        painter.drawImage(QRectF(QPointF(0, 0), QSizeF(sample.size())),
-                          m_wallpaperCanvas, pixelRect);
-    }
+    const QSize sampleSize(qMax(1, qRound(width() * dpr * captureScale)),
+                           qMax(1, qRound(height() * dpr * captureScale)));
+    // Crop directly from the reduced canvas to avoid a QPainter setup on each
+    // drag tick; the glass FBO performs the final bilinear filtering.
+    QImage sample = m_wallpaperCanvas.copy(pixelRect);
+    if (sample.size() != sampleSize)
+        sample = sample.scaled(sampleSize, Qt::IgnoreAspectRatio,
+                               Qt::FastTransformation);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
     sample = sample.flipped(Qt::Vertical);
 #else
@@ -585,6 +585,7 @@ void LiquidGlassWidget::mousePressEvent(QMouseEvent* event)
     if (event->button() == Qt::LeftButton) {
         m_dragging = true;
         m_dragOffset = event->globalPosition().toPoint() - frameGeometry().topLeft();
+        setLowLatencyRenderingEnabled(true);
         setInteractionActive(true);
         updateRefreshRate();
         event->accept();
@@ -617,6 +618,7 @@ void LiquidGlassWidget::mouseReleaseEvent(QMouseEvent* event)
     if (event->button() == Qt::LeftButton)
         m_dragging = false;
     if (event->button() == Qt::LeftButton) {
+        setLowLatencyRenderingEnabled(false);
         setInteractionActive(false);
         updateRefreshRate();
     }

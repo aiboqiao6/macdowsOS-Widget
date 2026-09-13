@@ -1130,8 +1130,26 @@ void BatteryWidget::handleDictionaryReply(QNetworkReply* reply)
                                              .value(QStringLiteral("definition")).toString();
         }
     }
-    if (!ok || m_dictionaryDefinition.isEmpty())
-        m_dictionaryDefinition = QStringLiteral("暂无释义");
+    if (!ok || m_dictionaryDefinition.isEmpty()) {
+        static const QHash<QString, QString> localDefinitions = {
+            {QStringLiteral("breeze"), QStringLiteral("微风；轻柔的风")},
+            {QStringLiteral("diligent"), QStringLiteral("勤奋的；孜孜不倦的")},
+            {QStringLiteral("serendipity"), QStringLiteral("意外发现美好事物的运气")},
+            {QStringLiteral("luminous"), QStringLiteral("发光的；明亮的")},
+            {QStringLiteral("wanderlust"), QStringLiteral("旅行癖；对远方的向往")},
+            {QStringLiteral("ephemeral"), QStringLiteral("短暂的；转瞬即逝的")},
+            {QStringLiteral("resilient"), QStringLiteral("有韧性的；能迅速恢复的")},
+            {QStringLiteral("curiosity"), QStringLiteral("好奇心；求知欲")},
+            {QStringLiteral("harmony"), QStringLiteral("和谐；协调")},
+            {QStringLiteral("nostalgia"), QStringLiteral("怀旧；对往昔的眷恋")},
+            {QStringLiteral("vivid"), QStringLiteral("生动的；鲜明的")},
+            {QStringLiteral("whisper"), QStringLiteral("低语；轻声说话")}
+        };
+        m_dictionaryDefinition = localDefinitions.value(
+            m_dictionaryWord, QStringLiteral("释义暂不可用，可点击“随机单词”重试"));
+        if (m_dictionaryPartOfSpeech.isEmpty())
+            m_dictionaryPartOfSpeech = QStringLiteral("词义速览");
+    }
     if (!word.isEmpty())
         m_dictionaryWord = word;
     reply->deleteLater();

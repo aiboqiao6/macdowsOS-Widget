@@ -42,12 +42,18 @@ private:
     void paintOverlay(QPainter& painter) override;
     void closeGallery();
     void refreshBackdrop();
+    void updateBackdropFrame();
+    QImage reducedCapture(const QImage& image, const QSize& logicalSize) const;
     void enableCaptureExclusion();
     QList<QFrame*> m_tiles;
     QPropertyAnimation* m_slideAnimation = nullptr;
     QTimer m_renderTimer;
     QTimer m_liveBackdropTimer;
     QRect m_backdropRect;
+    QRect m_backdropCaptureRect;
+    QRect m_lastBackdropGeometry;
+    QImage m_backdropCanvas;
+    QImage m_lastRawCapture;
     QImage m_lastBackdropImage;
     bool m_captureExcluded = false;
     bool m_closing = false;
