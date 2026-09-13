@@ -1,4 +1,0 @@
-D:/DEV/macdowsOS Widgets/macdowsOS Widget/macdowsOS Widget/build-vulkan/CMakeFiles/macdowsOSWidget.dir
-D:/DEV/macdowsOS Widgets/macdowsOS Widget/macdowsOS Widget/build-vulkan/CMakeFiles/INSTALL.dir
-D:/DEV/macdowsOS Widgets/macdowsOS Widget/macdowsOS Widget/build-vulkan/CMakeFiles/ALL_BUILD.dir
-D:/DEV/macdowsOS Widgets/macdowsOS Widget/macdowsOS Widget/build-vulkan/CMakeFiles/ZERO_CHECK.dir
