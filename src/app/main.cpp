@@ -16,9 +16,16 @@ int main(int argc, char* argv[])
     // One process owns the tray, configuration and desktop grid. A second
     // process would otherwise create duplicate widgets in the same cells and
     // race while writing widgets.json.
+    // Use the global namespace so launches from different Windows sessions
+    // (or from an elevated shortcut and a normal shortcut) still share one
+    // process guard. Failing closed is important: if the guard cannot be
+    // created, starting anyway would violate the single-instance contract.
+    SetLastError(ERROR_SUCCESS);
     HANDLE instanceMutex = CreateMutexW(nullptr, TRUE,
-        L"Local\\macdowsOS.Widget.Singleton.1");
-    if (instanceMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+        L"Global\\macdowsOS.Widget.Singleton.1");
+    if (!instanceMutex)
+        return 1;
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(instanceMutex);
         return 0;
     }
@@ -33,6 +40,13 @@ int main(int argc, char* argv[])
     app.setApplicationName(QStringLiteral("macdowsOS Widget"));
     app.setApplicationDisplayName(QStringLiteral("macdowsOS Widget"));
     app.setOrganizationName(QStringLiteral("macdowsOS"));
+    // All widget artwork and Qt controls use the bundled PingFang face. The
+    // registration happens before any windows are restored so text metrics
+    // cannot differ between the gallery and live cards.
+    const QString pingFangFamily = BatteryWidget::pingFangFontFamily();
+    QFont applicationFont(pingFangFamily);
+    applicationFont.setStyleStrategy(QFont::PreferAntialias);
+    app.setFont(applicationFont);
     // The tray icon owns the app lifetime when the floating card is hidden.
     app.setQuitOnLastWindowClosed(false);
 
@@ -48,17 +62,12 @@ int main(int argc, char* argv[])
         for (BatteryWidget* widget : widgets)
             widget->show();
         widgets.first()->saveConfiguration();
-    } else {
-        for (BatteryWidget* widget : widgets)
-            if (!widget->isVisible())
-                widget->show();
     }
     const int result = app.exec();
+    BatteryWidget::shutdown();
 #ifdef Q_OS_WIN
-    if (instanceMutex) {
-        ReleaseMutex(instanceMutex);
-        CloseHandle(instanceMutex);
-    }
+    ReleaseMutex(instanceMutex);
+    CloseHandle(instanceMutex);
 #endif
     return result;
 }

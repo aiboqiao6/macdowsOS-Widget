@@ -10,6 +10,7 @@
     <Filter Include="third_party" />
     <Filter Include="third_party\QtGlassFlow" />
     <Filter Include="third_party\QtGlassFlow\shaders" />
+    <Filter Include="resources" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src/app/main.cpp">
@@ -33,6 +34,21 @@
     <ClInclude Include="src/rendering/liquidglasswidget.h">
       <Filter>src\rendering</Filter>
     </ClInclude>
+    <ClCompile Include="src/rendering/nativewindows.cpp">
+      <Filter>src\rendering</Filter>
+    </ClCompile>
+    <ClCompile Include="src/rendering/desktopcapture.cpp">
+      <Filter>src\rendering</Filter>
+    </ClCompile>
+    <ClInclude Include="src/rendering/nativewindows.h">
+      <Filter>src\rendering</Filter>
+    </ClInclude>
+    <ClInclude Include="src/rendering/desktopcapture.h">
+      <Filter>src\rendering</Filter>
+    </ClInclude>
+    <ClInclude Include="src/rendering/responsivelayout.h">
+      <Filter>src\rendering</Filter>
+    </ClInclude>
     <ClCompile Include="third_party\QtGlassFlow\src\qtglassflowscene.cpp">
       <Filter>third_party\QtGlassFlow</Filter>
     </ClCompile>
@@ -42,6 +58,12 @@
     <QtRcc Include="third_party\QtGlassFlow\src\shaders.qrc">
       <Filter>third_party\QtGlassFlow\shaders</Filter>
     </QtRcc>
+    <QtRcc Include="resources.qrc">
+      <Filter>resources</Filter>
+    </QtRcc>
+    <None Include="pingfang0.ttf">
+      <Filter>resources</Filter>
+    </None>
     <None Include="third_party\QtGlassFlow\src\shaders\scene_vertex.glsl">
       <Filter>third_party\QtGlassFlow\shaders</Filter>
     </None>

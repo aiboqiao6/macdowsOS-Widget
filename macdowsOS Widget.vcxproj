@@ -38,12 +38,12 @@
   </ImportGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="QtSettings">
     <QtInstall>6.11.1_msvc2022_64</QtInstall>
-    <QtModules>core;gui;widgets;network;opengl;openglwidgets</QtModules>
+    <QtModules>core;gui;widgets;network;opengl;openglwidgets;concurrent</QtModules>
     <QtBuildConfig>debug</QtBuildConfig>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="QtSettings">
     <QtInstall>6.11.1_msvc2022_64</QtInstall>
-    <QtModules>core;gui;widgets;network;opengl;openglwidgets</QtModules>
+    <QtModules>core;gui;widgets;network;opengl;openglwidgets;concurrent</QtModules>
     <QtBuildConfig>release</QtBuildConfig>
   </PropertyGroup>
   <Target Name="QtMsBuildNotFound" BeforeTargets="CustomBuild;ClCompile" Condition="!Exists('$(QtMsBuild)\qt.targets') or !Exists('$(QtMsBuild)\qt.props')">
@@ -61,7 +61,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <OutDir>$(ProjectDir)bin\$(Platform)\$(Configuration)\</OutDir>
+    <OutDir>$(ProjectDir)$(Platform)\$(Configuration)\</OutDir>
     <IntDir>$(ProjectDir)obj\$(Platform)\$(Configuration)\</IntDir>
     <TargetName>macdowsOSWidget</TargetName>
   </PropertyGroup>
@@ -118,14 +118,20 @@
     <ClCompile Include="src/widgets/batterywidget.cpp" />
     <ClCompile Include="src/ui/widgetlibrarydialog.cpp" />
     <ClCompile Include="src/rendering/liquidglasswidget.cpp" />
+    <ClCompile Include="src/rendering/nativewindows.cpp" />
+    <ClCompile Include="src/rendering/desktopcapture.cpp" />
     <ClCompile Include="third_party\QtGlassFlow\src\qtglassflowscene.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src/widgets/batterywidget.h" />
     <ClInclude Include="src/rendering/liquidglasswidget.h" />
+    <ClInclude Include="src/rendering/nativewindows.h" />
+    <ClInclude Include="src/rendering/desktopcapture.h" />
+    <ClInclude Include="src/rendering/responsivelayout.h" />
   </ItemGroup>
   <ItemGroup>
     <QtRcc Include="third_party\QtGlassFlow\src\shaders.qrc" />
+    <QtRcc Include="resources.qrc" />
   </ItemGroup>
   <ItemGroup>
     <QtMoc Include="third_party\QtGlassFlow\src\qtglassflowscene.h" />
@@ -133,6 +139,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="README.md" />
+    <None Include="pingfang0.ttf" />
     <None Include="third_party\QtGlassFlow\src\shaders\scene_vertex.glsl" />
     <None Include="third_party\QtGlassFlow\src\shaders\scene_fragment.glsl" />
     <None Include="third_party\QtGlassFlow\src\shaders\blur_vertex.glsl" />

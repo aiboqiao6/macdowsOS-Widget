@@ -1,29 +1,37 @@
 #include "ui/widgetlibrarydialog.h"
+#include "widgets/batterywidget.h"
+#include "rendering/responsivelayout.h"
 
 #include <QApplication>
 #include <QCursor>
-#include <QDrag>
+#include <QKeyEvent>
 #include <QFontMetrics>
 #include <QFrame>
 #include <QGridLayout>
 #include <QGuiApplication>
+#include <QHash>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMimeData>
 #include <QMouseEvent>
+#include <QOperatingSystemVersion>
 #include <QPainter>
 #include <QPixmap>
 #include <QPainterPath>
 #include <QPropertyAnimation>
 #include <QPushButton>
+#include <QRandomGenerator>
 #include <QResizeEvent>
 #include <QScreen>
 #include <QScrollArea>
+#include <QSet>
+#include <QStyle>
 #include <QSizePolicy>
 #include <QSettings>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <algorithm>
 
 #ifdef Q_OS_WIN
 #  ifndef NOMINMAX
@@ -34,19 +42,81 @@
 
 namespace {
 
+QIcon makeNavIcon(int category)
+{
+    QPixmap pixmap(30, 30);
+    pixmap.fill(Qt::transparent);
+    QPainter p(&pixmap);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    const QRectF canvas = QRectF(pixmap.rect()).adjusted(3, 3, -3, -3);
+    const ResponsiveLayout::Metrics metrics(canvas);
+    const QColor ink = category == 1 ? QColor(111, 232, 157, 245)
+                      : category == 2 ? QColor(122, 194, 255, 245)
+                      : category == 3 ? QColor(220, 229, 244, 245)
+                      : category == 4 ? QColor(229, 157, 245, 245)
+                                      : QColor(198, 185, 255, 245);
+    p.setPen(QPen(ink, metrics.stroke(p, .075), Qt::SolidLine,
+                  Qt::RoundCap, Qt::RoundJoin));
+    p.setBrush(Qt::NoBrush);
+    if (category == 1) {
+        p.drawRoundedRect(metrics.rect(.16, .30, .62, .40), metrics.size(.08), metrics.size(.08));
+        p.drawLine(metrics.point(.78, .42), metrics.point(.88, .42));
+        p.drawLine(metrics.point(.78, .58), metrics.point(.88, .58));
+    } else if (category == 2) {
+        p.drawArc(metrics.rect(.20, .38, .40, .34), 35 * 16, 250 * 16);
+        p.drawArc(metrics.rect(.42, .27, .38, .45), 120 * 16, 220 * 16);
+        p.drawLine(metrics.point(.18, .72), metrics.point(.84, .72));
+        p.drawLine(metrics.point(.28, .82), metrics.point(.72, .82));
+    } else if (category == 3) {
+        p.drawEllipse(metrics.rect(.15, .15, .70, .70));
+        p.drawLine(metrics.point(.50, .50), metrics.point(.50, .29));
+        p.drawLine(metrics.point(.50, .50), metrics.point(.67, .61));
+    } else if (category == 4) {
+        p.drawLine(metrics.point(.17, .27), metrics.point(.50, .43));
+        p.drawLine(metrics.point(.83, .27), metrics.point(.50, .43));
+        p.drawLine(metrics.point(.17, .27), metrics.point(.17, .73));
+        p.drawLine(metrics.point(.83, .27), metrics.point(.83, .73));
+        p.drawLine(metrics.point(.17, .73), metrics.point(.50, .57));
+        p.drawLine(metrics.point(.83, .73), metrics.point(.50, .57));
+    } else {
+        p.drawRoundedRect(metrics.rect(.16, .16, .28, .28), 2, 2);
+        p.drawRoundedRect(metrics.rect(.56, .16, .28, .28), 2, 2);
+        p.drawRoundedRect(metrics.rect(.16, .56, .28, .28), 2, 2);
+        p.drawRoundedRect(metrics.rect(.56, .56, .28, .28), 2, 2);
+    }
+    p.end();
+    return QIcon(pixmap);
+}
+
+QHash<QString, QImage>& previewCache()
+{
+    static QHash<QString, QImage> cache;
+    return cache;
+}
+
 class DragTile final : public QFrame
 {
 public:
     DragTile(const QString& title, const QString& subtitle, int kind,
-             WidgetLibraryDialog* owner)
-        : QFrame(owner), m_title(title), m_subtitle(subtitle), m_kind(kind), m_owner(owner)
+             int variant, int category, WidgetLibraryDialog* owner)
+        : QFrame(owner), m_title(title), m_subtitle(subtitle), m_kind(kind),
+          m_variant(variant), m_category(category), m_owner(owner)
     {
         setObjectName(QStringLiteral("widgetTile"));
         setProperty("tileTitle", title);
-        setFixedSize(184, 148);
+        setFixedSize(220, 176);
         setAttribute(Qt::WA_Hover, true);
         setCursor(Qt::OpenHandCursor);
         m_press = QPoint(-1, -1);
+        // Rendering the real widget is deliberately done before the tile can
+        // receive paint events; QWidget::render() is not re-entrant from a
+        // paintEvent. The cached image is then a pure draw operation below.
+        const QSize previewSize(204, 128);
+        const QString key = QStringLiteral("%1:%2:%3x%4")
+            .arg(m_kind).arg(m_variant).arg(previewSize.width()).arg(previewSize.height());
+        if (!previewCache().contains(key))
+            previewCache().insert(key, BatteryWidget::renderPreview(
+                static_cast<BatteryWidget::CardKind>(m_kind), m_variant, previewSize));
     }
 
 protected:
@@ -54,96 +124,215 @@ protected:
     {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
-        const QRectF card = QRectF(rect()).adjusted(1, 1, -1, -1);
-        const bool hovered = underMouse();
-        // Match the actual desktop cards: translucent neutral glass, one
-        // restrained rim, and no opaque black preview panel inside it.
-        QLinearGradient surface(card.topLeft(), card.bottomRight());
-        surface.setColorAt(0.0, hovered ? QColor(255, 255, 255, 54)
-                                        : QColor(255, 255, 255, 28));
-        surface.setColorAt(0.52, QColor(130, 164, 210, 18));
-        surface.setColorAt(1.0, QColor(8, 16, 28, 58));
-        p.setPen(QPen(hovered ? QColor(230, 243, 255, 160)
-                              : QColor(255, 255, 255, 82), 1));
-        p.setBrush(surface);
-        p.drawRoundedRect(card, 18, 18);
-
-        const QRectF preview(12, 12, width() - 24, 83);
-
-        if (m_kind == 0) {
-            const QPointF c(preview.left() + 40, preview.center().y());
-            const qreal radius = 24.0;
-            p.setBrush(Qt::NoBrush);
-            p.setPen(QPen(QColor(225, 235, 249, 48), 5));
-            p.drawEllipse(c, radius, radius);
-            p.setPen(QPen(QColor(239, 244, 255, 218), 5));
-            p.drawArc(QRectF(c.x() - radius, c.y() - radius, radius * 2, radius * 2),
-                      90 * 16, -342 * 16);
-            p.setPen(QPen(QColor(230, 237, 248, 190), 1.5));
-            p.drawRoundedRect(QRectF(c.x() - 10, c.y() - 7, 20, 14), 2, 2);
-            p.drawLine(QPointF(c.x() - 14, c.y() + 10), QPointF(c.x() + 14, c.y() + 10));
-            p.setPen(QColor(246, 250, 255, 230));
-            p.setFont(QFont(QStringLiteral("Segoe UI"), 19, QFont::DemiBold));
-            p.drawText(preview.adjusted(75, 8, -4, -8), Qt::AlignVCenter,
-                       QStringLiteral("95%"));
-        } else if (m_kind == 1) {
-            p.setPen(QColor(250, 252, 255));
-            p.setFont(QFont(QStringLiteral("Segoe UI"), 25, QFont::DemiBold));
-            p.drawText(preview.adjusted(10, 2, 0, -12), Qt::AlignLeft | Qt::AlignVCenter,
-                       QStringLiteral("24°"));
-            p.setPen(QColor(165, 183, 207));
-            p.setFont(QFont(QStringLiteral("Segoe UI"), 10));
-            p.drawText(preview.adjusted(12, 50, 0, 0), Qt::AlignLeft | Qt::AlignVCenter,
-                       QStringLiteral("晴朗  ·  最高 28°"));
-            p.setPen(Qt::NoPen);
-            p.setBrush(QColor(255, 209, 83));
-            p.drawEllipse(QPointF(preview.right() - 28, preview.top() + 28), 10, 10);
-        } else if (m_kind == 2) {
-            const QPointF c(preview.center());
-            p.setBrush(QColor(246, 248, 250));
-            p.setPen(QPen(QColor(215, 220, 228), 2));
-            p.drawEllipse(c, 29, 29);
-            p.setPen(QPen(QColor(33, 39, 48), 2));
-            p.drawLine(c, c + QPointF(0, -18));
-            p.drawLine(c, c + QPointF(15, 11));
-            p.setBrush(QColor(33, 39, 48));
-            p.drawEllipse(c, 3, 3);
+        // The gallery itself owns the single liquid-glass surface. A tile is
+        // intentionally chrome-free so previews float directly on that pane,
+        // matching the reference: no second rounded card or duplicate rim.
+        const QRectF preview(8, 2, width() - 16, 128);
+        const ResponsiveLayout::Metrics previewMetrics(preview);
+        const QString previewKey = QStringLiteral("%1:%2:%3x%4")
+            .arg(m_kind).arg(m_variant).arg(qRound(preview.width())).arg(qRound(preview.height()));
+        const QImage actualPreview = previewCache().value(previewKey);
+        if (!actualPreview.isNull()) {
+            ResponsiveLayout::drawImageFitted(p, preview, actualPreview);
         } else {
-            p.setPen(QColor(255, 255, 255, 235));
-            p.setFont(QFont(QStringLiteral("Segoe UI"), 16, QFont::DemiBold));
-            p.drawText(preview.adjusted(14, 8, -10, -8), Qt::AlignLeft | Qt::AlignTop,
-                       QStringLiteral("random word"));
-            p.setPen(QColor(160, 177, 202));
-            p.setFont(QFont(QStringLiteral("Segoe UI"), 9));
-            p.drawText(preview.adjusted(14, 35, -10, -8), Qt::AlignLeft | Qt::AlignTop,
-                       QStringLiteral("online dictionary"));
-            p.setPen(QColor(114, 173, 255));
-            p.drawLine(preview.left() + 14, preview.bottom() - 16,
-                       preview.left() + 86, preview.bottom() - 16);
+        const auto text = [&p](const QRectF& r, const QString& value, int size,
+                               const QColor& color, QFont::Weight weight = QFont::Normal,
+                               Qt::Alignment align = Qt::AlignCenter) {
+            QFont font = qApp->font();
+            font.setPixelSize(size);
+            font.setWeight(weight);
+            font.setStyleStrategy(static_cast<QFont::StyleStrategy>(QFont::PreferAntialias | QFont::PreferQuality));
+            font.setHintingPreference(QFont::PreferFullHinting);
+            p.setPen(color); p.setFont(font);
+            ResponsiveLayout::drawSingleLine(p, r, align, value);
+        };
+        const auto ring = [&p](const QPointF& c, qreal radius, int percent) {
+            const QRectF bounds(c.x() - radius, c.y() - radius,
+                                radius * 2.0, radius * 2.0);
+            const ResponsiveLayout::Metrics metrics(bounds);
+            const qreal stroke = metrics.stroke(p, .12);
+            p.setBrush(Qt::NoBrush);
+            p.setPen(QPen(QColor(235,244,255,55), stroke));
+            p.drawEllipse(c, radius, radius);
+            p.setPen(QPen(QColor(255,255,255,235), stroke));
+            p.drawArc(bounds, 90 * 16, -qRound(percent * 3.6) * 16);
+        };
+        const auto clock = [&p](const QPointF& c, qreal radius, bool dark) {
+            const QRectF bounds(c.x() - radius, c.y() - radius,
+                                radius * 2.0, radius * 2.0);
+            const ResponsiveLayout::Metrics metrics(bounds);
+            p.setBrush(dark ? QColor(30,34,42,238) : QColor(248,249,251,242));
+            p.setPen(QPen(dark ? QColor(255,255,255,55) : QColor(205,211,220,220),
+                          metrics.stroke(p, .014)));
+            p.drawEllipse(c,radius,radius);
+            p.setPen(QPen(dark ? QColor(238,243,250,235) : QColor(56,62,72,200),
+                          metrics.stroke(p, .018)));
+            for(int i=0;i<12;++i){ const qreal a=i*M_PI/6-M_PI/2; p.drawLine(c+QPointF(std::cos(a),std::sin(a))*(radius*.70),c+QPointF(std::cos(a),std::sin(a))*(radius*.88)); }
+            p.drawLine(c,c+QPointF(0,-radius*.45)); p.drawLine(c,c+QPointF(radius*.35,radius*.2));
+            p.setBrush(QColor(247,170,119,235)); p.drawEllipse(c,2.5,2.5);
+        };
+        if (m_kind == 0) {
+            if (m_variant == 1) { for(int i=0;i<3;++i) ring(QPointF(preview.left()+40+i*64,preview.center().y()-3),21,95-i*17); text(preview.adjusted(0,82,0,-2),QStringLiteral("已连接设备"),9,QColor(200,215,237,190)); }
+            else if (m_variant == 2) {
+                const QRectF list = preview.adjusted(26, 17, -26, -14);
+                const auto listRow = [&p, &text](const QRectF& area, const QString& name,
+                                                  const QString& value, bool mouse) {
+                    const ResponsiveLayout::Metrics rowMetrics(area);
+                    p.setPen(QPen(QColor(241, 247, 255, 215),
+                                  rowMetrics.stroke(p, .018)));
+                    p.setBrush(Qt::NoBrush);
+                    if (!mouse) {
+                        p.drawRoundedRect(QRectF(area.left(), area.center().y() - 4, 11, 8), 1, 1);
+                        p.drawLine(QPointF(area.left() - 2, area.center().y() + 6),
+                                   QPointF(area.left() + 13, area.center().y() + 6));
+                    } else {
+                        p.drawRoundedRect(QRectF(area.left() + 1, area.center().y() - 6, 8, 13), 3, 3);
+                        p.drawLine(QPointF(area.left() + 5, area.center().y() - 4),
+                                   QPointF(area.left() + 5, area.center().y() - 1));
+                    }
+                    text(QRectF(area.left() + 20, area.top(), area.width() - 76, area.height()), name, 8,
+                         QColor(246, 250, 255, 225), QFont::DemiBold, Qt::AlignLeft | Qt::AlignVCenter);
+                    text(QRectF(area.right() - 45, area.top(), 26, area.height()), value, 8,
+                         QColor(246, 250, 255, 225), QFont::Normal, Qt::AlignRight | Qt::AlignVCenter);
+                    p.setPen(QPen(QColor(255, 255, 255, 235),
+                                  rowMetrics.stroke(p, .018)));
+                    p.drawRoundedRect(QRectF(area.right() - 15, area.center().y() - 2.5, 10, 5), 1.5, 1.5);
+                    p.drawLine(QPointF(area.right() - 4, area.center().y() - 1),
+                               QPointF(area.right() - 2, area.center().y() - 1));
+                };
+                listRow(QRectF(list.left(), list.top(), list.width(), 29), QStringLiteral("本机"), QStringLiteral("—"), false);
+                ResponsiveLayout::drawLine(
+                    p, previewMetrics,
+                    QPointF(list.left(), list.top() + list.height() * .36),
+                    QPointF(list.right(), list.top() + list.height() * .36),
+                    QColor(255,255,255,38), .008, Qt::FlatCap);
+                listRow(QRectF(list.left(), list.top()+42, list.width(), 29), QStringLiteral("已连接设备"), QStringLiteral("—"), true);
+            }
+            else { p.setPen(QPen(QColor(225,235,247,195),2)); p.setBrush(QColor(225,235,247,48)); p.drawRoundedRect(QRectF(preview.left()+22,preview.top()+31,72,36),8,8); text(preview.adjusted(104,22,-8,-27),QStringLiteral("95%"),28,QColor(248,252,255,240),QFont::DemiBold); text(preview.adjusted(104,68,-8,-7),QStringLiteral("电池电量"),10,QColor(174,190,214,205)); }
+        } else if (m_kind == 1) {
+            text(QRectF(preview.left() + 10, preview.top() + 4, 100, 20),
+                 QStringLiteral("实时地区"), 9, QColor(226, 234, 246, 220),
+                 QFont::DemiBold, Qt::AlignLeft | Qt::AlignVCenter);
+            text(QRectF(preview.left() + 10, preview.top() + 25, 92, 46),
+                 QStringLiteral("--°"), 28, QColor(250, 252, 255, 242),
+                 QFont::Normal, Qt::AlignLeft | Qt::AlignVCenter);
+            p.setPen(QPen(QColor(244, 247, 251, 225), 1.4));
+            p.setBrush(QColor(244, 247, 251, 225));
+            p.drawEllipse(QPointF(preview.right() - 39, preview.top() + 36), 7, 7);
+            p.drawRoundedRect(QRectF(preview.right() - 61, preview.top() + 43, 43, 15), 7, 7);
+            if (m_variant == 1) {
+                for (int i = 0; i < 6; ++i) {
+                    const qreal x = preview.left() + 18 + i * 34;
+                    text(QRectF(x - 13, preview.top() + 76, 26, 15),
+                         QStringLiteral("时"), 7, QColor(185, 197, 217, 195));
+                    p.drawEllipse(QPointF(x, preview.top() + 99), 5, 3.5);
+                    text(QRectF(x - 13, preview.top() + 106, 26, 14),
+                         QStringLiteral("--°"), 7, QColor(226, 233, 245, 215));
+                }
+            } else if (m_variant == 2) {
+                ResponsiveLayout::drawLine(
+                    p, previewMetrics,
+                    QPointF(preview.left() + preview.width() * .05,
+                            preview.top() + preview.height() * .55),
+                    QPointF(preview.right() - preview.width() * .05,
+                            preview.top() + preview.height() * .55),
+                    QColor(255, 255, 255, 42), .008, Qt::FlatCap);
+                for (int i = 0; i < 3; ++i) {
+                    text(QRectF(preview.left() + 10, preview.top() + 76 + i * 17, 42, 14),
+                         QStringLiteral("周%1").arg(i + 3), 7,
+                         QColor(207, 216, 231, 205), QFont::DemiBold,
+                         Qt::AlignLeft | Qt::AlignVCenter);
+                    p.setPen(QPen(QColor(235, 240, 248, 150),
+                                  previewMetrics.stroke(p, .017),
+                                  Qt::SolidLine, Qt::RoundCap));
+                    p.drawLine(preview.left() + 75, preview.top() + 83 + i * 17,
+                               preview.right() - 34, preview.top() + 83 + i * 17);
+                }
+            } else {
+                text(QRectF(preview.left() + 10, preview.bottom() - 30,
+                            preview.width() - 20, 18), QStringLiteral("最高 --°   最低 --°"),
+                     8, QColor(190, 202, 222, 200), QFont::Normal,
+                     Qt::AlignLeft | Qt::AlignVCenter);
+            }
+        } else if (m_kind == 2) {
+            if (m_variant == 2 || m_variant == 8) { text(preview.adjusted(18,24,-18,-39),QStringLiteral("05:52"),25,QColor(246,249,255,238),QFont::DemiBold); text(preview.adjusted(18,78,-18,-3),QStringLiteral("数字时钟"),9,QColor(220,229,244,220)); }
+            else if (m_variant==5 || m_variant==6) { const int count=m_variant==5?4:3, cols=m_variant==5?2:3; const qreal r=m_variant==5?20:23; for(int i=0;i<count;++i) clock(QPointF(preview.left()+47+(i%cols)*63,preview.top()+36+(i/cols)*58),r,true); }
+            else { clock(preview.center()+QPointF(0,-3),41,m_variant==1||m_variant==4); if(m_variant==3||m_variant==4) text(QRectF(preview.left(),preview.bottom()-21,preview.width(),18),m_variant==3?QStringLiteral("北京时间"):QStringLiteral("城市 I"),9,QColor(190,205,226,205)); }
+        } else {
+            text(preview.adjusted(16,12,-12,-43),m_variant==1?QStringLiteral("serendipity"):QStringLiteral("wander"),m_variant==1?24:20,QColor(250,252,255,238),QFont::DemiBold,Qt::AlignLeft|Qt::AlignVCenter); text(preview.adjusted(16,69,-12,-9),m_variant==1?QStringLiteral("n. chance discovery"):QStringLiteral("每日单词"),9,QColor(178,195,220,205),QFont::Normal,Qt::AlignLeft|Qt::AlignVCenter); p.setPen(QPen(QColor(116,174,255,210),2)); p.drawLine(preview.left()+16,preview.bottom()-12,preview.left()+88,preview.bottom()-12);
+        }
         }
 
         p.setPen(QColor(247, 249, 253));
-        p.setFont(QFont(QStringLiteral("Segoe UI"), 13, QFont::DemiBold));
-        p.drawText(QRectF(14, 101, width() - 28, 20), Qt::AlignLeft | Qt::AlignVCenter,
-                   m_title);
+        QFont footerFont = qApp->font();
+        footerFont.setPixelSize(13);
+        footerFont.setWeight(QFont::DemiBold);
+        footerFont.setStyleStrategy(static_cast<QFont::StyleStrategy>(QFont::PreferAntialias | QFont::PreferQuality));
+        footerFont.setHintingPreference(QFont::PreferFullHinting);
+        p.setFont(footerFont);
+        ResponsiveLayout::drawSingleLine(p, QRectF(10, 134, width() - 20, 20),
+                                   Qt::AlignCenter | Qt::AlignVCenter, m_title);
         p.setPen(QColor(173, 186, 207));
-        p.setFont(QFont(QStringLiteral("Segoe UI"), 9));
-        p.drawText(QRectF(14, 121, width() - 28, 17), Qt::AlignLeft | Qt::AlignVCenter,
-                   QFontMetrics(p.font()).elidedText(m_subtitle, Qt::ElideRight, width() - 28));
+        QFont subtitleFont = qApp->font();
+        subtitleFont.setPixelSize(9);
+        subtitleFont.setStyleStrategy(static_cast<QFont::StyleStrategy>(QFont::PreferAntialias | QFont::PreferQuality));
+        subtitleFont.setHintingPreference(QFont::PreferFullHinting);
+        p.setFont(subtitleFont);
+        ResponsiveLayout::drawSingleLine(
+            p, QRectF(10, 154, width() - 20, 17),
+            Qt::AlignCenter | Qt::AlignVCenter,
+            QFontMetrics(p.font()).elidedText(m_subtitle, Qt::ElideRight, width() - 28));
     }
 
     void mousePressEvent(QMouseEvent* event) override
     {
         if (event->button() == Qt::LeftButton) {
             m_press = event->pos();
+            m_dragging = false;
+            qApp->installEventFilter(this);
             setCursor(Qt::ClosedHandCursor);
+            event->accept();
+            return;
         }
         QFrame::mousePressEvent(event);
     }
 
+    void cancelDrag()
+    {
+        const bool wasDragging = m_dragging;
+        m_press = QPoint(-1, -1);
+        m_dragging = false;
+        qApp->removeEventFilter(this);
+        setCursor(Qt::OpenHandCursor);
+        if (wasDragging)
+            m_owner->notifyWidgetDragFinished(m_kind * 100 + m_variant);
+        m_owner->notifyWidgetDragPreview(m_kind * 100 + m_variant, QCursor::pos(), false);
+    }
+
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (event->type() == QEvent::KeyPress
+            && static_cast<QKeyEvent*>(event)->key() == Qt::Key_Escape) {
+            cancelDrag();
+            return true;
+        }
+        if (event->type() == QEvent::ApplicationDeactivate
+            || (watched == this && event->type() == QEvent::UngrabMouse))
+            cancelDrag();
+        return QFrame::eventFilter(watched, event);
+    }
+
     void mouseReleaseEvent(QMouseEvent* event) override
     {
-        setCursor(Qt::OpenHandCursor);
+        if (event->button() == Qt::LeftButton) {
+            const bool dropped = m_dragging && m_press.x() >= 0;
+            const QPoint position = event->globalPosition().toPoint();
+            cancelDrag();
+            if (dropped && !m_owner->geometry().contains(position))
+                m_owner->notifyWidgetDropped(m_kind * 100 + m_variant, position);
+            event->accept();
+            return;
+        }
         QFrame::mouseReleaseEvent(event);
     }
 
@@ -153,65 +342,25 @@ protected:
             QFrame::mouseMoveEvent(event);
             return;
         }
-        if ((event->pos() - m_press).manhattanLength() < QApplication::startDragDistance())
+        if (!m_dragging && (event->pos() - m_press).manhattanLength() < QApplication::startDragDistance())
             return;
-
-        QDrag drag(this);
-        auto* mime = new QMimeData;
-        mime->setData(QStringLiteral("application/x-macdows-widget-kind"),
-                      QByteArray::number(m_kind));
-        drag.setMimeData(mime);
-        QPixmap dragPixmap(132, 96);
-        dragPixmap.fill(Qt::transparent);
-        QPainter painter(&dragPixmap);
-        painter.setRenderHint(QPainter::Antialiasing);
-        painter.setBrush(QColor(17, 23, 32, 235));
-        painter.setPen(QPen(QColor(255, 255, 255, 95), 1));
-        painter.drawRoundedRect(dragPixmap.rect().adjusted(1, 1, -1, -1), 16, 16);
-        painter.setPen(Qt::white);
-        painter.setFont(QFont(QStringLiteral("Segoe UI"), 14, QFont::DemiBold));
-        painter.drawText(dragPixmap.rect(), Qt::AlignCenter, m_title);
-        drag.setPixmap(dragPixmap);
-        drag.setHotSpot(QPoint(dragPixmap.width() / 2, dragPixmap.height() / 2));
-
-        QTimer previewTimer;
-        previewTimer.setTimerType(Qt::PreciseTimer);
-        previewTimer.setInterval(16);
-        const auto updatePreview = [this]() {
-            const QPoint cursor = QCursor::pos();
-            const bool outsideLibrary = !m_owner->geometry().contains(cursor);
-            // The drag loop can wake at 60 Hz even when the pointer is
-            // stationary. Avoid repeating grid occupancy searches and overlay
-            // repaints until the cursor actually enters a new cell.
-            if (cursor == m_lastPreviewCursor
-                && outsideLibrary == m_lastPreviewOutside)
-                return;
-            m_lastPreviewCursor = cursor;
-            m_lastPreviewOutside = outsideLibrary;
-            m_owner->notifyWidgetDragPreview(m_kind, cursor, outsideLibrary);
-        };
-        QObject::connect(&previewTimer, &QTimer::timeout, m_owner, updatePreview);
-        updatePreview();
-        previewTimer.start();
-        drag.exec(Qt::CopyAction);
-        previewTimer.stop();
-        m_lastPreviewCursor = QPoint(-1, -1);
-        m_lastPreviewOutside = false;
-        m_owner->notifyWidgetDragPreview(m_kind, QCursor::pos(), false);
-
-        const QPoint globalPos = QCursor::pos();
-        if (!m_owner->geometry().contains(globalPos))
-            m_owner->notifyWidgetDropped(m_kind, globalPos);
-        m_press = QPoint(-1, -1);
+        if (!m_dragging) {
+            m_dragging = true;
+            m_owner->notifyWidgetDragStarted(m_kind * 100 + m_variant);
+        }
+        const QPoint position = event->globalPosition().toPoint();
+        m_owner->notifyWidgetDragPreview(m_kind * 100 + m_variant, position, !m_owner->geometry().contains(position));
+        event->accept();
     }
 
 private:
     QString m_title;
     QString m_subtitle;
     int m_kind = 0;
+    int m_variant = 0;
+    int m_category = -1;
     QPoint m_press;
-    QPoint m_lastPreviewCursor{-1, -1};
-    bool m_lastPreviewOutside = false;
+    bool m_dragging = false;
     WidgetLibraryDialog* m_owner = nullptr;
 };
 
@@ -224,6 +373,7 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     // Use the same QtGlassFlow surface as desktop cards, but keep this
     // interactive gallery above other windows rather than on the desktop
     // layer. Its backdrop is supplied explicitly by prepareBackdrop().
+    setPanelWindow();
     setDesktopLayerEnabled(false);
     setDesktopCaptureEnabled(false);
     setGlassMargins(0);
@@ -235,7 +385,6 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     // native window size while cutting FBO fill-rate and texture bandwidth by
     // about 27% compared with the shared 70% default.
     setRenderScale(0.60f);
-    setLowLatencyRenderingEnabled(true);
     setNoiseAmount(0.008f);
     setRefractionPower(1.32f);
     Qt::WindowFlags flags = windowFlags();
@@ -257,11 +406,9 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
             update();
         }
     });
-    m_liveBackdropTimer.setTimerType(Qt::PreciseTimer);
-    // Keep the backdrop source live at the same 60 Hz cadence as the glass
-    // compositor. The expensive full-size conversion is avoided below by
-    // capturing one fixed canvas and reducing it before the texture upload.
-    m_liveBackdropTimer.setInterval(16);
+    m_liveBackdropTimer.setTimerType(Qt::CoarseTimer);
+    // Live captures run independently of the short panel animation.
+    m_liveBackdropTimer.setInterval(50);
     connect(&m_liveBackdropTimer, &QTimer::timeout,
             this, &WidgetLibraryDialog::refreshBackdrop);
     setAttribute(Qt::WA_TranslucentBackground, true);
@@ -271,7 +418,7 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     // LiquidGlassWidget uses a compact default size for desktop cards.  The
     // gallery is a larger surface, so clear that inherited maximum constraint.
     setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
-    setMinimumSize(900, 560);
+    setMinimumSize(320, 240);
     resize(1180, 720);
     setStyleSheet(QStringLiteral(
         "WidgetLibraryDialog { background:transparent; color:#f7f9fd; border:0; }"
@@ -302,28 +449,43 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     bodyLayout->setSpacing(0);
 
     auto* sidebar = new QFrame(body);
+    m_sidebar = sidebar;
     sidebar->setObjectName(QStringLiteral("sidebar"));
     sidebar->setFixedWidth(270);
     auto* sideLayout = new QVBoxLayout(sidebar);
     sideLayout->setContentsMargins(18, 22, 16, 18);
     sideLayout->setSpacing(5);
 
-    // The library currently exposes one category only. Keep the label text
-    // but remove the unused navigation icons and placeholder categories so
-    // the left rail does not compete with the actual widget previews.
-    auto* allWidgets = new QPushButton(QStringLiteral("所有小组件"), sidebar);
-    allWidgets->setObjectName(QStringLiteral("navSelected"));
-    allWidgets->setCursor(Qt::PointingHandCursor);
-    allWidgets->setFlat(true);
-    allWidgets->setFixedHeight(39);
-    allWidgets->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    allWidgets->setProperty("navText", QStringLiteral("所有小组件"));
-    allWidgets->setStyleSheet(QStringLiteral(
-        "QPushButton { text-align:left; border:0; border-radius:12px; "
-        "padding-left:12px; color:#ffffff; background:rgba(255,255,255,104); "
-        "font-size:13px; font-weight:600; }"));
-    sideLayout->addWidget(allWidgets);
+    auto* search = new QLineEdit(sidebar);
+    m_search = search;
+    search->setPlaceholderText(QStringLiteral("搜索小组件"));
+    search->setClearButtonEnabled(true);
+    search->setFixedHeight(36);
+    search->setStyleSheet(QStringLiteral(
+        "QLineEdit { border:1px solid rgba(255,255,255,75); border-radius:18px; "
+        "padding:0 12px; color:#f7fbff; background:rgba(238,246,253,54); font-size:13px; }"
+        "QLineEdit:focus { border:1px solid rgba(255,255,255,145); background:rgba(238,246,253,74); }"));
+    sideLayout->addWidget(search);
+
+    const QStringList navLabels = { QStringLiteral("所有小组件"), QStringLiteral("电池"),
+                                     QStringLiteral("天气"), QStringLiteral("时钟"),
+                                     QStringLiteral("词典") };
+    for (int i = 0; i < navLabels.size(); ++i) {
+        auto* button = new QPushButton(navLabels.at(i), sidebar);
+        button->setObjectName(i == 0 ? QStringLiteral("navSelected") : QStringLiteral("navButton"));
+        button->setCursor(Qt::PointingHandCursor);
+        button->setFlat(true);
+        button->setFixedHeight(39);
+        button->setIcon(makeNavIcon(i));
+        button->setIconSize(QSize(27, 27));
+        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        button->setProperty("navCategory", i);
+        m_navButtons.append(button);
+        sideLayout->addWidget(button);
+        connect(button, &QPushButton::clicked, this, [this, i]() { selectCategory(i); });
+    }
     sideLayout->addStretch(1);
+    connect(search, &QLineEdit::textChanged, this, &WidgetLibraryDialog::applyTileFilter);
 
     auto* content = new QWidget(body);
     content->setAttribute(Qt::WA_TranslucentBackground);
@@ -332,7 +494,8 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     auto* contentLayout = new QVBoxLayout(content);
     contentLayout->setContentsMargins(30, 23, 25, 12);
     contentLayout->setSpacing(12);
-    auto* sectionTitle = new QLabel(QStringLiteral("建议"), content);
+    auto* sectionTitle = new QLabel(QStringLiteral("推荐"), content);
+    m_sectionTitle = sectionTitle;
     sectionTitle->setObjectName(QStringLiteral("sectionTitle"));
     contentLayout->addWidget(sectionTitle);
 
@@ -343,20 +506,32 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     auto* scrollHost = new QWidget(scroll);
     scrollHost->setAttribute(Qt::WA_TranslucentBackground);
     auto* tileLayout = new QGridLayout(scrollHost);
+    m_tileLayout = tileLayout;
     tileLayout->setContentsMargins(0, 0, 0, 12);
     tileLayout->setHorizontalSpacing(14);
     tileLayout->setVerticalSpacing(14);
     const auto addTile = [this, tileLayout](const QString& title, const QString& subtitle,
-                                            int kind, int row, int col) {
-        auto* tile = new DragTile(title, subtitle, kind, this);
+                                             int kind, int variant, int category) {
+        auto* tile = new DragTile(title, subtitle, kind, variant, category, this);
+        tile->setProperty("tileKind", kind);
+        tile->setProperty("tileVariant", variant);
+        tile->setProperty("tileCategory", category);
+        tile->setProperty("tileSearch", (title + QStringLiteral(" ") + subtitle).toLower());
         m_tiles.append(tile);
-        tileLayout->addWidget(tile, row, col);
     };
-    addTile(QStringLiteral("电池"), QStringLiteral("电量"), 0, 0, 0);
-    addTile(QStringLiteral("天气"), QStringLiteral("温度与天气"), 1, 0, 1);
-    addTile(QStringLiteral("时钟"), QStringLiteral("当前时间"), 2, 0, 2);
-    addTile(QStringLiteral("词典"), QStringLiteral("每日单词"), 3, 0, 3);
-    tileLayout->setColumnStretch(4, 1);
+    addTile(QStringLiteral("状态"), QStringLiteral("查看 Mac 和已连接的蓝牙配件的状态。"), 0, 0, 1);
+    addTile(QStringLiteral("状态"), QStringLiteral("查看 Mac 和已连接的蓝牙配件的状态。"), 0, 1, 1);
+    addTile(QStringLiteral("状态"), QStringLiteral("查看 Mac 和已连接的蓝牙配件的状态。"), 0, 2, 1);
+    addTile(QStringLiteral("天气 · 紧凑"), QStringLiteral("温度与天气"), 1, 0, 2);
+    addTile(QStringLiteral("天气 · 详细"), QStringLiteral("地点与状态"), 1, 1, 2);
+    addTile(QStringLiteral("天气 · 预报"), QStringLiteral("最高与最低温度"), 1, 2, 2);
+    addTile(QStringLiteral("数字时钟"), QStringLiteral("显示当前时间"), 2, 2, 3);
+    addTile(QStringLiteral("时钟 I"), QStringLiteral("显示当前时间"), 2, 0, 3);
+    addTile(QStringLiteral("数字时钟 · 横向"), QStringLiteral("2×1 显示当前时间"), 2, 8, 3);
+    addTile(QStringLiteral("每日单词"), QStringLiteral("随机单词与释义"), 3, 0, 4);
+    addTile(QStringLiteral("词典详情"), QStringLiteral("单词、音标与释义"), 3, 1, 4);
+    addTile(QStringLiteral("词典卡片"), QStringLiteral("轻量词汇提醒"), 3, 2, 4);
+    tileLayout->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     scroll->setWidget(scrollHost);
     contentLayout->addWidget(scroll, 1);
     bodyLayout->addWidget(sidebar);
@@ -379,13 +554,93 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     root->addWidget(footer);
     connect(done, &QPushButton::clicked, this, &WidgetLibraryDialog::closeGallery);
 
+    randomizeRecommendations();
+    applyTileFilter();
+
+}
+
+void WidgetLibraryDialog::randomizeRecommendations()
+{
+    m_recommendedTiles.clear();
+    if (m_tiles.isEmpty())
+        return;
+    // Keep the landing page varied while retaining a useful mix of categories.
+    QList<int> candidates;
+    for (int i = 0; i < m_tiles.size(); ++i)
+        candidates.append(i);
+    for (int i = candidates.size() - 1; i > 0; --i) {
+        const int j = int(QRandomGenerator::global()->bounded(i + 1));
+        candidates.swapItemsAt(i, j);
+    }
+    QSet<int> categories;
+    for (int index : candidates) {
+        const int category = m_tiles.at(index)->property("tileCategory").toInt();
+        if (categories.size() < 4 && categories.contains(category))
+            continue;
+        m_recommendedTiles.append(index);
+        categories.insert(category);
+        if (m_recommendedTiles.size() == 6)
+            break;
+    }
+    for (int index : candidates) {
+        if (m_recommendedTiles.size() == 6)
+            break;
+        if (!m_recommendedTiles.contains(index))
+            m_recommendedTiles.append(index);
+    }
+}
+
+void WidgetLibraryDialog::selectCategory(int category)
+{
+    m_selectedCategory = category == 0 ? -1 : category;
+    for (int i = 0; i < m_navButtons.size(); ++i) {
+        auto* button = m_navButtons.at(i);
+        button->setObjectName(i == category ? QStringLiteral("navSelected")
+                                            : QStringLiteral("navButton"));
+        button->style()->unpolish(button);
+        button->style()->polish(button);
+    }
+    if (m_sectionTitle)
+        m_sectionTitle->setText(category == 0 ? QStringLiteral("推荐")
+                                              : (category == 1 ? QStringLiteral("电池")
+                                                 : category == 2 ? QStringLiteral("天气")
+                                                    : category == 3 ? QStringLiteral("时钟")
+                                                                    : QStringLiteral("词典")));
+    if (category == 0)
+        randomizeRecommendations();
+    applyTileFilter();
+}
+
+void WidgetLibraryDialog::applyTileFilter()
+{
+    if (!m_tileLayout)
+        return;
+    const QString query = m_search ? m_search->text().trimmed().toLower() : QString();
+    QList<QFrame*> visible;
+    for (int i = 0; i < m_tiles.size(); ++i) {
+        QFrame* tile = m_tiles.at(i);
+        const int category = tile->property("tileCategory").toInt();
+        const bool categoryMatch = m_selectedCategory < 0
+            ? m_recommendedTiles.contains(i)
+            : category == m_selectedCategory;
+        const bool queryMatch = query.isEmpty()
+            || tile->property("tileSearch").toString().contains(query);
+        tile->setVisible(categoryMatch && queryMatch);
+        if (categoryMatch && queryMatch)
+            visible.append(tile);
+        m_tileLayout->removeWidget(tile);
+    }
+    const int sidebarWidth = width() < 650 ? 0 : qMin(270, width() / 4);
+    const int columns = qBound(1, (width() - sidebarWidth - 55 + 14) / 234, 4);
+    m_tileColumns = columns;
+    for (int i = 0; i < visible.size(); ++i)
+        m_tileLayout->addWidget(visible.at(i), i / columns, i % columns);
+    m_tileLayout->setAlignment(Qt::AlignLeft | Qt::AlignTop);
 }
 
 void WidgetLibraryDialog::mousePressEvent(QMouseEvent* event)
 {
-    // The gallery itself is not a draggable desktop card. Child tiles handle
-    // their own real QDrag operation; clicks on empty/background areas should
-    // never move the whole window.
+    // Child tiles handle mouse capture; the gallery background stays fixed.
     event->accept();
 }
 
@@ -399,8 +654,22 @@ void WidgetLibraryDialog::mouseReleaseEvent(QMouseEvent* event)
     event->accept();
 }
 
+bool WidgetLibraryDialog::event(QEvent* event)
+{
+    // The gallery is a transient chooser. Clicking another application (or
+    // another top-level window) deactivates it; close immediately instead of
+    // leaving a topmost panel stranded on screen.
+    if (event->type() == QEvent::WindowDeactivate && !m_closing) {
+        closeGallery();
+        return true;
+    }
+    return LiquidGlassWidget::event(event);
+}
+
 void WidgetLibraryDialog::prepareBackdrop()
 {
+    selectCategory(0);
+    preparePanelOpening();
     QScreen* screen = QGuiApplication::screenAt(QCursor::pos());
     if (!screen)
         screen = QGuiApplication::primaryScreen();
@@ -408,8 +677,8 @@ void WidgetLibraryDialog::prepareBackdrop()
         return;
 
     const QRect area = screen->availableGeometry();
-    const int targetWidth = qMin(width(), qMax(1, area.width() - 32));
-    const int targetHeight = qMin(height(), qMax(1, area.height() - 32));
+    const int targetWidth = qMin(1180, qMax(1, area.width() - 32));
+    const int targetHeight = qMin(720, qMax(1, area.height() - 32));
     const int targetX = area.left() + (area.width() - targetWidth) / 2;
     const int targetY = area.bottom() - targetHeight - 8;
     m_backdropRect = QRect(targetX, targetY, targetWidth, targetHeight);
@@ -420,44 +689,47 @@ void WidgetLibraryDialog::prepareBackdrop()
                                   qMax(1, area.bottom() - targetY + 1));
     setGeometry(m_backdropRect);
 
-    // The gallery is hidden at this point. grabWindow(0) therefore captures
-    // the already-composited desktop, including editor/terminal windows, but
-    // cannot capture the gallery itself. QtGlassFlow performs the blur and
-    // refraction from this image using the same shader/FBO path as cards.
-    const QPixmap backdrop = screen->grabWindow(0,
-                                                m_backdropCaptureRect.x(),
-                                                m_backdropCaptureRect.y(),
-                                                m_backdropCaptureRect.width(),
-                                                m_backdropCaptureRect.height());
+    // The gallery is hidden at this point. Capture the already-composited
+    // desktop, including application windows and every visible desktop card;
+    // only the gallery itself is excluded when it is already native-visible.
+    QImage backdrop = captureDesktopComposite(screen, m_backdropCaptureRect, this, renderScale());
     if (!backdrop.isNull()) {
-        m_lastRawCapture = backdrop.toImage();
-        m_backdropCanvas = reducedCapture(m_lastRawCapture,
-                                          m_backdropCaptureRect.size());
+        m_backdropCanvas = std::move(backdrop);
         m_lastBackdropGeometry = QRect();
         updateBackdropFrame();
     }
+
+    // The native HWND must be mapped for the first time while it is already
+    // below the work area. Moving it from the final on-screen rectangle in
+    // showEvent() allows Windows to present one full-size frame before the
+    // slide animation starts, which is perceived as a bright flash.
+    setGeometry(QRect(targetX, area.bottom() + 2,
+                      targetWidth, targetHeight));
 }
 
-QImage WidgetLibraryDialog::reducedCapture(const QImage& source,
-                                            const QSize& logicalSize) const
+void WidgetLibraryDialog::resizeEvent(QResizeEvent* event)
 {
-    if (source.isNull() || logicalSize.isEmpty())
-        return {};
-    // QScreen::grabWindow may return logical or physical pixels depending on
-    // the Windows DPI-awareness mode. Derive the reduced target from the
-    // pixels actually returned instead of assuming the dialog's DPR (which is
-    // not reliable before the window is shown).
-    const QSize targetSize(qMax(1, qRound(source.width() * renderScale())),
-                           qMax(1, qRound(source.height() * renderScale())));
-    QImage image = source;
-    if (image.size() != targetSize) {
-        // The following multi-pass Gaussian blur removes the small sampling
-        // difference, so a fast reduction produces the same final material
-        // without paying for a full-resolution smooth scale first.
-        image = image.scaled(targetSize, Qt::IgnoreAspectRatio,
-                             Qt::FastTransformation);
+    LiquidGlassWidget::resizeEvent(event);
+    if (!m_tileLayout || !m_sidebar)
+        return;
+    const bool compact = width() < 650;
+    m_sidebar->setVisible(!compact);
+    const int sidebarWidth = compact ? 0 : qMin(270, width() / 4);
+    if (!compact)
+        m_sidebar->setFixedWidth(sidebarWidth);
+    const int columns = qBound(1, (width() - sidebarWidth - 55 + 14) / 234, 4);
+    if (columns == m_tileColumns)
+        return;
+    m_tileColumns = columns;
+    for (QFrame* tile : std::as_const(m_tiles))
+        m_tileLayout->removeWidget(tile);
+    int visibleIndex = 0;
+    for (QFrame* tile : std::as_const(m_tiles)) {
+        if (!tile->isVisible())
+            continue;
+        m_tileLayout->addWidget(tile, visibleIndex / columns, visibleIndex % columns);
+        ++visibleIndex;
     }
-    return image.convertToFormat(QImage::Format_RGBA8888);
 }
 
 void WidgetLibraryDialog::updateBackdropFrame()
@@ -525,69 +797,45 @@ void WidgetLibraryDialog::updateBackdropFrame()
     setBackgroundImage(m_lastBackdropImage);
 }
 
-void WidgetLibraryDialog::enableCaptureExclusion()
-{
-    m_captureExcluded = false;
-#ifdef Q_OS_WIN
-    // WDA_EXCLUDEFROMCAPTURE (0x11) keeps QScreen::grabWindow focused on the
-    // already-composited windows behind this panel instead of feeding the
-    // panel's own previous frame back into the liquid-glass texture.
-    const HWND window = reinterpret_cast<HWND>(winId());
-    if (window)
-        m_captureExcluded = SetWindowDisplayAffinity(window, 0x11) != FALSE;
-#endif
-}
-
 void WidgetLibraryDialog::refreshBackdrop()
 {
-    if (!isVisible() || !m_captureExcluded || m_backdropCaptureRect.isNull())
+    if (!isVisible() || m_backdropCaptureRect.isNull()
+        || m_capturePending)
         return;
-    // Always refresh the same animation canvas. Its current-window crop is
-    // updated independently at 60 Hz by m_renderTimer, avoiding a blocking
-    // desktop capture on every presentation frame.
-    QScreen* screen = QGuiApplication::screenAt(m_backdropCaptureRect.center());
-    if (!screen)
-        screen = QGuiApplication::primaryScreen();
-    if (!screen)
-        return;
-
-    const QPixmap backdrop = screen->grabWindow(0,
-                                                m_backdropCaptureRect.x(),
-                                                m_backdropCaptureRect.y(),
-                                                m_backdropCaptureRect.width(),
-                                                m_backdropCaptureRect.height());
-    if (!backdrop.isNull()) {
-        const QImage raw = backdrop.toImage();
-        // During a slide the same fixed canvas is sampled repeatedly. Avoid
-        // scaling and format conversion when the desktop pixels did not
-        // change; only the cheap local crop still needs to advance.
-        if (raw == m_lastRawCapture) {
-            updateBackdropFrame();
-            update();
+    const QRect area = m_backdropCaptureRect;
+    const quint64 generation = m_backdropGeneration;
+    m_capturePending = true;
+    requestDesktopComposite(area, [this, generation](QImage image) {
+        m_capturePending = false;
+        if (!isVisible() || generation != m_backdropGeneration || image.isNull())
             return;
-        }
-        m_lastRawCapture = raw;
-        const QImage image = reducedCapture(raw, m_backdropCaptureRect.size());
         if (image != m_backdropCanvas) {
-            m_backdropCanvas = image;
+            m_backdropCanvas = std::move(image);
             m_lastBackdropGeometry = QRect();
+            updateBackdropFrame();
         }
-        updateBackdropFrame();
-        update();
-    }
+    });
+}
+
+void WidgetLibraryDialog::hideEvent(QHideEvent* event)
+{
+    ++m_backdropGeneration;
+    m_renderTimer.stop();
+    m_liveBackdropTimer.stop();
+    if (m_slideAnimation)
+        m_slideAnimation->stop();
+    LiquidGlassWidget::hideEvent(event);
 }
 
 void WidgetLibraryDialog::showEvent(QShowEvent* event)
 {
     LiquidGlassWidget::showEvent(event);
     m_closing = false;
-    enableCaptureExclusion();
-    // Opening is a geometry animation. Keep both the scene and the backdrop
-    // sampler at 60 Hz only for this short interval so the glass tracks every
-    // animation frame without leaving a permanent high-frequency timer.
-    m_renderTimer.setTimerType(Qt::PreciseTimer);
-    m_renderTimer.setInterval(16);
-    m_renderTimer.start();
+    ++m_backdropGeneration;
+    // QPropertyAnimation already schedules geometry repaints. A second 60 Hz
+    // timer here duplicated updateBackdropFrame()/update() work and caused
+    // animation frames to queue behind texture uploads.
+    m_renderTimer.stop();
     // Reuse the prepared backdrop canvas during the slide; grabWindow is a
     // blocking desktop capture and causes visible animation stalls.
     m_liveBackdropTimer.stop();
@@ -601,8 +849,8 @@ void WidgetLibraryDialog::showEvent(QShowEvent* event)
         return;
 
     const QRect area = screen->availableGeometry();
-    const int targetWidth = qMin(width(), area.width() - 32);
-    const int targetHeight = qMin(height(), area.height() - 32);
+    const int targetWidth = qMax(1, qMin(width(), area.width() - 32));
+    const int targetHeight = qMax(1, qMin(height(), area.height() - 32));
     if (size() != QSize(targetWidth, targetHeight))
         resize(targetWidth, targetHeight);
 
@@ -620,13 +868,11 @@ void WidgetLibraryDialog::showEvent(QShowEvent* event)
                 m_liveBackdropTimer.stop();
                 hide();
             } else {
-                // Once the panel has settled, its shader is time-invariant and
-                // its backdrop is static. Keep only a coarse sampler for
-                // external desktop changes; repaint requests from search,
-                // hover and tile interaction remain event-driven.
+                // Stop animation wakeups once settled. The worker keeps the
+                // real backdrop live and only changed pixels trigger paint.
                 m_renderTimer.stop();
                 m_liveBackdropTimer.setTimerType(Qt::CoarseTimer);
-                m_liveBackdropTimer.setInterval(1000);
+                m_liveBackdropTimer.setInterval(50);
                 m_liveBackdropTimer.start();
             }
         });
@@ -697,12 +943,9 @@ void WidgetLibraryDialog::closeGallery()
     }
 
     m_closing = true;
-    // Closing must be rendered as a live glass surface, not as a cached final
-    // frame. Temporarily restore the animation cadence before moving the
-    // window so both geometry and the sampled backdrop advance together.
-    m_renderTimer.setTimerType(Qt::PreciseTimer);
-    m_renderTimer.setInterval(16);
-    m_renderTimer.start();
+    // The animation's valueChanged handler updates the crop and schedules the
+    // repaint. Avoid a duplicate timer while the panel slides away.
+    m_renderTimer.stop();
     // Reuse the prepared backdrop canvas during the slide; grabWindow is a
     // blocking desktop capture and causes visible animation stalls.
     m_liveBackdropTimer.stop();
@@ -714,6 +957,16 @@ void WidgetLibraryDialog::closeGallery()
 void WidgetLibraryDialog::notifyWidgetDropped(int kind, const QPoint& globalPos)
 {
     emit widgetDropped(kind, globalPos);
+}
+
+void WidgetLibraryDialog::notifyWidgetDragStarted(int kind)
+{
+    emit widgetDragStarted(kind);
+}
+
+void WidgetLibraryDialog::notifyWidgetDragFinished(int kind)
+{
+    emit widgetDragFinished(kind);
 }
 
 void WidgetLibraryDialog::notifyWidgetDragPreview(int kind, const QPoint& globalPos,

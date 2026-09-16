@@ -8,15 +8,13 @@
 *.VC.VC.opendb
 ipch/
 
-# Build output (current and legacy layouts)
-bin/
+# Visual Studio build output
 obj/
 x64/
 x86/
 [Dd]ebug/
 [Rr]elease/
-build*/
-out/
+artifacts/
 Generated Files/
 
 # Compiler, debugger and Qt generated files

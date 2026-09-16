@@ -9,13 +9,19 @@
 #include <QTimer>
 
 class QFrame;
+class QEvent;
 class QShowEvent;
 class QPainter;
 class QPropertyAnimation;
 class QMouseEvent;
+class QGridLayout;
+class QScrollArea;
+class QPushButton;
+class QLabel;
+class QLineEdit;
 
-// A small, frameless widget gallery. Tiles start a real Qt drag operation;
-// releasing outside the gallery emits widgetDropped with the desktop point.
+// A frameless gallery. Mouse capture keeps tile drags local so Escape and
+// interrupted drags cannot be mistaken for an unsupported desktop drop.
 class WidgetLibraryDialog final : public LiquidGlassWidget
 {
     Q_OBJECT
@@ -28,14 +34,21 @@ public:
     void prepareBackdrop();
 
     void notifyWidgetDropped(int kind, const QPoint& globalPos);
+    void notifyWidgetDragStarted(int kind);
+    void notifyWidgetDragFinished(int kind);
     void notifyWidgetDragPreview(int kind, const QPoint& globalPos, bool visible);
 
 signals:
     void widgetDropped(int kind, const QPoint& globalPos);
+    void widgetDragStarted(int kind);
+    void widgetDragFinished(int kind);
     void widgetDragPreview(int kind, const QPoint& globalPos, bool visible);
 
 private:
     void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
+    bool event(QEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
@@ -43,9 +56,18 @@ private:
     void closeGallery();
     void refreshBackdrop();
     void updateBackdropFrame();
-    QImage reducedCapture(const QImage& image, const QSize& logicalSize) const;
-    void enableCaptureExclusion();
+    void selectCategory(int category);
+    void applyTileFilter();
+    void randomizeRecommendations();
     QList<QFrame*> m_tiles;
+    QList<QPushButton*> m_navButtons;
+    QGridLayout* m_tileLayout = nullptr;
+    QFrame* m_sidebar = nullptr;
+    QLabel* m_sectionTitle = nullptr;
+    QLineEdit* m_search = nullptr;
+    int m_tileColumns = 0;
+    int m_selectedCategory = -1;
+    QList<int> m_recommendedTiles;
     QPropertyAnimation* m_slideAnimation = nullptr;
     QTimer m_renderTimer;
     QTimer m_liveBackdropTimer;
@@ -53,8 +75,8 @@ private:
     QRect m_backdropCaptureRect;
     QRect m_lastBackdropGeometry;
     QImage m_backdropCanvas;
-    QImage m_lastRawCapture;
     QImage m_lastBackdropImage;
-    bool m_captureExcluded = false;
+    bool m_capturePending = false;
+    quint64 m_backdropGeneration = 0;
     bool m_closing = false;
 };

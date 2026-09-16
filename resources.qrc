@@ -1,0 +1,54 @@
+<RCC>
+    <qresource prefix="/fonts">
+        <file alias="pingfang0.ttf">pingfang0.ttf</file>
+    </qresource>
+    <qresource prefix="/">
+        <file>weather/00.png</file>
+        <file>weather/00n.png</file>
+        <file>weather/01.png</file>
+        <file>weather/01n.png</file>
+        <file>weather/02.png</file>
+        <file>weather/03.png</file>
+        <file>weather/03n.png</file>
+        <file>weather/04.png</file>
+        <file>weather/05.png</file>
+        <file>weather/06.png</file>
+        <file>weather/07.png</file>
+        <file>weather/08.png</file>
+        <file>weather/09.png</file>
+        <file>weather/10.png</file>
+        <file>weather/11.png</file>
+        <file>weather/12.png</file>
+        <file>weather/13.png</file>
+        <file>weather/13n.png</file>
+        <file>weather/14.png</file>
+        <file>weather/15.png</file>
+        <file>weather/16.png</file>
+        <file>weather/17.png</file>
+        <file>weather/18.png</file>
+        <file>weather/19.png</file>
+        <file>weather/20.png</file>
+        <file>weather/21.png</file>
+        <file>weather/22.png</file>
+        <file>weather/23.png</file>
+        <file>weather/24.png</file>
+        <file>weather/25.png</file>
+        <file>weather/26.png</file>
+        <file>weather/27.png</file>
+        <file>weather/28.png</file>
+        <file>weather/29.png</file>
+        <file>weather/30.png</file>
+        <file>weather/31.png</file>
+        <file>weather/32.png</file>
+        <file>weather/33.png</file>
+        <file>weather/49.png</file>
+        <file>weather/53.png</file>
+        <file>weather/54.png</file>
+        <file>weather/55.png</file>
+        <file>weather/56.png</file>
+        <file>weather/57.png</file>
+        <file>weather/58.png</file>
+        <file>weather/301.png</file>
+        <file>weather/302.png</file>
+    </qresource>
+</RCC>

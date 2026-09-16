@@ -157,7 +157,7 @@ void main() {
     // 1. 干净的单次模糊采样 + 极微噪声（消色带）
     vec4 color = texture2D(u_blurredTex, texCoord);
     if (u_noise > 0.0) {
-        vec4 noiseVal = vec4(vec3(rand(gl_FragCoord.xy * 0.001 + u_time * 0.01) - 0.5), 0.0);
+        vec4 noiseVal = vec4(vec3(rand(gl_FragCoord.xy * 0.001) - 0.5), 0.0);
         color += noiseVal * u_noise;
     }
 

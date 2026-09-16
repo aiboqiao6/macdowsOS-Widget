@@ -77,20 +77,21 @@ public:
     float glassOpacity() const { return m_glassOpacity; }
     void setRefreshInterval(int intervalMs);
     int refreshInterval() const { return m_refreshInterval; }
-    // Prefer low-latency frame scheduling while a window is actively moving.
-    // Qt disables partial updates and avoids retaining the previous backbuffer
-    // so freshly uploaded backdrop pixels reach the compositor promptly.
-    void setLowLatencyRenderingEnabled(bool enabled);
-    bool lowLatencyRenderingEnabled() const { return m_lowLatencyRendering; }
     // Hosts that handle dragging outside QtGlassFlowScene can keep the render
     // timer at its interactive cadence while the pointer is down.
     void setInteractionActive(bool active);
     // Opt-in for widgets with a continuously changing payload (for example a
     // sweeping second hand). Static cards can keep the lower idle cadence.
     void setAnimationEnabled(bool enabled);
+    void setRenderingSuspended(bool suspended);
     void setRenderBackend(RenderBackend backend);
     RenderBackend renderBackend() const { return m_renderBackend; }
     RenderBackend effectiveRenderBackend() const { return m_effectiveRenderBackend; }
+    quint64 frameRevision() const { return m_frameRevision; }
+    // Read the last completed frame without asking QOpenGLWidget to render
+    // again. Cache one reduced, premultiplied image per visual revision.
+    QImage surfaceSnapshot();
+    quint64 snapshotReadbacks() const { return m_snapshotReadbacks; }
 
     // Internal render resolution multiplier. The final widget is still
     // composited at the native device-pixel size, while the backdrop/FBO
@@ -108,6 +109,7 @@ public:
 
 signals:
     void objectClicked(int index);
+    void frameRendered();
 
 protected:
     void initializeGL() override;
@@ -126,6 +128,7 @@ private:
                         const QString &vertPath,
                         const QString &fragPath);
     void initQuad();
+    void cleanupGL();
     void drawFullscreenQuad(QOpenGLShaderProgram *prog);
     void createFBOs(int w, int h);
     void destroyFBOs();
@@ -153,6 +156,12 @@ private:
     QOpenGLShaderProgram *m_glassShader;
     QOpenGLBuffer m_quadVbo;
     bool m_quadInitialized;
+    bool m_gpuReady = false;
+    quint64 m_frameRevision = 0;
+    QImage m_surfaceSnapshot;
+    quint64 m_snapshotRevision = 0;
+    quint64 m_snapshotReadbacks = 0;
+    QOpenGLFramebufferObject* m_snapshotFbo = nullptr;
 
     GLuint m_bgTexture;
     int m_bgWidth;
@@ -188,9 +197,9 @@ private:
 
     QTimer *m_timer;
     int m_refreshInterval;
-    bool m_lowLatencyRendering;
     bool m_externalInteraction;
     bool m_animationEnabled;
+    bool m_renderingSuspended = false;
     QElapsedTimer m_clock;
     int m_hoveredIndex;
     int m_dragIndex;

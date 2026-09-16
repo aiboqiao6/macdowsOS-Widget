@@ -18,6 +18,7 @@
 #include <QtMath>
 #include <QDebug>
 #include <QOpenGLContext>
+#include <QOpenGLExtraFunctions>
 #include <QSurfaceFormat>
 #include <cmath>
 
@@ -55,12 +56,14 @@ QtGlassFlowScene::QtGlassFlowScene(QWidget *parent)
       m_glassRenderingEnabled(true), m_blurOnly(false), m_glassOpacity(1.0f),
       m_blurCacheDirty(true), m_cpuBackdropDirty(true),
       m_renderBackend(AutoBackend), m_effectiveRenderBackend(GpuBackend),
-      m_renderScale(0.70f), m_connectionsDirty(true),
+      // The final widget is still presented at native resolution.  Backdrop
+      // and blur work at 60% of native pixels, which cuts fill-rate and
+      // capture bandwidth by roughly one third while keeping text/UI crisp.
+      m_renderScale(0.60f), m_connectionsDirty(true),
       m_refractionA(0.7f), m_refractionB(2.3f), m_refractionC(5.2f),
       m_refractionD(6.9f), m_fPower(1.0f), m_blurRadius(2.0f),
       m_blurIterations(2), m_noiseAmount(0.06f), m_attractionDist(160.0f),
       m_globalPower(3.0f), m_timer(nullptr), m_refreshInterval(16),
-      m_lowLatencyRendering(false),
       m_externalInteraction(false),
       m_animationEnabled(false),
       m_hoveredIndex(-1), m_dragIndex(-1)
@@ -74,14 +77,28 @@ QtGlassFlowScene::QtGlassFlowScene(QWidget *parent)
     fmt.setVersion(2, 1);
     fmt.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
     setFormat(fmt);
+    // Other glass windows sample the last completed frame after composition.
+    // Preserve it for static cards; never switch policies during a drag.
+    setUpdateBehavior(QOpenGLWidget::PartialUpdate);
 }
 
 QtGlassFlowScene::~QtGlassFlowScene()
 {
+    cleanupGL();
+}
+
+void QtGlassFlowScene::cleanupGL()
+{
     if (!context())
         return;
+    disconnect(context(), &QOpenGLContext::aboutToBeDestroyed,
+               this, &QtGlassFlowScene::cleanupGL);
     makeCurrent();
     destroyFBOs();
+    delete m_snapshotFbo;
+    m_snapshotFbo = nullptr;
+    m_surfaceSnapshot = {};
+    m_snapshotRevision = 0;
     if (m_bgTexture) {
         glDeleteTextures(1, &m_bgTexture);
         m_bgTexture = 0;
@@ -89,6 +106,13 @@ QtGlassFlowScene::~QtGlassFlowScene()
     delete m_blitShader;
     delete m_blurShader;
     delete m_glassShader;
+    m_blitShader = nullptr;
+    m_blurShader = nullptr;
+    m_glassShader = nullptr;
+    m_bgWidth = m_bgHeight = 0;
+    m_bgDirty = true;
+    m_gpuReady = false;
+    m_quadInitialized = false;
     if (m_quadVbo.isCreated())
         m_quadVbo.destroy();
     doneCurrent();
@@ -215,16 +239,6 @@ void QtGlassFlowScene::setRefreshInterval(int intervalMs)
     syncTimerCadence();
 }
 
-void QtGlassFlowScene::setLowLatencyRenderingEnabled(bool enabled)
-{
-    if (m_lowLatencyRendering == enabled)
-        return;
-    m_lowLatencyRendering = enabled;
-    setUpdateBehavior(enabled ? QOpenGLWidget::NoPartialUpdate
-                              : QOpenGLWidget::PartialUpdate);
-    update();
-}
-
 void QtGlassFlowScene::setInteractionActive(bool active)
 {
     if (m_externalInteraction == active)
@@ -241,24 +255,36 @@ void QtGlassFlowScene::setAnimationEnabled(bool enabled)
     syncTimerCadence();
 }
 
+void QtGlassFlowScene::setRenderingSuspended(bool suspended)
+{
+    if (m_renderingSuspended == suspended)
+        return;
+    m_renderingSuspended = suspended;
+    syncTimerCadence();
+    if (!suspended)
+        update();
+}
+
 void QtGlassFlowScene::syncTimerCadence()
 {
     if (!m_timer)
         return;
-    const bool interacting = m_externalInteraction
-                             || m_hoveredIndex >= 0 || m_dragIndex >= 0;
+    const bool interacting = m_externalInteraction || m_dragIndex >= 0;
     // A static card has no time-varying pixels: all visual changes arrive via
     // update() from an input/data event. Stop the timer completely in that
     // state instead of waking the GUI and GPU five times per second. Animated
     // cards (the clock) keep their low idle cadence, and interaction always
     // restores the requested 60 Hz cadence immediately.
-    if (!interacting && !m_animationEnabled) {
+    if (!isVisible() || m_renderingSuspended || (!interacting && !m_animationEnabled)) {
         m_timer->stop();
         return;
     }
 
     const int interval = interacting ? m_refreshInterval
                                      : qMax(m_refreshInterval, 64);
+    // Coarse wakeups are materially cheaper for an idle animation and do not
+    // affect pointer-driven rendering, which remains on a precise timer.
+    m_timer->setTimerType(interacting ? Qt::PreciseTimer : Qt::CoarseTimer);
     if (m_timer->interval() != interval)
         m_timer->setInterval(interval);
     if (!m_timer->isActive())
@@ -270,7 +296,11 @@ void QtGlassFlowScene::setRenderBackend(RenderBackend backend)
     if (m_renderBackend == backend)
         return;
     m_renderBackend = backend;
+    if (isValid())
+        makeCurrent();
     updateEffectiveBackend();
+    if (isValid())
+        doneCurrent();
     m_blurCacheDirty = true;
     m_cpuBackdropDirty = true;
     update();
@@ -373,7 +403,8 @@ void QtGlassFlowScene::drawFullscreenQuad(QOpenGLShaderProgram *program)
 void QtGlassFlowScene::initializeGL()
 {
     initializeOpenGLFunctions();
-    updateEffectiveBackend();
+    connect(context(), &QOpenGLContext::aboutToBeDestroyed,
+            this, &QtGlassFlowScene::cleanupGL, Qt::DirectConnection);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
 
@@ -391,16 +422,20 @@ void QtGlassFlowScene::initializeGL()
     m_glassShader = new QOpenGLShaderProgram(this);
     compileProgram(m_glassShader, QStringLiteral(":/qtglassflow/shaders/scene_vertex.glsl"),
                    QStringLiteral(":/qtglassflow/shaders/scene_fragment.glsl"));
+    m_gpuReady = m_blitShader->isLinked() && m_blurShader->isLinked() && m_glassShader->isLinked();
+    updateEffectiveBackend();
     initQuad();
     if (!m_bgPath.isEmpty() || !m_bgImage.isNull())
         loadBackgroundTexture();
 
-    m_timer = new QTimer(this);
-    m_timer->setTimerType(Qt::PreciseTimer);
-    connect(m_timer, &QTimer::timeout, this, [this]() {
-        if (isVisible())
-            update();
-    });
+    if (!m_timer) {
+        m_timer = new QTimer(this);
+        m_timer->setTimerType(Qt::PreciseTimer);
+        connect(m_timer, &QTimer::timeout, this, [this]() {
+            if (isVisible())
+                update();
+        });
+    }
     // syncTimerCadence() owns the timer lifecycle. In particular, static
     // cards deliberately leave it stopped. Starting it unconditionally here
     // would restart a newly-created QTimer at its default 0 ms interval and
@@ -483,7 +518,6 @@ void QtGlassFlowScene::loadBackgroundTexture()
         qWarning() << "failed to load background image:" << m_bgPath;
         return;
     }
-    image = image.convertToFormat(QImage::Format_RGBA8888);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
     if (!m_bgImageAlreadyFlipped)
         image = image.flipped(Qt::Vertical);
@@ -491,6 +525,24 @@ void QtGlassFlowScene::loadBackgroundTexture()
     if (!m_bgImageAlreadyFlipped)
         image = image.mirrored(false, true);
 #endif
+    // DesktopCapture and wallpaperBackdrop are RGB32 images on Windows.
+    // Upload those buffers in their native BGRA layout instead of converting
+    // and copying the entire crop to RGBA on every update.  Keep conversion
+    // only for uncommon image formats that the OpenGL upload cannot consume
+    // directly.
+    GLenum uploadFormat = GL_RGBA;
+    GLenum uploadType = GL_UNSIGNED_BYTE;
+    if (image.format() == QImage::Format_RGB32
+        || image.format() == QImage::Format_ARGB32
+        || image.format() == QImage::Format_ARGB32_Premultiplied) {
+        uploadFormat = GL_BGRA;
+        // QImage's 32-bit formats are laid out as B,G,R,A bytes on the
+        // Windows little-endian targets supported here, so no per-pixel
+        // packing conversion is needed.
+        uploadType = GL_UNSIGNED_BYTE;
+    } else if (image.format() != QImage::Format_RGBA8888) {
+        image = image.convertToFormat(QImage::Format_RGBA8888);
+    }
     if (!m_bgTexture)
         glGenTextures(1, &m_bgTexture);
     glBindTexture(GL_TEXTURE_2D, m_bgTexture);
@@ -499,10 +551,10 @@ void QtGlassFlowScene::loadBackgroundTexture()
         // Reuse the existing allocation for live backdrop updates. Reallocating
         // a full texture on every drag frame causes avoidable driver stalls.
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, image.width(), image.height(),
-                        GL_RGBA, GL_UNSIGNED_BYTE, image.constBits());
+                        uploadFormat, uploadType, image.constBits());
     } else {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.width(), image.height(), 0,
-                     GL_RGBA, GL_UNSIGNED_BYTE, image.constBits());
+                     uploadFormat, uploadType, image.constBits());
     }
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -572,7 +624,7 @@ void QtGlassFlowScene::runBlurPass()
 
 void QtGlassFlowScene::updateEffectiveBackend()
 {
-    if (m_renderBackend == CpuBackend) {
+    if (m_renderBackend == CpuBackend || (context() && !m_gpuReady)) {
         m_effectiveRenderBackend = CpuBackend;
         return;
     }
@@ -711,7 +763,7 @@ void QtGlassFlowScene::renderGlassObject(int index)
     m_glassShader->setUniformValue("u_objHalfSize", QVector2D(halfNdc.width(), halfNdc.height()));
     const float dpr = float(devicePixelRatioF());
     m_glassShader->setUniformValue("u_objHalfSizePx", QVector2D(float(object.size.width()) * dpr * .5f,
-                                                                  float(object.size.height()) * dpr * .5f));
+                                                                   float(object.size.height()) * dpr * .5f));
     m_glassShader->setUniformValue("u_cornerRadiusPx", object.cornerRadius * dpr);
     m_glassShader->setUniformValue("u_powerFactor", power);
     m_glassShader->setUniformValue("u_a", m_refractionA);
@@ -760,7 +812,7 @@ void QtGlassFlowScene::renderGlassObject(int index)
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_blurPongFbo ? m_blurPongFbo->texture() : 0);
     glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     drawFullscreenQuad(m_glassShader);
     glBindTexture(GL_TEXTURE_2D, 0);
     m_glassShader->release();
@@ -860,6 +912,58 @@ void QtGlassFlowScene::paintGL()
         painter.drawText(objectRect, Qt::AlignCenter, object.text);
     }
     paintOverlay(painter);
+    painter.end();
+    ++m_frameRevision;
+    emit frameRendered();
+}
+
+QImage QtGlassFlowScene::surfaceSnapshot()
+{
+    if (!isValid() || m_frameRevision == 0)
+        return {};
+    if (m_snapshotRevision == m_frameRevision && !m_surfaceSnapshot.isNull())
+        return m_surfaceSnapshot;
+
+    QOpenGLContext* previous = QOpenGLContext::currentContext();
+    QSurface* previousSurface = previous ? previous->surface() : nullptr;
+    makeCurrent();
+    const QSize native(qRound(width() * devicePixelRatioF()), qRound(height() * devicePixelRatioF()));
+    const QSize reduced(qMax(1, qRound(native.width() * m_renderScale)),
+                        qMax(1, qRound(native.height() * m_renderScale)));
+    QSize readSize = native;
+    glBindFramebuffer(GL_FRAMEBUFFER, defaultFramebufferObject());
+    if (QOpenGLFramebufferObject::hasOpenGLFramebufferBlit()) {
+        if (!m_snapshotFbo || m_snapshotFbo->size() != reduced) {
+            delete m_snapshotFbo;
+            m_snapshotFbo = new QOpenGLFramebufferObject(reduced);
+        }
+        if (m_snapshotFbo->isValid()) {
+            auto* gl = context()->extraFunctions();
+            gl->glBindFramebuffer(GL_READ_FRAMEBUFFER, defaultFramebufferObject());
+            gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_snapshotFbo->handle());
+            gl->glBlitFramebuffer(0, 0, native.width(), native.height(),
+                                  0, 0, reduced.width(), reduced.height(), GL_COLOR_BUFFER_BIT, GL_LINEAR);
+            glBindFramebuffer(GL_FRAMEBUFFER, m_snapshotFbo->handle());
+            readSize = reduced;
+        }
+    }
+    QImage pixels(readSize, QImage::Format_RGBA8888_Premultiplied);
+    glReadPixels(0, 0, readSize.width(), readSize.height(), GL_RGBA, GL_UNSIGNED_BYTE, pixels.bits());
+    glBindFramebuffer(GL_FRAMEBUFFER, defaultFramebufferObject());
+    doneCurrent();
+    if (previous && previousSurface)
+        previous->makeCurrent(previousSurface);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
+    pixels = pixels.flipped(Qt::Vertical);
+#else
+    pixels = pixels.mirrored(false, true);
+#endif
+    if (pixels.size() != reduced)
+        pixels = pixels.scaled(reduced, Qt::IgnoreAspectRatio, Qt::FastTransformation);
+    m_surfaceSnapshot = std::move(pixels);
+    m_snapshotRevision = m_frameRevision;
+    ++m_snapshotReadbacks;
+    return m_surfaceSnapshot;
 }
 
 void QtGlassFlowScene::paintOverlay(QPainter &painter)
