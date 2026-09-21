@@ -83,6 +83,7 @@ public:
     // Opt-in for widgets with a continuously changing payload (for example a
     // sweeping second hand). Static cards can keep the lower idle cadence.
     void setAnimationEnabled(bool enabled);
+    void setContinuousRenderingEnabled(bool enabled);
     void setRenderingSuspended(bool suspended);
     void setRenderBackend(RenderBackend backend);
     RenderBackend renderBackend() const { return m_renderBackend; }
@@ -199,6 +200,7 @@ private:
     int m_refreshInterval;
     bool m_externalInteraction;
     bool m_animationEnabled;
+    bool m_continuousRendering = false;
     bool m_renderingSuspended = false;
     QElapsedTimer m_clock;
     int m_hoveredIndex;

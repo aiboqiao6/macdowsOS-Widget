@@ -80,18 +80,21 @@ NativeWindows::Stack NativeWindows::snapshot()
 {
     Stack stack;
 #ifdef Q_OS_WIN
-    using GetAttribute = HRESULT (WINAPI *)(HWND, DWORD, PVOID, DWORD);
-    static const auto getAttribute = reinterpret_cast<GetAttribute>(
-        GetProcAddress(GetModuleHandleW(L"dwmapi.dll"), "DwmGetWindowAttribute"));
-    for (HWND window = GetTopWindow(nullptr); window; window = GetWindow(window, GW_HWNDNEXT)) {
+    // EnumWindows is safe when other processes reorder/destroy windows.
+    // A GetWindow(GW_HWNDNEXT) walk can revisit an HWND indefinitely.
+    EnumWindows([](HWND window, LPARAM parameter) -> BOOL {
+        auto& stack = *reinterpret_cast<Stack*>(parameter);
+        using GetAttribute = HRESULT (WINAPI *)(HWND, DWORD, PVOID, DWORD);
+        static const auto getAttribute = reinterpret_cast<GetAttribute>(
+            GetProcAddress(GetModuleHandleW(L"dwmapi.dll"), "DwmGetWindowAttribute"));
         if (!IsWindowVisible(window) || IsIconic(window))
-            continue;
+            return TRUE;
         DWORD cloaked = 0;
         if (getAttribute && SUCCEEDED(getAttribute(window, 14, &cloaked, sizeof(cloaked))) && cloaked)
-            continue;
+            return TRUE;
         RECT rect{};
         if (!GetWindowRect(window, &rect) || rect.right <= rect.left || rect.bottom <= rect.top)
-            continue;
+            return TRUE;
         wchar_t name[128]{};
         GetClassNameW(window, name, 128);
         const bool desktop = window == GetShellWindow() || wcscmp(name, L"Progman") == 0
@@ -109,7 +112,8 @@ NativeWindows::Stack NativeWindows::snapshot()
                       QRect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top),
                       desktop, !desktop && !(style & (WS_EX_LAYERED | WS_EX_TRANSPARENT)) && !excluded,
                       excluded, bool(style & WS_EX_TOPMOST)});
-    }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&stack));
 #endif
     return stack;
 }
@@ -267,7 +271,8 @@ void NativeWindows::restoreApplicationWindows(const HiddenWindows& windows)
             continue;
         SetWindowPos(window, nullptr, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
-                     | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+                     | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW
+                     | SWP_ASYNCWINDOWPOS);
     }
     invalidate();
 #else

@@ -45,6 +45,7 @@ signals:
     void widgetDragPreview(int kind, const QPoint& globalPos, bool visible);
 
 private:
+    friend class WidgetRegression;
     void showEvent(QShowEvent* event) override;
     void hideEvent(QHideEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
@@ -76,7 +77,9 @@ private:
     QRect m_lastBackdropGeometry;
     QImage m_backdropCanvas;
     QImage m_lastBackdropImage;
-    bool m_capturePending = false;
+    int m_liveCapturesInFlight = 0;
+    quint64 m_liveBackdropFrames = 0;
+    quint64 m_liveBackdropSamples = 0;
     quint64 m_backdropGeneration = 0;
     bool m_closing = false;
 };

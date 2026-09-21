@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QFontDatabase>
+#include <QSettings>
 
 #ifdef Q_OS_WIN
 #  ifndef NOMINMAX
@@ -45,8 +46,9 @@ int main(int argc, char* argv[])
     // cannot differ between the gallery and live cards.
     const QString pingFangFamily = BatteryWidget::pingFangFontFamily();
     QFont applicationFont(pingFangFamily);
-    applicationFont.setStyleStrategy(QFont::PreferAntialias);
     app.setFont(applicationFont);
+    BatteryWidget::setGlobalFontSmoothing(qBound(0,
+        QSettings().value(QStringLiteral("appearance/fontSmoothing"), 2).toInt(), 3));
     // The tray icon owns the app lifetime when the floating card is hidden.
     app.setQuitOnLastWindowClosed(false);
 

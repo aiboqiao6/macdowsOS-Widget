@@ -12,10 +12,26 @@
 #include <QThreadPool>
 #include <QVector>
 #include <QtMath>
+#include <chrono>
+#include <condition_variable>
+#include <atomic>
 #include <memory>
+#include <mutex>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
+#include <d3d11.h>
+#include <d2d1_1.h>
+#include <windows.graphics.capture.interop.h>
+#include <windows.graphics.directx.direct3d11.interop.h>
+#include <wrl/client.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.Capture.h>
+#include <winrt/Windows.Graphics.DirectX.h>
+#include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "d2d1.lib")
+#pragma comment(lib, "windowsapp.lib")
 #endif
 
 namespace {
@@ -173,7 +189,556 @@ QImage grabParts(const QVector<CapturePart>& parts, const QSize& size)
 struct Plan {
     QRegion valid;
     quint64 scene = 1469598103934665603ull;
+    QRect targetBounds;
 };
+
+QRect projectToCapture(const QRect& nativeRect, const CapturePart& part)
+{
+    const QRect overlap = nativeRect.intersected(part.source);
+    if (overlap.isEmpty())
+        return {};
+    const qreal sx = part.destination.width() / qreal(part.source.width());
+    const qreal sy = part.destination.height() / qreal(part.source.height());
+    const int left = qFloor((overlap.left() - part.source.left()) * sx);
+    const int top = qFloor((overlap.top() - part.source.top()) * sy);
+    const int right = qCeil((overlap.right() + 1 - part.source.left()) * sx);
+    const int bottom = qCeil((overlap.bottom() + 1 - part.source.top()) * sy);
+    return QRect(part.destination.topLeft() + QPoint(left, top),
+                 QSize(right - left, bottom - top));
+}
+
+struct TargetReconstruction {
+    QRegion target;
+    QRegion valid;
+};
+
+#ifdef Q_OS_WIN
+namespace wgc = winrt::Windows::Graphics::Capture;
+namespace wdx = winrt::Windows::Graphics::DirectX;
+namespace wdx11 = winrt::Windows::Graphics::DirectX::Direct3D11;
+using Microsoft::WRL::ComPtr;
+
+bool graphicsCaptureReady()
+{
+    struct Apartment {
+        bool ready = false;
+        bool owned = false;
+        Apartment() {
+            try {
+                winrt::init_apartment(winrt::apartment_type::multi_threaded);
+                ready = owned = true;
+            } catch (const winrt::hresult_error& error) {
+                ready = error.code() == RPC_E_CHANGED_MODE;
+            }
+        }
+        ~Apartment() { if (owned) winrt::uninit_apartment(); }
+    };
+    static thread_local Apartment apartment;
+    static thread_local const bool supported = [] {
+        try { return apartment.ready && wgc::GraphicsCaptureSession::IsSupported(); }
+        catch (...) { return false; }
+    }();
+    return supported;
+}
+
+// Windows Graphics Capture is a streaming API. Recreating its D3D device,
+// frame pool and capture session for every requested image costs at least one
+// compositor frame and previously limited a live panel to roughly 4-20 fps.
+// Keep one stream per lower HWND on the calling capture thread and read its
+// newest completed frame without restarting the session.
+class WindowCaptureStream final {
+    struct CapturedFrame {
+        explicit CapturedFrame(wgc::Direct3D11CaptureFrame value) : frame(std::move(value)) {}
+        ~CapturedFrame() { try { if (frame) frame.Close(); } catch (...) {} }
+        wgc::Direct3D11CaptureFrame frame{nullptr};
+    };
+    // WGC may deliver an already-dispatched event after revocation. Delegates
+    // own only this mailbox, never the stream or its D3D resources.
+    struct FrameState {
+        std::mutex mutex;
+        std::condition_variable arrived;
+        bool stopping = false;
+        bool recreating = false;
+        winrt::Windows::Graphics::SizeInt32 contentSize{};
+        std::shared_ptr<CapturedFrame> latest;
+    };
+public:
+    explicit WindowCaptureStream(HWND window) : m_window(window)
+    {
+        try { initialize(); }
+        catch (...) { close(); }
+    }
+
+    ~WindowCaptureStream()
+    {
+        close();
+    }
+
+    void close() noexcept
+    {
+        m_valid = false;
+        {
+            std::lock_guard<std::mutex> lock(m_state->mutex);
+            m_state->stopping = true;
+            m_state->latest.reset();
+        }
+        m_state->arrived.notify_all();
+        // Each operation must still run if another one fails on device loss.
+        try { if (m_item && m_closedToken.value) m_item.Closed(m_closedToken); } catch (...) {}
+        try { if (m_pool && m_token.value) m_pool.FrameArrived(m_token); } catch (...) {}
+        try { if (m_session) m_session.Close(); } catch (...) {}
+        try { if (m_pool) m_pool.Close(); } catch (...) {}
+        m_closedToken = {};
+        m_token = {};
+    }
+
+    bool valid() const
+    {
+        std::lock_guard<std::mutex> lock(m_state->mutex);
+        return m_valid && !m_state->stopping && validWindow();
+    }
+
+    std::chrono::steady_clock::time_point lastUsed() const { return m_lastUsed; }
+
+    struct Image {
+        QImage pixels;
+        QRect desktopBounds;
+    };
+
+    Image latestImage(const QRect& windowBounds, const QRect& requestedBounds,
+                      const QSize& outputSize)
+    {
+        m_lastUsed = std::chrono::steady_clock::now();
+        if (!valid())
+            return {};
+        try {
+            ensureSize();
+            std::shared_ptr<CapturedFrame> frame;
+            {
+                std::unique_lock<std::mutex> lock(m_state->mutex);
+                if (!m_state->latest) {
+                    // Only the first read waits for WGC startup. Every later
+                    // request consumes the newest already-delivered frame.
+                    m_state->arrived.wait_for(lock, std::chrono::milliseconds(50),
+                        [this]() { return bool(m_state->latest) || m_state->stopping; });
+                }
+                if (m_state->stopping || !m_state->latest)
+                    return {};
+                frame = m_state->latest;
+            }
+            return copyFrame(frame->frame, windowBounds, requestedBounds, outputSize);
+        } catch (...) {
+            m_valid = false;
+            return {};
+        }
+    }
+
+private:
+    void initialize()
+    {
+        if (!graphicsCaptureReady() || !validWindow())
+            return;
+
+        D3D_FEATURE_LEVEL featureLevel{};
+        const D3D_FEATURE_LEVEL levels[] = {
+            D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0,
+            D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0
+        };
+        winrt::check_hresult(D3D11CreateDevice(
+            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            levels, UINT(std::size(levels)), D3D11_SDK_VERSION, &m_d3dDevice,
+            &featureLevel, &m_d3dContext));
+        ComPtr<IDXGIDevice> dxgiDevice;
+        winrt::check_hresult(m_d3dDevice.As(&dxgiDevice));
+        if (SUCCEEDED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
+                                        m_d2dFactory.GetAddressOf()))
+            && SUCCEEDED(m_d2dFactory->CreateDevice(dxgiDevice.Get(), &m_d2dDevice))) {
+            m_d2dDevice->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
+                                              &m_d2dContext);
+        }
+        winrt::com_ptr<IInspectable> inspectable;
+        winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(
+            dxgiDevice.Get(), inspectable.put()));
+        m_device = inspectable.as<wdx11::IDirect3DDevice>();
+
+        auto interop = winrt::get_activation_factory<wgc::GraphicsCaptureItem,
+                                                      IGraphicsCaptureItemInterop>();
+        winrt::check_hresult(interop->CreateForWindow(
+            m_window, winrt::guid_of<wgc::GraphicsCaptureItem>(), winrt::put_abi(m_item)));
+        m_size = m_item.Size();
+        if (m_size.Width <= 0 || m_size.Height <= 0)
+            return;
+        m_pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(
+            m_device, wdx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 3, m_size);
+        m_session = m_pool.CreateCaptureSession(m_item);
+        m_state->contentSize = m_size;
+        m_closedToken = m_item.Closed([state = m_state](auto const&, auto const&) {
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->stopping = true;
+                state->latest.reset();
+            }
+            state->arrived.notify_all();
+        });
+        try { m_session.IsCursorCaptureEnabled(false); } catch (...) {}
+        try { m_session.IsBorderRequired(false); } catch (...) {}
+        m_token = m_pool.FrameArrived([state = m_state](auto const& sender, auto const&) {
+            try {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                if (state->stopping || state->recreating)
+                    return;
+                auto frame = sender.TryGetNextFrame();
+                if (frame) {
+                    state->contentSize = frame.ContentSize();
+                    state->latest = std::make_shared<CapturedFrame>(std::move(frame));
+                }
+            } catch (...) {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->stopping = true;
+                state->arrived.notify_all();
+                return;
+            }
+            state->arrived.notify_all();
+        });
+        m_session.StartCapture();
+        m_valid = true;
+    }
+
+    bool validWindow() const
+    {
+        return m_window && IsWindow(m_window) && !IsIconic(m_window);
+    }
+
+    void ensureSize()
+    {
+        winrt::Windows::Graphics::SizeInt32 size{};
+        {
+            std::lock_guard<std::mutex> lock(m_state->mutex);
+            size = m_state->contentSize;
+            if (size.Width <= 0 || size.Height <= 0
+                || (size.Width == m_size.Width && size.Height == m_size.Height))
+                return;
+            m_state->recreating = true;
+            m_state->latest.reset();
+        }
+        m_staging.Reset();
+        // Recreate can wait for FrameArrived. Never hold its mailbox lock here.
+        m_pool.Recreate(m_device, wdx::DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                        3, size);
+        m_size = size;
+        std::lock_guard<std::mutex> lock(m_state->mutex);
+        m_state->recreating = false;
+    }
+
+    Image copyFrame(const wgc::Direct3D11CaptureFrame& frame,
+                    const QRect& windowBounds, const QRect& requestedBounds,
+                    const QSize& outputSize)
+    {
+        const auto contentSize = frame.ContentSize();
+        auto access = frame.Surface().as<
+            ::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
+        ComPtr<ID3D11Texture2D> texture;
+        winrt::check_hresult(access->GetInterface(__uuidof(ID3D11Texture2D), &texture));
+        D3D11_TEXTURE2D_DESC description{};
+        texture->GetDesc(&description);
+        int effectiveWidth = qMin(int(description.Width), contentSize.Width);
+        int effectiveHeight = qMin(int(description.Height), contentSize.Height);
+        if (effectiveWidth <= 0 || effectiveHeight <= 0 || windowBounds.isEmpty())
+            return {};
+        const DPI_AWARENESS awareness = GetAwarenessFromDpiAwarenessContext(
+            GetWindowDpiAwarenessContext(m_window));
+        const UINT dpi = GetDpiForWindow(m_window);
+        if (awareness != DPI_AWARENESS_PER_MONITOR_AWARE && dpi > 96) {
+            effectiveWidth = qMax(1, qRound(effectiveWidth * 96.0 / dpi));
+            effectiveHeight = qMax(1, qRound(effectiveHeight * 96.0 / dpi));
+        }
+
+        const QRect desktopCrop = requestedBounds.intersected(windowBounds);
+        if (desktopCrop.isEmpty())
+            return {};
+        const qreal sx = effectiveWidth / qreal(windowBounds.width());
+        const qreal sy = effectiveHeight / qreal(windowBounds.height());
+        const int left = qBound(0, qFloor((desktopCrop.left() - windowBounds.left()) * sx),
+                                effectiveWidth - 1);
+        const int top = qBound(0, qFloor((desktopCrop.top() - windowBounds.top()) * sy),
+                               effectiveHeight - 1);
+        const int right = qBound(left + 1,
+            qCeil((desktopCrop.right() + 1 - windowBounds.left()) * sx), effectiveWidth);
+        const int bottom = qBound(top + 1,
+            qCeil((desktopCrop.bottom() + 1 - windowBounds.top()) * sy), effectiveHeight);
+        const UINT cropWidth = UINT(right - left);
+        const UINT cropHeight = UINT(bottom - top);
+        UINT readWidth = cropWidth;
+        UINT readHeight = cropHeight;
+        bool scaledOnGpu = false;
+        if (outputSize.isValid()
+            && outputSize != QSize(int(cropWidth), int(cropHeight))
+            && m_d2dContext) {
+            D3D11_TEXTURE2D_DESC scaledDescription = description;
+            scaledDescription.Width = UINT(outputSize.width());
+            scaledDescription.Height = UINT(outputSize.height());
+            scaledDescription.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            scaledDescription.CPUAccessFlags = 0;
+            scaledDescription.Usage = D3D11_USAGE_DEFAULT;
+            scaledDescription.MiscFlags = 0;
+            scaledDescription.ArraySize = 1;
+            scaledDescription.MipLevels = 1;
+            if (!m_scaled || m_scaledWidth != scaledDescription.Width
+                || m_scaledHeight != scaledDescription.Height) {
+                m_scaled.Reset();
+                if (SUCCEEDED(m_d3dDevice->CreateTexture2D(
+                        &scaledDescription, nullptr, &m_scaled))) {
+                    m_scaledWidth = scaledDescription.Width;
+                    m_scaledHeight = scaledDescription.Height;
+                }
+            }
+            ComPtr<IDXGISurface> sourceSurface;
+            ComPtr<IDXGISurface> targetSurface;
+            ComPtr<ID2D1Bitmap1> sourceBitmap;
+            ComPtr<ID2D1Bitmap1> targetBitmap;
+            const D2D1_PIXEL_FORMAT pixelFormat = D2D1::PixelFormat(
+                description.Format, D2D1_ALPHA_MODE_IGNORE);
+            if (m_scaled
+                && SUCCEEDED(texture.As(&sourceSurface))
+                && SUCCEEDED(m_scaled.As(&targetSurface))
+                && SUCCEEDED(m_d2dContext->CreateBitmapFromDxgiSurface(
+                    sourceSurface.Get(),
+                    D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_NONE, pixelFormat),
+                    &sourceBitmap))
+                && SUCCEEDED(m_d2dContext->CreateBitmapFromDxgiSurface(
+                    targetSurface.Get(),
+                    D2D1::BitmapProperties1(
+                        D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                        pixelFormat), &targetBitmap))) {
+                m_d2dContext->SetTarget(targetBitmap.Get());
+                m_d2dContext->BeginDraw();
+                m_d2dContext->SetTransform(D2D1::Matrix3x2F::Identity());
+                const D2D1_RECT_F destinationRect = D2D1::RectF(
+                    0, 0, FLOAT(outputSize.width()), FLOAT(outputSize.height()));
+                const D2D1_RECT_F sourceRect = D2D1::RectF(
+                    FLOAT(left), FLOAT(top), FLOAT(right), FLOAT(bottom));
+                m_d2dContext->DrawBitmap(
+                    sourceBitmap.Get(), &destinationRect, 1.0f,
+                    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, &sourceRect, nullptr);
+                const HRESULT drawResult = m_d2dContext->EndDraw();
+                m_d2dContext->SetTarget(nullptr);
+                if (SUCCEEDED(drawResult)) {
+                    scaledOnGpu = true;
+                    readWidth = UINT(outputSize.width());
+                    readHeight = UINT(outputSize.height());
+                }
+            }
+        }
+        if (!m_staging || readWidth != m_stagingWidth || readHeight != m_stagingHeight) {
+            D3D11_TEXTURE2D_DESC stagingDescription = description;
+            stagingDescription.Width = readWidth;
+            stagingDescription.Height = readHeight;
+            stagingDescription.BindFlags = 0;
+            stagingDescription.MiscFlags = 0;
+            stagingDescription.Usage = D3D11_USAGE_STAGING;
+            stagingDescription.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            stagingDescription.ArraySize = 1;
+            stagingDescription.MipLevels = 1;
+            m_staging.Reset();
+            winrt::check_hresult(m_d3dDevice->CreateTexture2D(
+                &stagingDescription, nullptr, &m_staging));
+            m_stagingWidth = readWidth;
+            m_stagingHeight = readHeight;
+        }
+        if (scaledOnGpu) {
+            m_d3dContext->CopyResource(m_staging.Get(), m_scaled.Get());
+        } else {
+            const D3D11_BOX sourceBox{UINT(left), UINT(top), 0,
+                                      UINT(right), UINT(bottom), 1};
+            m_d3dContext->CopySubresourceRegion(
+                m_staging.Get(), 0, 0, 0, 0, texture.Get(), 0, &sourceBox);
+        }
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        winrt::check_hresult(m_d3dContext->Map(
+            m_staging.Get(), 0, D3D11_MAP_READ, 0, &mapped));
+        const QImage mappedImage(static_cast<const uchar*>(mapped.pData), int(readWidth),
+                                 int(readHeight), qsizetype(mapped.RowPitch),
+                                 QImage::Format_ARGB32);
+        QImage result;
+        if (outputSize.isValid() && outputSize != mappedImage.size())
+            result = mappedImage.scaled(outputSize, Qt::IgnoreAspectRatio,
+                                        Qt::SmoothTransformation);
+        else
+            result = mappedImage.copy();
+        m_d3dContext->Unmap(m_staging.Get(), 0);
+        // WGC's BGRA8 memory layout already matches QImage::Format_ARGB32 on
+        // Windows. Returning it directly avoids an additional full-frame
+        // conversion/copy on every live sample.
+        return {std::move(result), desktopCrop};
+    }
+
+    HWND m_window = nullptr;
+    std::chrono::steady_clock::time_point m_lastUsed = std::chrono::steady_clock::now();
+    std::atomic_bool m_valid = false;
+    std::shared_ptr<FrameState> m_state = std::make_shared<FrameState>();
+    ComPtr<ID3D11Device> m_d3dDevice;
+    ComPtr<ID3D11DeviceContext> m_d3dContext;
+    ComPtr<ID3D11Texture2D> m_staging;
+    ComPtr<ID3D11Texture2D> m_scaled;
+    UINT m_stagingWidth = 0;
+    UINT m_stagingHeight = 0;
+    UINT m_scaledWidth = 0;
+    UINT m_scaledHeight = 0;
+    ComPtr<ID2D1Factory1> m_d2dFactory;
+    ComPtr<ID2D1Device> m_d2dDevice;
+    ComPtr<ID2D1DeviceContext> m_d2dContext;
+    wdx11::IDirect3DDevice m_device{nullptr};
+    wgc::GraphicsCaptureItem m_item{nullptr};
+    wgc::Direct3D11CaptureFramePool m_pool{nullptr};
+    wgc::GraphicsCaptureSession m_session{nullptr};
+    winrt::event_token m_token{};
+    winrt::event_token m_closedToken{};
+    winrt::Windows::Graphics::SizeInt32 m_size{};
+};
+
+using CapturedWindowImage = WindowCaptureStream::Image;
+using WindowCaptureStreams = QHash<WId, std::shared_ptr<WindowCaptureStream>>;
+
+WindowCaptureStreams& windowCaptureStreams()
+{
+    // Construct the apartment first so TLS destroys the streams before COM.
+    graphicsCaptureReady();
+    static thread_local WindowCaptureStreams streams;
+    return streams;
+}
+
+void clearWindowCaptureStreams()
+{
+    windowCaptureStreams().clear();
+}
+
+void pruneWindowCaptureStreams()
+{
+    auto& streams = windowCaptureStreams();
+    const auto now = std::chrono::steady_clock::now();
+    for (auto it = streams.begin(); it != streams.end(); ) {
+        if (!it.value() || !it.value()->valid()
+            || now - it.value()->lastUsed() > std::chrono::seconds(2))
+            it = streams.erase(it);
+        else
+            ++it;
+    }
+}
+
+CapturedWindowImage captureWindowGraphics(HWND window, const QRect& windowBounds,
+                                          const QRect& requestedBounds,
+                                          const QSize& outputSize)
+{
+    try {
+        if (!graphicsCaptureReady() || !window || !IsWindow(window))
+            return {};
+        auto& streams = windowCaptureStreams();
+        const WId id = reinterpret_cast<WId>(window);
+        auto stream = streams.value(id);
+        if (!stream) {
+            if (streams.size() >= 8) {
+                auto oldest = streams.begin();
+                for (auto it = streams.begin(); it != streams.end(); ++it)
+                    if (it.value()->lastUsed() < oldest.value()->lastUsed())
+                        oldest = it;
+                streams.erase(oldest);
+            }
+            stream = std::make_shared<WindowCaptureStream>(window);
+            if (!stream->valid())
+                return {};
+            streams.insert(id, stream);
+        }
+        return stream->latestImage(windowBounds, requestedBounds, outputSize);
+    } catch (...) {
+        return {};
+    }
+}
+
+#endif
+
+TargetReconstruction reconstructTarget(QImage& image, const QVector<CapturePart>& parts,
+                                       WId target, const NativeWindows::Stack& stack)
+{
+    TargetReconstruction result;
+    const int targetIndex = target ? NativeWindows::indexOf(stack, target) : -1;
+    if (targetIndex < 0 || image.isNull())
+        return result;
+    const QRect targetBounds = stack.at(targetIndex).bounds;
+    for (const CapturePart& part : parts)
+        result.target += projectToCapture(targetBounds, part);
+#ifdef Q_OS_WIN
+    QRegion remaining = result.target;
+    // EnumWindows is top-to-bottom. Repaint the nearest ordinary opaque
+    // window for each target pixel. Wallpaper remains invalid and is
+    // supplied by the caller's stable fallback; glass windows are composited
+    // separately from their last completed surfaces.
+    for (int i = targetIndex + 1; i < stack.size() && !remaining.isEmpty(); ++i) {
+        const NativeWindows::Window& lower = stack.at(i);
+        QRegion projected;
+        for (const CapturePart& part : parts)
+            projected += projectToCapture(lower.bounds, part);
+        if (projected.isEmpty() || lower.desktop)
+            continue;
+        if (lower.excluded)
+            continue;
+        const QRegion paintRegion = projected & remaining;
+        if (paintRegion.isEmpty())
+            continue;
+        // WS_EX_LAYERED is not synonymous with invisible or non-capturable.
+        // Qt, Chromium and many media windows use a layered top-level HWND
+        // while still presenting fully opaque changing content. Skipping those
+        // windows was the direct cause of live mode falling back to wallpaper
+        // forever for common sources. WGC provides the selected HWND's pixels.
+        QRegion captureProjection;
+        int intersectingParts = 0;
+        const QRect desktopCaptureBounds = lower.bounds.intersected(targetBounds);
+        for (const CapturePart& part : parts) {
+            const QRect projection = projectToCapture(desktopCaptureBounds, part);
+            if (!projection.isEmpty()) {
+                captureProjection += projection;
+                ++intersectingParts;
+            }
+        }
+        const QSize captureOutputSize = intersectingParts == 1
+            ? captureProjection.boundingRect().size() : QSize();
+        CapturedWindowImage captured = captureWindowGraphics(
+            reinterpret_cast<HWND>(lower.id), lower.bounds,
+            desktopCaptureBounds, captureOutputSize);
+        // WGC owns these pixels. Solid black/white are valid content, not
+        // evidence of failure. Never replace them with an old frame or a GDI
+        // screenshot (which may include our own glass window).
+        if (captured.pixels.isNull()) {
+            remaining -= paintRegion;
+            continue;
+        }
+        QPainter painter(&image);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        for (const CapturePart& part : parts) {
+            const QRect source = lower.bounds.intersected(targetBounds).intersected(part.source);
+            if (source.isEmpty())
+                continue;
+            const QRect destination = projectToCapture(source, part);
+            painter.setClipRegion(paintRegion & destination);
+            const qreal wx = captured.pixels.width() / qreal(captured.desktopBounds.width());
+            const qreal wy = captured.pixels.height() / qreal(captured.desktopBounds.height());
+            const QRect windowSource(
+                qRound((source.left() - captured.desktopBounds.left()) * wx),
+                qRound((source.top() - captured.desktopBounds.top()) * wy),
+                qMax(1, qRound(source.width() * wx)),
+                qMax(1, qRound(source.height() * wy)));
+            const QRect clippedSource = windowSource.intersected(captured.pixels.rect());
+            if (!clippedSource.isEmpty())
+                painter.drawImage(destination, captured.pixels, clippedSource);
+        }
+        painter.end();
+        result.valid |= paintRegion;
+        remaining -= paintRegion;
+    }
+#else
+    Q_UNUSED(parts);
+#endif
+    return result;
+}
 
 Plan capturePlan(const QVector<CapturePart>& parts, const QSize& size, WId target,
                  const NativeWindows::Stack& stack)
@@ -182,11 +747,25 @@ Plan capturePlan(const QVector<CapturePart>& parts, const QSize& size, WId targe
     if (target && targetIndex < 0)
         return {{}, 0};
     Plan plan{QRegion(QRect(QPoint(), size))};
+    if (targetIndex >= 0)
+        plan.targetBounds = stack.at(targetIndex).bounds;
     const auto hash = [&plan](quint64 value) { plan.scene = (plan.scene ^ value) * 1099511628211ull; };
     for (int i = 0; i < stack.size(); ++i) {
         const auto& window = stack.at(i);
-        if (window.id == target || window.excluded)
+        if (window.id == target)
             continue;
+        // GDI captures process-local glass windows even though they are
+        // excluded from our logical compositor. Mark those physical pixels
+        // invalid before they can enter the external backdrop cache; the
+        // caller composites each lower glass surface exactly once afterwards.
+        // Without this subtraction an overlapping card is present in both the
+        // screenshot and its cached surface, producing recursive glare while
+        // the upper card is dragged.
+        if (window.excluded) {
+            for (const auto& part : parts)
+                plan.valid -= projectToCapture(window.bounds, part);
+            continue;
+        }
         bool intersects = false;
         for (const auto& part : parts) {
             // Shadows and DWM's rounded frame extend beyond GetWindowRect on
@@ -195,16 +774,13 @@ Plan capturePlan(const QVector<CapturePart>& parts, const QSize& size, WId targe
             if (!bounds.intersects(part.source))
                 continue;
             intersects = true;
-            if (i < targetIndex) {
-                const QRect overlap = bounds.intersected(part.source);
-                const qreal sx = part.destination.width() / qreal(part.source.width());
-                const qreal sy = part.destination.height() / qreal(part.source.height());
-                const int left = qFloor((overlap.left() - part.source.left()) * sx);
-                const int top = qFloor((overlap.top() - part.source.top()) * sy);
-                const int right = qCeil((overlap.right() + 1 - part.source.left()) * sx);
-                const int bottom = qCeil((overlap.bottom() + 1 - part.source.top()) * sy);
-                plan.valid -= QRect(part.destination.topLeft() + QPoint(left, top), QSize(right - left, bottom - top));
-            }
+            // Transparent/layered shell overlays often cover the entire
+            // virtual desktop while contributing no opaque pixels. Treating
+            // their bounds as an occluder invalidated the complete card crop,
+            // so live mode returned a black/wallpaper frame without ever
+            // reaching the real lower window.
+            if (i < targetIndex && window.opaque)
+                plan.valid -= projectToCapture(bounds, part);
         }
         if (i > targetIndex && intersects) {
             hash(window.id);
@@ -223,36 +799,75 @@ Plan capturePlan(const QVector<CapturePart>& parts, const QSize& size, WId targe
 DesktopCapture::Frame grabFrame(const QVector<CapturePart>& parts, const QSize& size,
                                 const QRect& area, qreal scale, WId target, const Plan& queued)
 {
-    const Plan before = capturePlan(parts, size, target);
-    if (!queued.scene || queued.scene != before.scene)
+#ifdef Q_OS_WIN
+    pruneWindowCaptureStreams();
+#endif
+    const NativeWindows::Stack beforeStack = NativeWindows::snapshot();
+    const Plan before = capturePlan(parts, size, target, beforeStack);
+    if (!queued.scene || queued.scene != before.scene
+        || queued.targetBounds != before.targetBounds)
         return {};
     if ((queued.valid & before.valid).isEmpty()) {
         QImage blank(size, QImage::Format_RGB32);
         blank.fill(Qt::black);
-        return {std::move(blank), {}, area, before.scene, target, scale};
+        return {std::move(blank), {}, area, before.scene, target, scale, before.targetBounds};
     }
-    QImage image = grabParts(parts, size);
-    const Plan after = capturePlan(parts, size, target);
-    if (before.scene != after.scene || image.isNull())
+    const bool targeted = target && NativeWindows::indexOf(beforeStack, target) >= 0;
+    QImage image;
+    if (targeted) {
+        // Reconstruct only the target rectangle from independently captured
+        // lower HWNDs. Everything else stays invalid and is filled from the
+        // stable wallpaper cache by the caller.
+        image = QImage(size, QImage::Format_RGB32);
+        image.fill(Qt::black);
+    } else {
+        image = grabParts(parts, size);
+    }
+    const TargetReconstruction reconstructed = reconstructTarget(
+        image, parts, target, beforeStack);
+    const NativeWindows::Stack afterStack = NativeWindows::snapshot();
+    const Plan after = capturePlan(parts, size, target, afterStack);
+    if (before.scene != after.scene || before.targetBounds != after.targetBounds || image.isNull())
         return {};
-    return {std::move(image), queued.valid & before.valid & after.valid, area, after.scene, target, scale};
+    const QRegion stable = queued.valid & before.valid & after.valid;
+    const QRegion valid = targeted
+        ? (reconstructed.valid & stable)
+        : ((stable - reconstructed.target) | (reconstructed.valid & stable));
+    return {std::move(image), valid, area, after.scene, target, scale, after.targetBounds};
 }
 
 class CaptureWorker final : public QObject {
 public:
     explicit CaptureWorker(QObject* parent) : QObject(parent) {
         pool.setMaxThreadCount(1);
-        pool.setExpiryTimeout(-1);
+        // Let the capture thread retire after live sampling stops. Its
+        // thread-local WGC streams then close promptly instead of continuing
+        // to receive compositor frames after the last panel is hidden.
+        pool.setExpiryTimeout(1000);
     }
-    ~CaptureWorker() override { pool.clear(); pool.waitForDone(); }
+    ~CaptureWorker() override {
+        pool.clear();
+#ifdef Q_OS_WIN
+        // Destroy WGC sessions on the worker thread that owns their cache
+        // before asking QThreadPool to retire that thread.
+        pool.start(QRunnable::create([]() { clearWindowCaptureStreams(); }));
+#endif
+        pool.waitForDone();
+    }
     QThreadPool pool;
 };
+
+QPointer<CaptureWorker>& captureWorkerInstance()
+{
+    static QPointer<CaptureWorker> worker;
+    return worker;
+}
 }
 
 void DesktopCapture::request(const QRect& area, qreal pixelScale, WId target, QObject* context,
                              std::function<void(Frame)> completed, int priority)
 {
-    static QPointer<CaptureWorker> worker;
+    auto& worker = captureWorkerInstance();
     if (!worker)
         worker = new CaptureWorker(qApp);
     CaptureWorker* owner = worker;
@@ -263,7 +878,9 @@ void DesktopCapture::request(const QRect& area, qreal pixelScale, WId target, QO
     const QPointer<QObject> guard(context);
     owner->pool.start(QRunnable::create([owner, parts, size, area, pixelScale, target, queued, guard,
                                        completed = std::move(completed)]() {
-        Frame frame = grabFrame(parts, size, area, pixelScale, target, queued);
+        Frame frame;
+        try { frame = grabFrame(parts, size, area, pixelScale, target, queued); }
+        catch (...) {} // Always release the caller's in-flight slot on failure.
         QMetaObject::invokeMethod(owner, [guard, completed, frame = std::move(frame)]() mutable {
             if (guard) {
                 validate(frame);
@@ -278,7 +895,26 @@ DesktopCapture::Frame DesktopCapture::grab(const QRect& area, qreal pixelScale, 
     const auto parts = captureParts(area, pixelScale);
     const QSize size(qMax(1, qRound(area.width() * pixelScale)),
                      qMax(1, qRound(area.height() * pixelScale)));
-    return grabFrame(parts, size, area, pixelScale, target, capturePlan(parts, size, target));
+    Frame frame = grabFrame(parts, size, area, pixelScale, target,
+                            capturePlan(parts, size, target));
+#ifdef Q_OS_WIN
+    // Synchronous grabs run on their caller (normally the GUI thread) and do
+    // not form a live stream. Close any session created for this one-shot read
+    // immediately; asynchronous worker requests retain and reuse theirs.
+    clearWindowCaptureStreams();
+#endif
+    return frame;
+}
+
+void DesktopCapture::resetWorkerStreams()
+{
+#ifdef Q_OS_WIN
+    CaptureWorker* owner = captureWorkerInstance();
+    if (!owner)
+        return;
+    // Preserve queued completions and keep teardown off the GUI thread.
+    owner->pool.start(QRunnable::create([]() { clearWindowCaptureStreams(); }));
+#endif
 }
 
 bool DesktopCapture::validate(Frame& frame)
@@ -286,11 +922,12 @@ bool DesktopCapture::validate(Frame& frame)
     if (frame.image.isNull() || !frame.scene)
         return false;
     const Plan current = capturePlan(captureParts(frame.area, frame.scale), frame.image.size(), frame.target);
-    if (current.scene != frame.scene) {
+    if (current.scene != frame.scene || current.targetBounds != frame.targetBounds) {
         frame = {};
         return false;
     }
     frame.valid &= current.valid;
+    frame.validated = true;
     return true;
 }
 
@@ -312,7 +949,10 @@ bool DesktopCapture::Cache::current() const
 
 QImage DesktopCapture::Cache::merge(Frame frame, const std::function<QImage()>& fallback)
 {
-    if (!validate(frame))
+    // Asynchronous requests are validated immediately before their callback.
+    // Avoid enumerating the complete native window stack a second time in
+    // that same callback; this was a significant part of every live frame.
+    if (!frame.validated && !validate(frame))
         return {};
     if (area != frame.area || image.size() != frame.image.size() || scene != frame.scene) {
         const QImage previous = image;
@@ -320,7 +960,7 @@ QImage DesktopCapture::Cache::merge(Frame frame, const std::function<QImage()>& 
         const bool sameScene = scene == frame.scene;
         const QImage base = fallback();
         image = base.isNull() ? QImage() : base.scaled(frame.image.size(), Qt::IgnoreAspectRatio,
-                                                       Qt::FastTransformation).convertToFormat(QImage::Format_RGB32);
+                                                       Qt::SmoothTransformation).convertToFormat(QImage::Format_RGB32);
         if (image.isNull()) {
             image = QImage(frame.image.size(), QImage::Format_RGB32);
             image.fill(Qt::black);

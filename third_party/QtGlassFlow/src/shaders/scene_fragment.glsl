@@ -24,6 +24,7 @@ uniform float u_fPower;
 // === 材质参数 ===
 uniform float u_noise;        // 默认极低（0.01），仅用于消除色带
 uniform float u_time;
+uniform float u_edgeAaScale;  // quality-dependent analytic edge coverage
 
 // === Smooth-union 桥接 ===
 uniform int u_numConnections;
@@ -66,9 +67,11 @@ float refractionF(float x) {
     return 1.0 - u_b * pow(u_c * M_E, -u_d * x - u_a);
 }
 
-// 简单哈希噪声（用于极低强度去色带）
+// Interleaved-gradient dither. The previous low-frequency sine hash sampled
+// coordinates at 0.001 scale and formed a visible square/moire lattice.
 float rand(vec2 co) {
-    return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
+    vec2 pixel = floor(co);
+    return fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
 }
 
 // 平滑并集 —— 让相邻形状融合成连续液面
@@ -107,7 +110,11 @@ void main() {
         }
     }
 
-    if (combinedD > 0.0)
+    // Keep a one-pixel transition outside the mathematical edge. Discarding
+    // exactly at zero turns the native framebuffer back into a binary mask
+    // and is visibly jagged at 125%/150% Windows scaling.
+    float edgeWidth = max(fwidth(combinedD) * u_edgeAaScale, 0.0003);
+    if (combinedD > edgeWidth)
         discard;
 
     // Voronoi ownership: only render pixels "owned" by this object
@@ -157,7 +164,7 @@ void main() {
     // 1. 干净的单次模糊采样 + 极微噪声（消色带）
     vec4 color = texture2D(u_blurredTex, texCoord);
     if (u_noise > 0.0) {
-        vec4 noiseVal = vec4(vec3(rand(gl_FragCoord.xy * 0.001) - 0.5), 0.0);
+        vec4 noiseVal = vec4(vec3(rand(gl_FragCoord.xy) - 0.5), 0.0);
         color += noiseVal * u_noise;
     }
 
@@ -170,15 +177,18 @@ void main() {
     color.rgb = mix(color.rgb, u_tintColor * (0.5 + 0.5 * color.rgb), u_tintStrength);
 
     // 4. 极细白色边框线（约 0.5–1 px 边缘反光）
-    float fw = clamp(fwidth(combinedD), 0.0003, 0.003);
-    float borderLine = smoothstep(fw * 2.5, fw * 0.5, dist);
+    float fw = max(edgeWidth, 0.0003);
+    // Edge coverage scales with quality, but the optical rim must stay close
+    // to one native pixel instead of becoming thicker at maximum quality.
+    float borderFw = clamp(fwidth(combinedD), 0.0003, 0.003);
+    float borderLine = smoothstep(borderFw * 2.5, borderFw * 0.5, dist);
     // The shared QPainter surface adds the directional rim. Keep only a very
     // soft optical lift here so the two passes do not form a bright double
     // outline at the lower and right edges.
     color.rgb += vec3(1.0) * borderLine * 0.12;
 
     // 5. 干净锐利的 alpha 抗锯齿
-    float alpha = smoothstep(0.0, fw * 1.2, dist);
+    float alpha = smoothstep(-fw, fw, dist);
     color.a = alpha * u_opacity;
 
     gl_FragColor = color;

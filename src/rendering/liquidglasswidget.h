@@ -61,6 +61,18 @@ public:
     bool mouseThroughEnabled() const { return m_mouseThrough; }
     void setLowPowerRefreshEnabled(bool enabled);
     bool lowPowerRefreshEnabled() const { return m_lowPowerRefresh; }
+    // Stationary desktop cards normally use the wallpaper-only path.  Live
+    // backdrop mode samples the actual lower window stack as well, while the
+    // capture compositor still removes this process' own glass surfaces to
+    // prevent recursive glare.
+    void setLiveBackdropEnabled(bool enabled);
+    bool liveBackdropEnabled() const { return m_liveBackdropEnabled; }
+
+    // A quality change also changes the required backdrop resolution.  The
+    // base renderer invalidates its FBOs; this wrapper invalidates the desktop
+    // crop as well so the new quality is visible immediately instead of after
+    // the next idle wallpaper tick.
+    void setRenderScale(float scale);
 
     // Shared polished edge used by any content widget. The actual blur,
     // clipping mask and rounded SDF remain in this base class; subclasses
@@ -92,6 +104,15 @@ protected:
     // drag. Generic glass hosts (such as the library dialog and test surface)
     // retain their normal idle compositing behaviour.
     virtual bool wallpaperOnlyWhenIdle() const { return false; }
+    // Desktop cards hide ordinary application HWNDs while being repositioned.
+    // They can therefore crop the shared wallpaper and lower glass surfaces
+    // directly at display cadence instead of waiting for desktop capture.
+    virtual bool directBackdropDuringDrag() const { return false; }
+    static bool desktopDragActive();
+    // Millisecond cadence derived from the monitor containing this window.
+    // Exposed to specialized glass hosts such as the widget gallery so every
+    // live surface follows the same display-refresh policy.
+    int activeDisplayInterval() const;
     bool event(QEvent* event) override;
     void moveEvent(QMoveEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
@@ -102,6 +123,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override;
 
 private:
+    friend class WidgetRegression;
     void updateGlassObjectGeometry();
     void updateWindowMask();
     bool rebuildWallpaperCanvas(QScreen* screen);
@@ -116,6 +138,7 @@ private:
     bool captureCompositedBackdrop(QScreen* screen);
     void updateCompositeCrop();
     static void queueCompositeRefresh();
+    static void refreshDragRendering();
     bool fullyOccluded() const;
     static void compositeGlassWindows(QImage& image, const QRect& area,
                                       const LiquidGlassWidget* excluded);
@@ -130,6 +153,7 @@ private:
     bool m_systemBlur = false;
     bool m_mouseThrough = false;
     bool m_lowPowerRefresh = false;
+    bool m_liveBackdropEnabled = false;
     int m_blurStrength = 55;
     qreal m_glassOpacity = 1.0;
     bool m_desktopCaptureEnabled = true;

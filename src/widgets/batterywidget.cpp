@@ -78,6 +78,34 @@
 #endif
 
 namespace {
+int s_fontSmoothingLevel = 2;
+
+void configureFontSmoothing(QFont& font, int level)
+{
+    switch (qBound(0, level, 3)) {
+    case 0:
+        font.setStyleStrategy(QFont::NoAntialias);
+        font.setHintingPreference(QFont::PreferFullHinting);
+        break;
+    case 1:
+        font.setStyleStrategy(static_cast<QFont::StyleStrategy>(
+            QFont::PreferAntialias | QFont::NoSubpixelAntialias));
+        font.setHintingPreference(QFont::PreferVerticalHinting);
+        break;
+    case 3:
+        font.setStyleStrategy(static_cast<QFont::StyleStrategy>(
+            QFont::PreferAntialias | QFont::PreferQuality | QFont::NoSubpixelAntialias));
+        font.setHintingPreference(QFont::PreferFullHinting);
+        break;
+    case 2:
+    default:
+        font.setStyleStrategy(static_cast<QFont::StyleStrategy>(
+            QFont::PreferAntialias | QFont::PreferQuality));
+        font.setHintingPreference(QFont::PreferFullHinting);
+        break;
+    }
+}
+
 // The two reference cards use the same 1 px glass edge and different canvas
 // sizes.  Keeping these dimensions explicit makes the layout deterministic on
 // every DPI scale while the LiquidGlassWidget handles the actual backdrop.
@@ -162,8 +190,7 @@ QFont displayFont(int pointSize, QFont::Weight weight = QFont::Normal)
     font.setFamily(pingFangFamily());
     font.setPointSize(pointSize);
     font.setWeight(weight);
-    font.setStyleStrategy(static_cast<QFont::StyleStrategy>(QFont::PreferAntialias | QFont::PreferQuality));
-    font.setHintingPreference(QFont::PreferFullHinting);
+    configureFontSmoothing(font, s_fontSmoothingLevel);
     return font;
 }
 
@@ -625,12 +652,38 @@ QString BatteryWidget::pingFangFontFamily()
         QFont applicationFont = app->font();
         if (applicationFont.family() != family) {
             applicationFont.setFamily(family);
-            applicationFont.setStyleStrategy(static_cast<QFont::StyleStrategy>(QFont::PreferAntialias | QFont::PreferQuality));
-            applicationFont.setHintingPreference(QFont::PreferFullHinting);
+            configureFontSmoothing(applicationFont, s_fontSmoothingLevel);
             app->setFont(applicationFont);
         }
     }
     return family;
+}
+
+void BatteryWidget::setGlobalFontSmoothing(int level)
+{
+    const int next = qBound(0, level, 3);
+    s_fontSmoothingLevel = next;
+    QSettings().setValue(QStringLiteral("appearance/fontSmoothing"), next);
+    if (auto* app = qobject_cast<QApplication*>(QCoreApplication::instance())) {
+        QFont font = app->font();
+        font.setFamily(pingFangFamily());
+        configureFontSmoothing(font, next);
+        app->setFont(font);
+        for (QWidget* window : app->topLevelWidgets()) {
+            if (window)
+                window->update();
+        }
+    }
+}
+
+int BatteryWidget::globalFontSmoothing()
+{
+    return s_fontSmoothingLevel;
+}
+
+void BatteryWidget::applyFontSmoothing(QFont& font)
+{
+    configureFontSmoothing(font, s_fontSmoothingLevel);
 }
 
 QList<BatteryWidget*> BatteryWidget::s_instances;
@@ -648,7 +701,7 @@ BatteryWidget::BatteryWidget(QWidget* parent, CardKind kind, bool primary,
         m_hostDeviceName = QStringLiteral("本机");
     s_instances.append(this);
     QSettings settings;
-    m_uiScale = qBound<qreal>(0.40, settings.value(QStringLiteral("appearance/scale"), 1.0).toDouble(), 1.35);
+    m_uiScale = qBound<qreal>(0.40, settings.value(QStringLiteral("appearance/scale"), 1.0).toDouble(), 2.0);
     setGlassMargins(0);
     const int initialCell = qMax(1, qRound(kGridBaseCell * m_uiScale));
     QScreen* initialScreen = QGuiApplication::primaryScreen();
@@ -664,14 +717,23 @@ BatteryWidget::BatteryWidget(QWidget* parent, CardKind kind, bool primary,
     const bool savedSystemBlur = settings.value(QStringLiteral("appearance/systemBlur"), false).toBool();
     const bool savedMouseThrough = settings.value(QStringLiteral("interaction/mouseThrough"), false).toBool();
     const bool savedLowPowerRefresh = settings.value(QStringLiteral("interaction/lowPowerRefresh"), false).toBool();
+    const bool savedLiveBackdrop = settings.value(QStringLiteral("appearance/liveBackdrop"), false).toBool();
+    const int savedFontSmoothing = qBound(0,
+        settings.value(QStringLiteral("appearance/fontSmoothing"), 2).toInt(), 3);
     const int savedBlurStrength = settings.value(QStringLiteral("appearance/blurStrength"), 55).toInt();
     const qreal savedOpacity = settings.value(QStringLiteral("appearance/opacity"), 1.0).toDouble();
     const int savedBackend = settings.value(QStringLiteral("performance/renderBackend"), 0).toInt();
+    const qreal savedRenderQuality = qBound<qreal>(0.5,
+        settings.value(QStringLiteral("performance/renderScale"), 1.0).toDouble(), 1.5);
     setRenderBackend(static_cast<RenderBackend>(qBound(0, savedBackend, 2)));
+    setRenderScale(float(savedRenderQuality));
     setSystemBlurEnabled(savedSystemBlur);
     setMaterialBlurStrength(savedBlurStrength);
     setMouseThroughEnabled(savedMouseThrough);
     setLowPowerRefreshEnabled(savedLowPowerRefresh);
+    setLiveBackdropEnabled(savedLiveBackdrop);
+    if (savedFontSmoothing != globalFontSmoothing())
+        setGlobalFontSmoothing(savedFontSmoothing);
     setGlassOpacity(savedOpacity);
     setToolTip(m_kind == CardKind::Battery ? QStringLiteral("电量 · 拖动移动组件")
                : (m_kind == CardKind::Weather ? QStringLiteral("天气 · 拖动移动组件")
@@ -740,7 +802,7 @@ BatteryWidget::BatteryWidget(QWidget* parent, CardKind kind, bool primary,
             m_weatherCityId = savedCityId;
             refreshWeather();
         }
-        const qreal scale = qBound<qreal>(0.40, current.value(QStringLiteral("appearance/scale"), 1.0).toDouble(), 1.35);
+        const qreal scale = qBound<qreal>(0.40, current.value(QStringLiteral("appearance/scale"), 1.0).toDouble(), 2.0);
         if (!qFuzzyCompare(scale, m_uiScale))
             applyScale(scale);
         const bool blur = current.value(QStringLiteral("appearance/systemBlur"), false).toBool();
@@ -758,6 +820,17 @@ BatteryWidget::BatteryWidget(QWidget* parent, CardKind kind, bool primary,
         const bool lowPower = current.value(QStringLiteral("interaction/lowPowerRefresh"), false).toBool();
         if (lowPower != lowPowerRefreshEnabled())
             setLowPowerRefreshEnabled(lowPower);
+        const bool liveBackdrop = current.value(QStringLiteral("appearance/liveBackdrop"), false).toBool();
+        if (liveBackdrop != liveBackdropEnabled())
+            setLiveBackdropEnabled(liveBackdrop);
+        const int fontSmoothing = qBound(0,
+            current.value(QStringLiteral("appearance/fontSmoothing"), 2).toInt(), 3);
+        if (fontSmoothing != globalFontSmoothing())
+            setGlobalFontSmoothing(fontSmoothing);
+        const qreal renderQuality = qBound<qreal>(0.5,
+            current.value(QStringLiteral("performance/renderScale"), 1.0).toDouble(), 1.5);
+        if (qAbs(renderQuality - qreal(renderScale())) > 0.001)
+            setRenderScale(float(renderQuality));
         const RenderBackend backend = static_cast<RenderBackend>(
             qBound(0, current.value(QStringLiteral("performance/renderBackend"), 0).toInt(), 2));
         if (backend != renderBackend())
@@ -918,7 +991,7 @@ void BatteryWidget::toggleLayout()
 
 void BatteryWidget::applyScale(qreal scale)
 {
-    m_uiScale = qBound<qreal>(0.40, scale, 1.35);
+    m_uiScale = qBound<qreal>(0.40, scale, 2.0);
     QSettings settings;
     settings.setValue(QStringLiteral("appearance/scale"), m_uiScale);
     setGlassRadius(34.0 * m_uiScale);
@@ -1015,9 +1088,15 @@ void BatteryWidget::arrangeGroup()
 
 void BatteryWidget::syncGroupSettings(qreal scale, bool systemBlur, int blurStrength,
                                       qreal opacity, bool mouseThrough, bool lowPower,
+                                      bool liveBackdrop, qreal renderQuality, int fontSmoothing,
                                       RenderBackend renderBackend)
 {
-    QSettings().setValue(QStringLiteral("performance/renderBackend"), int(renderBackend));
+    QSettings settings;
+    settings.setValue(QStringLiteral("performance/renderBackend"), int(renderBackend));
+    settings.setValue(QStringLiteral("performance/renderScale"), renderQuality);
+    settings.setValue(QStringLiteral("appearance/liveBackdrop"), liveBackdrop);
+    settings.setValue(QStringLiteral("appearance/fontSmoothing"), fontSmoothing);
+    setGlobalFontSmoothing(fontSmoothing);
     // Changing material, opacity or input mode must not alter a user's
     // carefully placed cards. Reflow only when the scale actually changes,
     // because that is the one setting that changes the grid geometry.
@@ -1036,6 +1115,8 @@ void BatteryWidget::syncGroupSettings(qreal scale, bool systemBlur, int blurStre
         widget->setGlassOpacity(opacity);
         widget->setMouseThroughEnabled(mouseThrough);
         widget->setLowPowerRefreshEnabled(lowPower);
+        widget->setLiveBackdropEnabled(liveBackdrop);
+        widget->setRenderScale(float(renderQuality));
         widget->setRenderBackend(renderBackend);
     }
     if (scaleChanged)
@@ -1203,7 +1284,7 @@ void BatteryWidget::showGridPreview(CardKind kind, int variant, const QPoint& de
 {
     QSettings settings;
     const qreal scale = qBound<qreal>(0.40,
-        settings.value(QStringLiteral("appearance/scale"), 1.0).toDouble(), 1.35);
+        settings.value(QStringLiteral("appearance/scale"), 1.0).toDouble(), 2.0);
     QScreen* screen = QGuiApplication::screenAt(desktopPoint);
     if (!screen)
         screen = QGuiApplication::primaryScreen();
@@ -1421,6 +1502,10 @@ void BatteryWidget::showWidgetLibrary()
                         hideGridPreview();
                 });
     }
+    // The gallery can outlive a settings dialog. Reapply the current global
+    // backdrop and quality settings every time it is opened.
+    m_library->setLiveBackdropEnabled(liveBackdropEnabled());
+    m_library->setRenderScale(renderScale());
     if (!m_library->isVisible()) {
         m_library->prepareBackdrop();
         m_library->show();
@@ -1838,6 +1923,7 @@ void BatteryWidget::searchWeatherCity()
         request.setHeader(QNetworkRequest::UserAgentHeader,
                           QStringLiteral("Mozilla/5.0 macdowsOS Widget/1.0"));
         request.setRawHeader("Referer", "https://www.weather.com.cn/");
+        request.setTransferTimeout(15000);
         QNetworkReply* issuedReply = m_weatherNetwork->get(request);
         searchReply = issuedReply;
         issuedReply->setProperty("weatherSearch", true);
@@ -1909,8 +1995,13 @@ void BatteryWidget::searchWeatherCity()
 
     const int result = dialog.exec();
     if (searchReply) {
-        searchReply->abort();
-        searchReply->deleteLater();
+        // abort() can synchronously emit finished(), whose handler clears
+        // searchReply. Detach it before aborting and use a stable local guard.
+        const QPointer<QNetworkReply> pending = searchReply;
+        searchReply = nullptr;
+        pending->abort();
+        if (pending)
+            pending->deleteLater();
     }
     if (result != QDialog::Accepted || !results->currentItem())
         return;
@@ -2246,6 +2337,8 @@ void BatteryWidget::showSettingsDialog()
     scaleBox->addItem(QStringLiteral("原始（100%）"), 1.00);
     scaleBox->addItem(QStringLiteral("大（115%）"), 1.15);
     scaleBox->addItem(QStringLiteral("特大（135%）"), 1.35);
+    scaleBox->addItem(QStringLiteral("超大（160%）"), 1.60);
+    scaleBox->addItem(QStringLiteral("高分屏（200%）"), 2.00);
     int selected = 4;
     for (int i = 0; i < scaleBox->count(); ++i) {
         if (qFuzzyCompare(scaleBox->itemData(i).toDouble(), m_uiScale)) {
@@ -2262,12 +2355,41 @@ void BatteryWidget::showSettingsDialog()
     materialBox->setCurrentIndex(systemBlurEnabled() ? 1 : 0);
     form->addRow(QStringLiteral("背景材质"), materialBox);
 
+    auto* liveBackdrop = new QCheckBox(QStringLiteral("实时渲染窗口后的内容"), &dialog);
+    liveBackdrop->setChecked(liveBackdropEnabled());
+    form->addRow(QStringLiteral("背景采样"), liveBackdrop);
+
     auto* renderBox = new QComboBox(&dialog);
     renderBox->addItem(QStringLiteral("自动（推荐）"), int(RenderBackend::AutoBackend));
     renderBox->addItem(QStringLiteral("GPU · OpenGL Shader"), int(RenderBackend::GpuBackend));
     renderBox->addItem(QStringLiteral("CPU · 软件缓存模糊"), int(RenderBackend::CpuBackend));
     renderBox->setCurrentIndex(renderBox->findData(int(renderBackend())));
     form->addRow(QStringLiteral("渲染方式"), renderBox);
+
+    auto* qualityBox = new QComboBox(&dialog);
+    qualityBox->addItem(QStringLiteral("节能（60% 设备像素）"), 0.60);
+    qualityBox->addItem(QStringLiteral("均衡（80% 设备像素）"), 0.80);
+    qualityBox->addItem(QStringLiteral("原生（100% 设备像素）"), 1.00);
+    qualityBox->addItem(QStringLiteral("高质量（125% 超采样，推荐）"), 1.25);
+    qualityBox->addItem(QStringLiteral("极致（150% 超采样）"), 1.50);
+    int qualityIndex = 2;
+    for (int i = 0; i < qualityBox->count(); ++i) {
+        if (qAbs(qualityBox->itemData(i).toDouble() - qreal(renderScale())) < 0.001) {
+            qualityIndex = i;
+            break;
+        }
+    }
+    qualityBox->setCurrentIndex(qualityIndex);
+    form->addRow(QStringLiteral("渲染清晰度"), qualityBox);
+
+    auto* fontSmoothingBox = new QComboBox(&dialog);
+    fontSmoothingBox->addItem(QStringLiteral("关闭"), 0);
+    fontSmoothingBox->addItem(QStringLiteral("标准（灰阶）"), 1);
+    fontSmoothingBox->addItem(QStringLiteral("清晰（推荐）"), 2);
+    fontSmoothingBox->addItem(QStringLiteral("最高（字形超采样）"), 3);
+    fontSmoothingBox->setCurrentIndex(
+        qMax(0, fontSmoothingBox->findData(globalFontSmoothing())));
+    form->addRow(QStringLiteral("字体抗锯齿"), fontSmoothingBox);
 
     auto* locationRow = new QWidget(&dialog);
     auto* locationLayout = new QHBoxLayout(locationRow);
@@ -2339,7 +2461,7 @@ void BatteryWidget::showSettingsDialog()
     form->addRow(QString(), startup);
     layout->addLayout(form);
 
-    auto* hint = new QLabel(QStringLiteral("玻璃会随背后的桌面、窗口和其他组件更新。节能刷新仅在鼠标穿透时降低刷新率；关闭鼠标穿透后始终保持正常响应。"), &dialog);
+    auto* hint = new QLabel(QStringLiteral("关闭实时背景时保持当前的壁纸采样；开启后会持续渲染每个组件正下方的窗口与组件。清晰模式按屏幕原生像素渲染，可改善高 DPI 下的模糊和锯齿。"), &dialog);
     hint->setStyleSheet(QStringLiteral("color:#9da8bd;"));
     hint->setWordWrap(true);
     layout->addWidget(hint);
@@ -2356,6 +2478,9 @@ void BatteryWidget::showSettingsDialog()
                           opacitySlider->value() / 100.0,
                           mouseThrough->isChecked(),
                           lowPower->isChecked() && mouseThrough->isChecked(),
+                          liveBackdrop->isChecked(),
+                          qualityBox->currentData().toDouble(),
+                          fontSmoothingBox->currentData().toInt(),
                           static_cast<RenderBackend>(renderBox->currentData().toInt()));
         if (m_startupAction) {
             QSignalBlocker blocker(m_startupAction);
@@ -2409,7 +2534,7 @@ void BatteryWidget::showAboutDialog()
     auto* title = new QLabel(QStringLiteral("macdowsOS Widget"), &dialog);
     title->setStyleSheet(QStringLiteral("font-size:20px; font-weight:600;"));
     layout->addWidget(title);
-    auto* text = new QLabel(QStringLiteral("雾蓝回针MistBlueSt 版本 1.0.0 beta1 版本号 20260916100b1"), &dialog);
+    auto* text = new QLabel(QStringLiteral("雾蓝回针MistBlueSt 版本 1.0.0 beta2 版本号 20260921100b2"), &dialog);
     text->setStyleSheet(QStringLiteral("color:#aab5c8; line-height:1.4;"));
     text->setWordWrap(true);
     layout->addWidget(text);
@@ -2757,7 +2882,7 @@ void BatteryWidget::paintOverlay(QPainter& p)
     p.save();
     p.scale(scale, scale);
     p.setRenderHint(QPainter::Antialiasing, true);
-    p.setRenderHint(QPainter::TextAntialiasing, true);
+    p.setRenderHint(QPainter::TextAntialiasing, globalFontSmoothing() > 0);
 
     // Geometry is expressed in the reference (100%) coordinate system and
     // scaled exactly once.  The glass object itself occupies the whole

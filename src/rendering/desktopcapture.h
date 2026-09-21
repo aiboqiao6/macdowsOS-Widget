@@ -17,13 +17,18 @@ struct Frame {
     quint64 scene = 0; // identity/order/geometry of lower external windows
     WId target = 0;
     qreal scale = 1;
+    QRect targetBounds; // physical coordinates at the instant of capture
+    bool validated = false; // checked on the GUI thread immediately before delivery
 };
 // All geometry is in Qt desktop coordinates. Capture is performed on a single
-// worker; callbacks run on the GUI thread only while their context is alive.
+// worker pool; callbacks run on the GUI thread only while their context is alive.
 void request(const QRect& area, qreal pixelScale, WId target, QObject* context,
              std::function<void(Frame)> completed, int priority = 0);
 Frame grab(const QRect& area, qreal pixelScale, WId target = 0);
 bool validate(Frame& frame);
+// Release persistent WGC sessions after the last glass surface is destroyed.
+// This is also useful for deterministic teardown between independent hosts.
+void resetWorkerStreams();
 
 // Holds only verified external pixels. Glass surfaces are composed afterwards
 // and must never be written back to this cache (which would cause feedback).

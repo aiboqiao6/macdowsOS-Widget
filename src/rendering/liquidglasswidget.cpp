@@ -111,6 +111,8 @@ void setNativeBackdrop(HWND window, bool enabled, qreal opacity)
 #endif
 
 namespace {
+constexpr int kWallpaperIdleIntervalMs = 10000; // 0.1 FPS when live sampling is off
+
 // QImage is implicitly shared, so keeping one process-wide wallpaper canvas
 // avoids a full-screen RGBA allocation per widget (which is especially costly
 // on 4K/high-DPI desktops). Each instance still owns its small local crop.
@@ -123,60 +125,6 @@ QSize s_sharedWallpaperPixelSize;
 QList<LiquidGlassWidget*> s_liveGlassWidgets;
 QPointer<QTimer> s_compositeRefreshTimer;
 quint64 s_surfaceRevision = 0;
-
-// GDI captures are intentionally performed with WDA_NONE so external
-// screenshots can always include a card. The target HWND can therefore be
-// present in the sampled frame; replace just that rectangle with a smooth
-// interpolation of the pixels immediately outside its edge before the frame
-// enters the backdrop cache. This keeps the sampler self-feedback-free while
-// retaining the surrounding app/wallpaper colours instead of a hard fallback.
-void scrubTargetFromCapture(DesktopCapture::Frame& frame, const QRect& target)
-{
-    if (frame.image.isNull() || frame.area.isEmpty() || target.isEmpty())
-        return;
-    const qreal sx = frame.image.width() / qreal(frame.area.width());
-    const qreal sy = frame.image.height() / qreal(frame.area.height());
-    const QRect clipped = target.intersected(frame.area);
-    if (clipped.isEmpty())
-        return;
-    const int left = qBound(0, qFloor((clipped.left() - frame.area.left()) * sx),
-                            frame.image.width() - 1);
-    const int top = qBound(0, qFloor((clipped.top() - frame.area.top()) * sy),
-                           frame.image.height() - 1);
-    const int right = qBound(left, qCeil((clipped.right() + 1 - frame.area.left()) * sx) - 1,
-                             frame.image.width() - 1);
-    const int bottom = qBound(top, qCeil((clipped.bottom() + 1 - frame.area.top()) * sy) - 1,
-                              frame.image.height() - 1);
-    if (left <= 0 && right >= frame.image.width() - 1
-        && top <= 0 && bottom >= frame.image.height() - 1)
-        return;
-
-    const QImage source = frame.image;
-    QRegion usable = frame.valid;
-    usable -= QRect(left, top, right - left + 1, bottom - top + 1);
-    QPainter painter(&frame.image);
-    for (int y = top; y <= bottom; ++y) {
-        int sampleLeftX = left - 1;
-        while (sampleLeftX >= 0 && !usable.contains(QPoint(sampleLeftX, y)))
-            --sampleLeftX;
-        int sampleRightX = right + 1;
-        while (sampleRightX < source.width() && !usable.contains(QPoint(sampleRightX, y)))
-            ++sampleRightX;
-        if (sampleLeftX < 0 && sampleRightX >= source.width())
-            continue;
-        if (sampleLeftX < 0)
-            sampleLeftX = sampleRightX;
-        if (sampleRightX >= source.width())
-            sampleRightX = sampleLeftX;
-        const QColor leftColor = source.pixelColor(sampleLeftX, y);
-        const QColor rightColor = source.pixelColor(sampleRightX, y);
-        QLinearGradient gradient(QPointF(left, y), QPointF(qMax(left + 1, right), y));
-        gradient.setColorAt(0.0, leftColor);
-        gradient.setColorAt(1.0, rightColor);
-        painter.fillRect(QRect(left, y, right - left + 1, 1), gradient);
-    }
-    painter.end();
-}
 
 } // namespace
 
@@ -216,7 +164,7 @@ LiquidGlassWidget::LiquidGlassWidget(QWidget* parent)
     // Unchanged desktop pixels skip texture uploads and blur passes.
     m_backdropTimer = new QTimer(this);
     m_backdropTimer->setTimerType(Qt::CoarseTimer);
-    m_backdropTimer->setInterval(1000);
+    m_backdropTimer->setInterval(kWallpaperIdleIntervalMs);
     connect(m_backdropTimer, &QTimer::timeout,
             this, &LiquidGlassWidget::captureDesktopBackdrop);
     // Polling detects screenshot tools so the backdrop sampler can pause while
@@ -238,6 +186,10 @@ LiquidGlassWidget::~LiquidGlassWidget()
 {
     NativeWindows::unregisterGlassWindow(m_registeredGlassWindow);
     s_liveGlassWidgets.removeAll(this);
+    if (m_dragging)
+        refreshDragRendering();
+    if (s_liveGlassWidgets.isEmpty())
+        DesktopCapture::resetWorkerStreams();
     queueCompositeRefresh();
 }
 
@@ -263,19 +215,19 @@ QImage LiquidGlassWidget::captureDesktopComposite(QScreen* screen, const QRect& 
 {
     if (!screen || area.isEmpty())
         return {};
-    // The card remains capturable by external screenshot APIs. The internal
-    // sample uses a small runway around it so the target pixels can be
-    // replaced from real desktop colours before entering the cache.
+    // The card remains capturable normally. It is excluded only for the few
+    // milliseconds of this internal sample so its actual backdrop is read.
     const bool targetVisible = excluded && excluded->isVisible();
     const qreal scale = screen->devicePixelRatio() * renderScale;
     const QRect captureArea = targetVisible
-        ? area.adjusted(-24, -24, 24, 24) : area;
-    auto frame = DesktopCapture::grab(captureArea, scale,
-                                      excluded && excluded->isVisible() ? excluded->winId() : 0);
-#ifdef Q_OS_WIN
-    if (targetVisible)
-        scrubTargetFromCapture(frame, excluded->frameGeometry());
-#endif
+        ? area.adjusted(-48, -48, 48, 48) : area;
+    const WId target = excluded && excluded->isVisible() ? excluded->winId() : 0;
+    auto frame = DesktopCapture::grab(captureArea, scale, target);
+    // A foreground animation can change the native stack during the first
+    // synchronous sample. Retry once instead of exposing a null/partial frame
+    // to gallery hosts or explicit snapshot callers.
+    if (frame.image.isNull())
+        frame = DesktopCapture::grab(captureArea, scale, target);
     DesktopCapture::Cache temporary;
     QImage image = (excluded ? excluded->m_backdropCache : temporary).merge(std::move(frame), [=]() {
         return excluded ? excluded->wallpaperBackdrop(captureArea, scale) : QImage();
@@ -303,24 +255,14 @@ void LiquidGlassWidget::requestDesktopComposite(const QRect& area,
         return;
     }
     const qreal scale = screen->devicePixelRatio() * renderScale();
-    // A visible panel can occupy virtually the entire requested rectangle.
-    // Capture a small real-desktop runway around it so self-capture scrubbing
-    // always has valid pixels on both horizontal sides; otherwise the panel
-    // recursively enters its own backdrop and produces bright feedback
-    // flashes on successive live updates.
+    // Keep a small runway for motion so the previous verified cache remains
+    // useful while a newer frame is in flight.
     const QRect captureArea = isVisible()
-        ? area.adjusted(-32, -32, 32, 32).intersected(screen->geometry())
+        ? area.adjusted(-56, -56, 56, 56).intersected(screen->geometry())
         : area;
-    // Keep WDA_NONE at all times. The target rectangle is scrubbed from the
-    // returned frame instead, so Snipping Tool and screen recorders never see
-    // an excluded/blank card.
-    const QRect targetGeometry = frameGeometry();
     DesktopCapture::request(captureArea, scale, winId(), this,
-        [this, area, captureArea, scale, targetGeometry,
+        [this, area, captureArea, scale,
          completed = std::move(completed)](DesktopCapture::Frame frame) {
-#ifdef Q_OS_WIN
-            scrubTargetFromCapture(frame, targetGeometry);
-#endif
             QImage image = m_backdropCache.merge(
                 std::move(frame),
                 [=]() { return wallpaperBackdrop(captureArea, scale); });
@@ -397,6 +339,14 @@ void LiquidGlassWidget::compositeGlassWindows(QImage& image, const QRect& area,
             continue;
         painter.save();
         painter.setClipRegion(visible);
+        // The capture cache deliberately rejects the complete rectangle of a
+        // lower glass window. Rebuild that hole from the lower surface's own
+        // pristine shader input before drawing its translucent output. Using
+        // wallpaper as the hole fill made rounded corners sample a different
+        // colour, and repeated overlap/refraction appeared as growing glare.
+        if (!widget->m_lastCompositedBackdrop.isNull())
+            painter.drawImage(widget->frameGeometry(),
+                              widget->m_lastCompositedBackdrop);
         painter.drawImage(widget->frameGeometry(), snapshot);
         painter.restore();
     }
@@ -505,6 +455,49 @@ void LiquidGlassWidget::setLowPowerRefreshEnabled(bool enabled)
     updateRefreshRate();
 }
 
+void LiquidGlassWidget::setLiveBackdropEnabled(bool enabled)
+{
+    if (m_liveBackdropEnabled == enabled)
+        return;
+    m_liveBackdropEnabled = enabled;
+    QSettings settings;
+    settings.setValue(QStringLiteral("appearance/liveBackdrop"), enabled);
+    ++m_captureGeneration;
+    m_backdropCache.clear();
+    m_compositeCanvas = {};
+    m_lastCompositedBackdrop = {};
+    m_compositeCaptureClock.invalidate();
+    m_unchangedCaptures = 0;
+    updateRefreshRate();
+    if (isVisible() && m_desktopCaptureEnabled) {
+        // setInterval() does not make a stopped timer live.  Be explicit here
+        // because the sampler may have been stopped while hidden or during a
+        // system capture when this preference is changed.
+        if (m_backdropTimer && !m_systemCaptureActive)
+            m_backdropTimer->start();
+        captureDesktopBackdrop();
+    }
+}
+
+void LiquidGlassWidget::setRenderScale(float scale)
+{
+    const float before = renderScale();
+    QtGlassFlowScene::setRenderScale(scale);
+    if (qFuzzyCompare(before, renderScale()))
+        return;
+
+    ++m_captureGeneration;
+    m_backdropCache.clear();
+    m_compositeCanvas = {};
+    m_lastCompositedBackdrop = {};
+    m_compositeCaptureClock.invalidate();
+    m_wallpaperCanvas = {};
+    m_wallpaperPixelSize = {};
+    m_wallpaperRefreshClock.invalidate();
+    if (isVisible() && m_desktopCaptureEnabled)
+        QTimer::singleShot(0, this, &LiquidGlassWidget::captureDesktopBackdrop);
+}
+
 void LiquidGlassWidget::setDesktopCaptureEnabled(bool enabled)
 {
     if (m_desktopCaptureEnabled == enabled)
@@ -524,13 +517,47 @@ void LiquidGlassWidget::updateRefreshRate()
     // Reduced cadence is safe only for click-through cards: interactive cards
     // must remain responsive even if the preference was left enabled earlier.
     const bool lowPower = m_lowPowerRefresh && m_mouseThrough;
-    setRefreshInterval(lowPower ? 250 : 16);
+    const int displayInterval = activeDisplayInterval();
+    setRefreshInterval(lowPower ? 250 : displayInterval);
+    // Live mode must present at the same cadence even without pointer input
+    // or changing background pixels. Keep payload animation independent.
+    const bool desktopDrag = desktopDragActive();
+    setContinuousRenderingEnabled(m_liveBackdropEnabled && !desktopDrag);
     if (m_backdropTimer) {
         const bool dragging = m_dragging && !lowPower;
-        m_backdropTimer->setTimerType(dragging ? Qt::PreciseTimer : Qt::CoarseTimer);
-        const int interval = dragging ? 16 : (lowPower ? 250 : (m_unchangedCaptures >= 8 ? 100 : 33));
+        const bool live = !wallpaperOnlyWhenIdle() && !desktopDrag;
+        // Live sampling is presentation work, not a housekeeping task.  A
+        // coarse timer may be delayed by tens of milliseconds while the card
+        // is stationary, which made the enabled setting look frozen.  The
+        // single in-flight request below already provides back-pressure.
+        m_backdropTimer->setTimerType((dragging || live) ? Qt::PreciseTimer
+                                                        : Qt::VeryCoarseTimer);
+        const int interval = dragging ? displayInterval
+                           : (lowPower ? 250
+                           : (live ? displayInterval
+                                   : kWallpaperIdleIntervalMs));
         if (m_backdropTimer->interval() != interval)
             m_backdropTimer->setInterval(interval);
+    }
+}
+
+bool LiquidGlassWidget::desktopDragActive()
+{
+    for (const auto* widget : std::as_const(s_liveGlassWidgets))
+        if (widget->m_dragging && widget->directBackdropDuringDrag())
+            return true;
+    return false;
+}
+
+void LiquidGlassWidget::refreshDragRendering()
+{
+    if (desktopDragActive())
+        DesktopCapture::resetWorkerStreams();
+    for (auto* widget : std::as_const(s_liveGlassWidgets)) {
+        ++widget->m_captureGeneration;
+        widget->m_compositeCaptureClock.invalidate();
+        widget->updateRefreshRate();
+        QTimer::singleShot(0, widget, &LiquidGlassWidget::captureDesktopBackdrop);
     }
 }
 
@@ -663,12 +690,21 @@ void LiquidGlassWidget::updateGlassObjectGeometry()
 
 void LiquidGlassWidget::updateWindowMask()
 {
+#ifdef Q_OS_WIN
+    // A native HRGN is binary and clips the alpha-smoothed OpenGL edge back
+    // to whole logical pixels.  On fractional DPI scales that produces the
+    // staircase visible around rounded cards.  Windows' translucent
+    // compositor already honours the framebuffer alpha, so keep the native
+    // window rectangular and let the shader own the antialiased silhouette.
+    clearMask();
+#else
     QPainterPath shape;
     // The OpenGL glass object is laid out from (0,0) to the widget bounds.
     // Keep the native window region on that exact same silhouette; an extra
     // inset here produces a second, visibly smaller rounded rectangle.
     shape.addRoundedRect(QRectF(rect()), m_glassRadius, m_glassRadius);
     setMask(QRegion(shape.toFillPolygon().toPolygon()));
+#endif
 }
 
 void LiquidGlassWidget::moveToDesktopCorner(int margin)
@@ -704,11 +740,10 @@ bool LiquidGlassWidget::rebuildWallpaperCanvas(QScreen* screen)
     const qreal dpr = screen->devicePixelRatio();
     const QSize nativeSize(qMax(1, qRound(screen->size().width() * dpr)),
                            qMax(1, qRound(screen->size().height() * dpr)));
-    // A full 4K/200% desktop can exceed 130 MB in RGBA form.  A 2560-pixel
-    // long edge is visually lossless for a small glass card and keeps one
-    // shared process-wide canvas inexpensive; the crop below scales it back
-    // to the widget's native framebuffer size.
-    constexpr int kBackdropMaxDimension = 2560;
+    // Let supersampled quality modes draw from a correspondingly larger
+    // wallpaper source. This keeps 125%/150% rendering from merely enlarging
+    // an already reduced image, while the native desktop size remains the cap.
+    const int kBackdropMaxDimension = qRound(2560 * qMax<qreal>(1.0, renderScale()));
     const qreal canvasScale = qMin<qreal>(1.0,
         kBackdropMaxDimension / qreal(qMax(nativeSize.width(), nativeSize.height())));
     const QSize pixelSize(qMax(1, qRound(nativeSize.width() * canvasScale)),
@@ -742,7 +777,7 @@ bool LiquidGlassWidget::rebuildWallpaperCanvas(QScreen* screen)
 
     QImage canvas(pixelSize, QImage::Format_RGBA8888);
     canvas.fill(backgroundColor);
-    const QImage wallpaper(path);
+    const QImage wallpaper = path.isEmpty() ? QImage() : QImage(path);
     if (!wallpaper.isNull()) {
         QPainter painter(&canvas);
         painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
@@ -825,7 +860,6 @@ void LiquidGlassWidget::setSystemCaptureMode(bool active)
         return;
     m_systemCaptureActive = active;
     ++m_captureGeneration;
-    m_capturePending = false;
     m_compositeCaptureClock.invalidate();
 
     // Pause sampling while the external screenshot surface is active; this
@@ -841,6 +875,20 @@ void LiquidGlassWidget::setSystemCaptureMode(bool active)
         m_backdropTimer->start();
         QTimer::singleShot(0, this, &LiquidGlassWidget::captureDesktopBackdrop);
     }
+}
+
+int LiquidGlassWidget::activeDisplayInterval() const
+{
+    QScreen* screen = QGuiApplication::screenAt(frameGeometry().center());
+    if (!screen)
+        screen = this->screen();
+    qreal refreshRate = screen ? screen->refreshRate() : 60.0;
+    if (!qIsFinite(refreshRate) || refreshRate < 24.0)
+        refreshRate = 60.0;
+    // Use floor rather than round so the timer never undershoots the display
+    // rate (59.94 -> 16 ms, 144 -> 6 ms, 240 -> 4 ms). Actual presentation is
+    // synchronized by Qt and the Windows desktop compositor.
+    return qBound(2, qFloor(1000.0 / qMin<qreal>(refreshRate, 500.0)), 42);
 }
 
 bool LiquidGlassWidget::captureCompositedBackdrop(QScreen* screen)
@@ -864,10 +912,9 @@ bool LiquidGlassWidget::captureCompositedBackdrop(QScreen* screen)
     // widget can be in flight, so input never builds a queue of stale frames.
     // Keep a small movement runway so crops stay responsive while dragging,
     // but avoid the 3x pixel area of the previous 128 px pad.
-    // A small idle runway provides external pixels on both sides of the card
-    // for self-capture scrubbing. It is proportional to the reference canvas
-    // and remains negligible compared with the full desktop capture.
-    const int padding = m_dragging ? 72 : 24;
+    // A small idle runway keeps motion crops responsive without expanding the
+    // capture to a large part of a high-DPI desktop.
+    const int padding = m_dragging ? 96 : 56;
     const QRect targetGeometry = frameGeometry();
     const QRect area = targetGeometry.adjusted(-padding, -padding, padding, padding);
     const quint64 generation = m_captureGeneration;
@@ -877,12 +924,10 @@ bool LiquidGlassWidget::captureCompositedBackdrop(QScreen* screen)
     // current position from completed frames, independently of capture age.
     const qreal scale = screen->devicePixelRatio() * renderScale();
     DesktopCapture::request(area, scale, winId(), this,
-        [this, area, scale, targetGeometry, generation](DesktopCapture::Frame frame) {
-#ifdef Q_OS_WIN
-        scrubTargetFromCapture(frame, targetGeometry);
-#endif
+        [this, area, scale, generation](DesktopCapture::Frame frame) {
         m_capturePending = false;
-        if (generation != m_captureGeneration || !isVisible() || !m_desktopCaptureEnabled)
+        if (generation != m_captureGeneration || !isVisible() || !m_desktopCaptureEnabled
+            || m_systemCaptureActive || fullyOccluded())
             return;
         QImage image = m_backdropCache.merge(std::move(frame), [=]() { return wallpaperBackdrop(area, scale); });
         if (!image.isNull()) {
@@ -928,6 +973,12 @@ bool LiquidGlassWidget::fullyOccluded() const
 
 void LiquidGlassWidget::updateCompositeCrop()
 {
+    // A desktop drag owns a fresh wallpaper/lower-card composition. Neither a
+    // queued capture nor another card's frame signal may restore an old crop.
+    if (directBackdropDuringDrag() && desktopDragActive())
+        return;
+    if (fullyOccluded())
+        return;
     if (wallpaperOnlyWhenIdle() && !m_dragging)
         return;
     if (m_compositeCanvas.isNull() || !m_compositeArea.contains(frameGeometry()))
@@ -972,16 +1023,37 @@ void LiquidGlassWidget::captureDesktopBackdrop()
 {
     if (!m_desktopCaptureEnabled || !isVisible() || m_systemCaptureActive)
         return;
+    if (desktopDragActive() && !directBackdropDuringDrag())
+        return;
     QScreen* screen = QGuiApplication::screenAt(geometry().center());
     if (!screen)
         screen = QGuiApplication::primaryScreen();
     if (!screen)
         return;
 
+    // During a desktop-card drag ordinary application windows are hidden by
+    // the host. Build the exact current backdrop locally from the shared
+    // wallpaper plus lower glass surfaces. This path is independent of the
+    // asynchronous capture worker, whose result cannot be accepted while the
+    // target HWND is changing position, and therefore remains smooth even
+    // across movements larger than the capture runway.
+    if (m_dragging && directBackdropDuringDrag()) {
+        setRenderingSuspended(false);
+        QImage sample = wallpaperBackdrop(frameGeometry(),
+                                          screen->devicePixelRatio() * renderScale());
+        compositeGlassWindows(sample, frameGeometry(), this);
+        if (sample != m_lastCompositedBackdrop) {
+            m_lastCompositedBackdrop = sample;
+            setBackgroundImage(sample);
+        }
+        return;
+    }
+
     // Desktop widgets stay visually quiet when not moving: their glass samples
     // the wallpaper only, avoiding periodic lower-window captures and texture
     // churn. Dragging switches to the live composited path below immediately.
-    if (wallpaperOnlyWhenIdle() && !m_dragging) {
+    if ((wallpaperOnlyWhenIdle() || (directBackdropDuringDrag() && desktopDragActive()))
+        && !m_dragging) {
         // A card may have been suspended while it was covered during a prior
         // live-capture phase. Idle wallpaper mode must always restore its own
         // paint loop and keep the native desktop layer in sync as well.
@@ -1020,6 +1092,10 @@ QImage LiquidGlassWidget::wallpaperBackdrop(const QRect& area, qreal scale)
                    QImage::Format_RGB32);
     result.fill(Qt::black);
     QPainter painter(&result);
+    // Supersampled quality requests a fractional enlargement of the native
+    // wallpaper canvas. Nearest-neighbour copies create repeating pixel blocks
+    // before the blur even begins, especially at 125%/150% quality.
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
     for (QScreen* screen : QGuiApplication::screens()) {
         const QRect part = area.intersected(screen->geometry());
         if (part.isEmpty())
@@ -1130,6 +1206,8 @@ void LiquidGlassWidget::finishWindowDrag()
     // Snap and hide the preview before demoting the card or taking its final
     // background, so the preview cannot become part of the stored material.
     windowDragFinished();
+    if (directBackdropDuringDrag())
+        refreshDragRendering();
     updateWindowLayer();
     // Drop pixels captured while this card was in the drag/topmost band
     // immediately, including when an earlier worker request is still pending.
@@ -1165,6 +1243,15 @@ bool LiquidGlassWidget::event(QEvent* event)
         m_windowLayerInitialized = false;
         QTimer::singleShot(0, this, [this]() { updateCaptureExclusion(); });
     }
+    if (event->type() == QEvent::DevicePixelRatioChange) {
+        ++m_captureGeneration;
+        m_backdropCache.clear();
+        m_compositeCanvas = {};
+        m_lastCompositedBackdrop = {};
+        m_compositeCaptureClock.invalidate();
+        updateWindowMask();
+        QTimer::singleShot(0, this, &LiquidGlassWidget::captureDesktopBackdrop);
+    }
     return QtGlassFlowScene::event(event);
 }
 
@@ -1177,7 +1264,9 @@ void LiquidGlassWidget::moveEvent(QMoveEvent* event)
         // During a drag mouseMoveEvent() performs the crop once after the
         // geometry has settled; doing it here as well caused two full QImage
         // copies per pointer event and produced visible judder.
-        if (!m_dragging)
+        if (m_dragging)
+            updateRefreshRate();
+        else
             m_compositeCaptureClock.invalidate();
     }
 }
@@ -1210,7 +1299,18 @@ void LiquidGlassWidget::mouseMoveEvent(QMouseEvent* event)
             m_dragging = true;
             ++m_captureGeneration;
             m_compositeCaptureClock.invalidate();
+            // Static cards normally stop their scene timer completely.  A
+            // window drag is still an interactive animation even though no
+            // internal glass object is being dragged, so explicitly enable
+            // the active display's render cadence until finishWindowDrag()
+            // disables it.
+            // Without this, frames are presented only when the asynchronous
+            // backdrop sampler completes (typically around four times a
+            // second), independently of the selected render quality.
+            setInteractionActive(true);
             windowDragStarted();
+            if (directBackdropDuringDrag())
+                refreshDragRendering();
             updateWindowLayer();
             updateRefreshRate();
         }

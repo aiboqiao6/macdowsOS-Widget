@@ -7,12 +7,15 @@
 
 #include <QApplication>
 #include <QDir>
+#include <QDialog>
+#include <QLineEdit>
 #include <QFrame>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QMouseEvent>
 #include <QNetworkReply>
+#include <QNetworkAccessManager>
 #include <QNetworkProxy>
 #include <QPainter>
 #include <QScreen>
@@ -25,18 +28,27 @@
 #include <QSystemTrayIcon>
 #include <QMenu>
 #include <QtTest>
+#include <algorithm>
+#include <memory>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
+#include <psapi.h>
 #endif
 
 class ColorWindow : public QWidget {
 public:
     QColor color{210, 35, 25};
+    QColor centerStripe;
     ColorWindow() {
         setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
     }
-    void paintEvent(QPaintEvent*) override { QPainter(this).fillRect(rect(), color); }
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.fillRect(rect(), color);
+        if (centerStripe.isValid())
+            painter.fillRect(QRect(width() / 3, 0, width() / 3, height()), centerStripe);
+    }
 };
 
 class TestGlass : public LiquidGlassWidget {
@@ -58,6 +70,35 @@ public:
     }
 };
 
+class ToggleLiveGlass : public TestGlass {
+protected:
+    bool wallpaperOnlyWhenIdle() const override { return !liveBackdropEnabled(); }
+};
+
+class DesktopDragGlass : public ToggleLiveGlass {
+protected:
+    bool directBackdropDuringDrag() const override { return true; }
+};
+
+class TextQualityGlass : public TestGlass {
+public:
+    int quality = 0;
+    void paintOverlay(QPainter& painter) override {
+        painter.scale(.85, .85);
+        QFont font(BatteryWidget::pingFangFontFamily(), 52, QFont::Normal);
+        BatteryWidget::applyFontSmoothing(font);
+        painter.setFont(font);
+        painter.setPen(Qt::white);
+        painter.setRenderHint(QPainter::TextAntialiasing, quality > 0);
+        ResponsiveLayout::drawSingleLine(painter, QRectF(12, 12, 530, 94),
+            Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("长沙 28.8°"));
+        font.setPointSize(19);
+        painter.setFont(font);
+        ResponsiveLayout::drawSingleLine(painter, QRectF(12, 110, 530, 45),
+            Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("11时  14时  17时  32°"));
+    }
+};
+
 static void mouse(QWidget& widget, QEvent::Type type, QPoint local, QPoint global,
                   Qt::MouseButton button, Qt::MouseButtons buttons)
 {
@@ -70,6 +111,31 @@ static QColor centerPixel(QOpenGLWidget& widget)
     const QImage image = widget.grabFramebuffer();
     return image.isNull() ? QColor() : image.pixelColor(image.rect().center());
 }
+
+class PendingReply : public QNetworkReply {
+public:
+    explicit PendingReply(QObject* parent) : QNetworkReply(parent) {
+        open(QIODevice::ReadOnly | QIODevice::Unbuffered);
+    }
+    void abort() override {
+        setError(OperationCanceledError, QStringLiteral("Cancelled"));
+        setFinished(true);
+        emit finished();
+    }
+protected:
+    qint64 readData(char*, qint64) override { return -1; }
+};
+
+class PendingNetwork : public QNetworkAccessManager {
+public:
+    using QNetworkAccessManager::QNetworkAccessManager;
+    QPointer<QNetworkReply> pending;
+protected:
+    QNetworkReply* createRequest(Operation, const QNetworkRequest&, QIODevice*) override {
+        pending = new PendingReply(this);
+        return pending;
+    }
+};
 
 class FakeReply : public QNetworkReply {
 public:
@@ -106,6 +172,12 @@ private slots:
         // Regression tests never contact the live weather/dictionary services.
         QNetworkProxy::setApplicationProxy(QNetworkProxy(QNetworkProxy::HttpProxy, "127.0.0.1", 9));
         QDir().mkpath("artifacts");
+    }
+
+    void init() {
+        // Each test changes persisted appearance/interaction settings. Avoid
+        // leaking click-through or live mode into the next independent case.
+        QSettings().clear();
     }
 
     void responsiveLayoutUsesFontMetricsAndDeviceScale() {
@@ -531,20 +603,35 @@ private slots:
         glass.raise();
         QVERIFY(QTest::qWaitForWindowExposed(&glass));
         QVERIFY(glass.excluded());
-        QTRY_VERIFY_WITH_TIMEOUT(centerPixel(glass).red() > 170, 6000);
-        // A changing application behind the glass must update without moving
-        // the widget or changing the wallpaper.
-        background.color = QColor(20, 60, 215);
-        background.update();
-        QElapsedTimer latency;
-        latency.start();
-        QTRY_VERIFY_WITH_TIMEOUT(centerPixel(glass).blue() > 170, 3500);
-        qInfo() << "Live backdrop change observed in" << latency.elapsed() << "ms";
-        glass.grabFramebuffer().save("artifacts/live-blue.png");
+        QColor initialBackdrop;
+        QElapsedTimer initialCaptureClock;
+        initialCaptureClock.start();
+        do {
+            initialBackdrop = centerPixel(glass);
+            if (initialBackdrop.red() > 170)
+                break;
+            QTest::qWait(50);
+        } while (initialCaptureClock.elapsed() < 6000);
+        QVERIFY2(initialBackdrop.red() > 170,
+                 qPrintable(QStringLiteral("initial backdrop rgba(%1,%2,%3,%4)")
+                                .arg(initialBackdrop.red()).arg(initialBackdrop.green())
+                                .arg(initialBackdrop.blue()).arg(initialBackdrop.alpha())));
+        // The old self-removal code stretched the two horizontal edge pixels
+        // across the card, destroying this vertical feature into scan-line
+        // bands. The internal exclusion path must reveal its real 2-D detail.
+        background.centerStripe = QColor(20, 210, 45);
+        background.repaint();
+        QColor observed;
+        QTRY_VERIFY_WITH_TIMEOUT((observed = centerPixel(glass),
+                                  observed.green() > 155 && observed.red() < 120), 3500);
+        glass.grabFramebuffer().save("artifacts/live-pattern.png");
         for (int frame = 0; frame < 12; ++frame) {
             QTest::qWait(35);
             const QColor color = centerPixel(glass);
-            QVERIFY2(color.blue() > 170 && color.red() < 70, "self-feedback or wallpaper flash");
+            QVERIFY2(color.green() > 155 && color.red() < 120,
+                     qPrintable(QStringLiteral("stable frame %1 sampled rgba(%2,%3,%4,%5)")
+                                    .arg(frame).arg(color.red()).arg(color.green())
+                                    .arg(color.blue()).arg(color.alpha())));
 #ifdef Q_OS_WIN
             DWORD affinity = 0;
             QVERIFY(GetWindowDisplayAffinity(reinterpret_cast<HWND>(glass.winId()), &affinity));
@@ -558,7 +645,11 @@ private slots:
             const QPoint global = original + QPoint(50 + i * 3, 50);
             mouse(glass, QEvent::MouseMove, {50, 50}, global, Qt::NoButton, Qt::LeftButton);
             QTest::qWait(16);
-            QVERIFY(centerPixel(glass).blue() > 170);
+            const QColor color = centerPixel(glass);
+            QVERIFY2(color.green() > 155 && color.red() < 120,
+                     qPrintable(QStringLiteral("drag frame %1 sampled rgba(%2,%3,%4,%5)")
+                                    .arg(i).arg(color.red()).arg(color.green())
+                                    .arg(color.blue()).arg(color.alpha())));
         }
         QVERIFY(glass.dragging());
         mouse(glass, QEvent::MouseButtonRelease, {50, 50}, glass.pos() + QPoint(50, 50), Qt::LeftButton, Qt::NoButton);
@@ -569,6 +660,107 @@ private slots:
         const quint64 revision = glass.frameRevision();
         QTest::qWait(150);
         QCOMPARE(glass.frameRevision(), revision);
+    }
+
+    void draggingKeepsInteractiveRenderCadence() {
+        TestGlass glass;
+        // Isolate the scene scheduler from desktop-capture completions: a
+        // moving static card must repaint at interaction cadence on its own.
+        glass.setDesktopCaptureEnabled(false);
+        glass.move(QGuiApplication::primaryScreen()->availableGeometry().center()
+                   - QPoint(glass.width() / 2, glass.height() / 2));
+        glass.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&glass));
+        QTest::qWait(80);
+
+        const QPoint origin = glass.pos();
+        mouse(glass, QEvent::MouseButtonPress, {30, 30}, origin + QPoint(30, 30),
+              Qt::LeftButton, Qt::LeftButton);
+        mouse(glass, QEvent::MouseMove, {60, 30}, origin + QPoint(60, 30),
+              Qt::NoButton, Qt::LeftButton);
+        QVERIFY(glass.dragging());
+        QScreen* dragScreen = QGuiApplication::screenAt(glass.frameGeometry().center());
+        qreal refreshRate = dragScreen ? dragScreen->refreshRate() : 60.0;
+        if (!qIsFinite(refreshRate) || refreshRate < 24.0)
+            refreshRate = 60.0;
+        const int expectedInterval = qBound(
+            2, qFloor(1000.0 / qMin<qreal>(refreshRate, 500.0)), 42);
+        QCOMPARE(glass.refreshInterval(), expectedInterval);
+        const quint64 startRevision = glass.frameRevision();
+        QTest::qWait(140);
+        QVERIFY2(glass.frameRevision() >= startRevision + 3,
+                 qPrintable(QStringLiteral("drag produced only %1 frames in 140 ms")
+                                .arg(glass.frameRevision() - startRevision)));
+
+        mouse(glass, QEvent::MouseButtonRelease, {60, 30}, glass.pos() + QPoint(60, 30),
+              Qt::LeftButton, Qt::NoButton);
+        QVERIFY(!glass.dragging());
+    }
+
+    void desktopDragUsesSameWorkWithLiveOnAndOff() {
+        DesktopDragGlass lower;
+        DesktopDragGlass moving;
+        const QPoint center = QGuiApplication::primaryScreen()->availableGeometry().center();
+        lower.move(center - QPoint(110, 70));
+        moving.move(center - QPoint(30, 45));
+        lower.show();
+        moving.show();
+        moving.raise();
+        QVERIFY(QTest::qWaitForWindowExposed(&moving));
+        for (const bool live : {false, true}) {
+            lower.setLiveBackdropEnabled(live);
+            moving.setLiveBackdropEnabled(live);
+            const QPoint origin = moving.pos();
+            mouse(moving, QEvent::MouseButtonPress, {30, 30}, origin + QPoint(30, 30),
+                  Qt::LeftButton, Qt::LeftButton);
+            mouse(moving, QEvent::MouseMove, {60, 30}, origin + QPoint(60, 30),
+                  Qt::NoButton, Qt::LeftButton);
+            QVERIFY(moving.dragging());
+            QTest::qWait(150);
+            QCOMPARE(lower.m_backdropTimer->interval(), 10000);
+            QCOMPARE(moving.m_backdropTimer->interval(), moving.activeDisplayInterval());
+            // A WGC request queued immediately before pointer-down may still
+            // be starting. It must complete and never be replenished in drag.
+            QTRY_VERIFY_WITH_TIMEOUT(!moving.m_capturePending && !lower.m_capturePending, 2000);
+            const quint64 lowerRevision = lower.frameRevision();
+            const quint64 movingRevision = moving.frameRevision();
+            int steps = 0;
+            QTimer movement;
+            movement.setInterval(moving.activeDisplayInterval());
+            connect(&movement, &QTimer::timeout, &moving, [&]() {
+                mouse(moving, QEvent::MouseMove, {60, 30},
+                    origin + QPoint(60 + (++steps % 24), 30), Qt::NoButton, Qt::LeftButton);
+            });
+            movement.start();
+            QTest::qWait(700);
+            movement.stop();
+            qInfo() << "Drag live=" << live << "frames=" << moving.frameRevision() - movingRevision
+                    << "peer frames=" << lower.frameRevision() - lowerRevision;
+            QCOMPARE(lower.frameRevision(), lowerRevision);
+            QVERIFY(moving.frameRevision() > movingRevision + 10);
+            QVERIFY(!moving.m_capturePending);
+            mouse(moving, QEvent::MouseButtonRelease, {60, 30}, moving.pos() + QPoint(60, 30),
+                  Qt::LeftButton, Qt::NoButton);
+            QCOMPARE(lower.m_backdropTimer->interval(), live ? lower.activeDisplayInterval() : 10000);
+            QTest::qWait(150);
+        }
+        lower.setLiveBackdropEnabled(false);
+        moving.setLiveBackdropEnabled(false);
+        auto removed = std::make_unique<DesktopDragGlass>();
+        lower.setLiveBackdropEnabled(true);
+        removed->move(center);
+        removed->show();
+        removed->raise();
+        QVERIFY(QTest::qWaitForWindowExposed(removed.get()));
+        mouse(*removed, QEvent::MouseButtonPress, {30, 30}, center + QPoint(30, 30),
+              Qt::LeftButton, Qt::LeftButton);
+        mouse(*removed, QEvent::MouseMove, {60, 30}, center + QPoint(60, 30),
+              Qt::NoButton, Qt::LeftButton);
+        QVERIFY(removed->dragging());
+        QCOMPARE(lower.m_backdropTimer->interval(), 10000);
+        removed.reset();
+        QCOMPARE(lower.m_backdropTimer->interval(), lower.activeDisplayInterval());
+        lower.setLiveBackdropEnabled(false);
     }
 
     void systemScreenshotModeIncludesGlassWithoutFeedback() {
@@ -639,6 +831,318 @@ private slots:
         }
         lower.hide();
         QTRY_VERIFY_WITH_TIMEOUT(centerPixel(upper).blue() > 140, 1500);
+    }
+
+    void repeatedOverlapDoesNotAccumulateBrightness() {
+        ColorWindow background;
+        background.color = QColor(18, 34, 92);
+        background.setGeometry(QRect(QGuiApplication::primaryScreen()->availableGeometry().center()
+                                     - QPoint(320, 230), QSize(640, 460)));
+        background.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&background));
+
+        TestGlass lower;
+        lower.overlay = QColor(35, 170, 95, 210);
+        lower.move(background.pos() + QPoint(170, 130));
+        lower.show(); lower.raise();
+        QVERIFY(QTest::qWaitForWindowExposed(&lower));
+
+        TestGlass upper;
+        upper.setRefractionPower(1.32f);
+        upper.move(lower.pos());
+        upper.show(); upper.raise();
+        QVERIFY(QTest::qWaitForWindowExposed(&upper));
+        QTRY_VERIFY_WITH_TIMEOUT(centerPixel(upper).green() > 100, 4000);
+        QTest::qWait(250);
+
+        QVector<int> brightnesses;
+        for (int pass = 0; pass < 14; ++pass) {
+            upper.move(lower.pos() + QPoint(96, 0));
+            upper.captureDesktopBackdrop();
+            QTest::qWait(80);
+            upper.move(lower.pos());
+            upper.captureDesktopBackdrop();
+            QTest::qWait(100);
+            const QColor sample = centerPixel(upper);
+            const int brightness = sample.red() + sample.green() + sample.blue();
+            brightnesses.append(brightness);
+        }
+        const auto stableBegin = brightnesses.cbegin() + brightnesses.size() / 2;
+        const auto stableEnd = brightnesses.cend();
+        const auto [minimum, maximum] = std::minmax_element(stableBegin, stableEnd);
+        QVERIFY2(*maximum - *minimum <= 15,
+                 qPrintable(QStringLiteral("Settled overlap brightness drifted by %1")
+                                .arg(*maximum - *minimum)));
+    }
+
+    void globalFontSmoothingProfiles() {
+        for (int level = 0; level <= 3; ++level) {
+            BatteryWidget::setGlobalFontSmoothing(level);
+            QCOMPARE(BatteryWidget::globalFontSmoothing(), level);
+            QCOMPARE(QSettings().value("appearance/fontSmoothing").toInt(), level);
+            QFont font(BatteryWidget::pingFangFontFamily());
+            BatteryWidget::applyFontSmoothing(font);
+            if (level == 0)
+                QVERIFY(int(font.styleStrategy()) & int(QFont::NoAntialias));
+            else
+                QVERIFY(int(font.styleStrategy()) & int(QFont::PreferAntialias));
+        }
+        BatteryWidget::setGlobalFontSmoothing(2);
+    }
+
+    void fontSmoothingChangesRenderedCoverage() {
+        const auto renderText = [](int level) {
+            BatteryWidget::setGlobalFontSmoothing(level);
+            QImage image(260, 100, QImage::Format_ARGB32_Premultiplied);
+            image.fill(Qt::transparent);
+            QPainter painter(&image);
+            painter.setRenderHint(QPainter::TextAntialiasing, level > 0);
+            QFont font(BatteryWidget::pingFangFontFamily(), 48, QFont::DemiBold);
+            BatteryWidget::applyFontSmoothing(font);
+            painter.setFont(font);
+            painter.setPen(Qt::white);
+            painter.drawText(image.rect(), Qt::AlignCenter, QStringLiteral("Aa 26"));
+            painter.end();
+            return image;
+        };
+        const QImage aliased = renderText(0);
+        const QImage smoothed = renderText(3);
+        QVERIFY(aliased != smoothed);
+        int aliasedPartial = 0;
+        int smoothedPartial = 0;
+        for (int y = 0; y < aliased.height(); ++y) {
+            for (int x = 0; x < aliased.width(); ++x) {
+                const int a0 = qAlpha(aliased.pixel(x, y));
+                const int a1 = qAlpha(smoothed.pixel(x, y));
+                aliasedPartial += a0 > 0 && a0 < 255;
+                smoothedPartial += a1 > 0 && a1 < 255;
+            }
+        }
+        QVERIFY2(smoothedPartial > aliasedPartial,
+                 qPrintable(QStringLiteral("partial alpha pixels: off=%1 on=%2")
+                                .arg(aliasedPartial).arg(smoothedPartial)));
+        BatteryWidget::setGlobalFontSmoothing(2);
+    }
+
+    void enablingLiveBackdropRefreshesStationaryCard() {
+#ifndef Q_OS_WIN
+        QSKIP("Requires Windows compositor");
+#endif
+        const QRect area = QGuiApplication::primaryScreen()->availableGeometry();
+        ColorWindow background;
+        background.color = QColor(210, 35, 25);
+        background.setGeometry(QRect(area.center() - QPoint(320, 230), QSize(640, 460)));
+        background.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&background));
+
+        ToggleLiveGlass glass;
+        glass.setLiveBackdropEnabled(false);
+        QCOMPARE(glass.m_backdropTimer->interval(), 10000);
+        glass.move(background.pos() + QPoint(180, 120));
+        glass.show();
+        glass.raise();
+        QVERIFY(QTest::qWaitForWindowExposed(&glass));
+
+        glass.setLiveBackdropEnabled(true);
+        QCOMPARE(glass.m_backdropTimer->interval(), glass.activeDisplayInterval());
+        QVERIFY(glass.m_backdropTimer->isActive());
+        QColor observed;
+        QTRY_VERIFY_WITH_TIMEOUT((observed = centerPixel(glass), observed.red() > 170), 3000);
+        background.color = QColor(20, 205, 45);
+        background.repaint();
+        QTRY_VERIFY_WITH_TIMEOUT((observed = centerPixel(glass),
+                                  observed.green() > 155 && observed.red() < 120), 3000);
+        // A legitimate solid frame must not be replaced with the previous
+        // coloured frame by a capture-hole heuristic.
+        for (const QColor color : {QColor(Qt::black), QColor(Qt::white), QColor(20, 40, 210)}) {
+            background.color = color;
+            background.repaint();
+            QTRY_VERIFY_WITH_TIMEOUT((observed = centerPixel(glass),
+                qAbs(observed.red() - color.red()) < 60
+                && qAbs(observed.green() - color.green()) < 60
+                && qAbs(observed.blue() - color.blue()) < 60), 3000);
+        }
+    }
+
+    void stationaryLiveRenderingKeepsCadenceAndStopsWhenDisabled() {
+        ToggleLiveGlass glass;
+        glass.setDesktopCaptureEnabled(false);
+        glass.setAnimationEnabled(false);
+        glass.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&glass));
+        glass.setLiveBackdropEnabled(true);
+        QCOMPARE(glass.refreshInterval(), glass.activeDisplayInterval());
+        QTest::qWait(100);
+        quint64 revision = glass.frameRevision();
+        QTest::qWait(250);
+        QVERIFY2(glass.frameRevision() >= revision + 5,
+                 "Stationary live mode stopped rendering without pointer input");
+
+        glass.setLiveBackdropEnabled(false);
+        QTest::qWait(100);
+        revision = glass.frameRevision();
+        QTest::qWait(150);
+        QCOMPARE(glass.frameRevision(), revision);
+        glass.setLiveBackdropEnabled(true);
+        glass.hide();
+        QTest::qWait(80);
+        revision = glass.frameRevision();
+        QTest::qWait(150);
+        QCOMPARE(glass.frameRevision(), revision);
+        glass.show();
+        QTRY_VERIFY_WITH_TIMEOUT(glass.frameRevision() >= revision + 3, 1500);
+        glass.setMouseThroughEnabled(true);
+        glass.setLowPowerRefreshEnabled(true);
+        QCOMPARE(glass.refreshInterval(), 250);
+        glass.setLiveBackdropEnabled(false);
+    }
+
+    void stationaryLiveBackdropFollowsAnimation() {
+#ifndef Q_OS_WIN
+        QSKIP("Requires Windows Graphics Capture");
+#endif
+        ColorWindow background;
+        const QPoint center = QGuiApplication::primaryScreen()->availableGeometry().center();
+        background.setGeometry(QRect(center - QPoint(320, 230), QSize(640, 460)));
+        background.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&background));
+        ToggleLiveGlass glass;
+        glass.move(center - QPoint(100, 70));
+        glass.setLiveBackdropEnabled(true);
+        glass.show();
+        glass.raise();
+        QVERIFY(QTest::qWaitForWindowExposed(&glass));
+        QTest::qWait(500);
+        int sourceFrames = 0;
+        int changedFrames = 0;
+        qint64 lastKey = glass.m_lastCompositedBackdrop.cacheKey();
+        QTimer animation;
+        animation.setInterval(glass.activeDisplayInterval());
+        animation.setTimerType(Qt::PreciseTimer);
+        connect(&animation, &QTimer::timeout, &background, [&]() {
+            background.color = QColor::fromHsv((++sourceFrames * 23) % 360, 220, 210);
+            background.update();
+        });
+        connect(&glass, &QtGlassFlowScene::frameRendered, &glass, [&]() {
+            const qint64 key = glass.m_lastCompositedBackdrop.cacheKey();
+            if (key != lastKey) {
+                ++changedFrames;
+                lastKey = key;
+            }
+        });
+        animation.start();
+        QTest::qWait(2000);
+        animation.stop();
+        qInfo() << "Stationary backdrop:" << changedFrames << "changes /"
+                << sourceFrames << "source frames in 2 seconds";
+        QVERIFY(changedFrames >= qMax(20, sourceFrames / 2));
+        glass.setLiveBackdropEnabled(false);
+    }
+
+    void captureSurvivesResizeRecreationAndCancelledReceivers() {
+#ifndef Q_OS_WIN
+        QSKIP("Requires Windows Graphics Capture");
+#endif
+        ColorWindow background;
+        const QPoint center = QGuiApplication::primaryScreen()->availableGeometry().center();
+        background.setGeometry(QRect(center - QPoint(320, 230), QSize(640, 460)));
+        background.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&background));
+        for (int cycle = 0; cycle < 12; ++cycle) {
+            auto glass = std::make_unique<ToggleLiveGlass>();
+            glass->move(center - QPoint(100, 70));
+            glass->setLiveBackdropEnabled(true);
+            glass->show();
+            glass->raise();
+            QVERIFY(QTest::qWaitForWindowExposed(glass.get()));
+            background.resize(cycle % 2 ? QSize(620, 440) : QSize(680, 500));
+            background.color = cycle % 2 ? QColor(20, 205, 45) : QColor(210, 35, 25);
+            background.repaint();
+            QTRY_VERIFY_WITH_TIMEOUT(!glass->m_lastCompositedBackdrop.isNull()
+                && (cycle % 2
+                    ? glass->m_lastCompositedBackdrop.pixelColor(glass->m_lastCompositedBackdrop.rect().center()).green() > 150
+                    : glass->m_lastCompositedBackdrop.pixelColor(glass->m_lastCompositedBackdrop.rect().center()).red() > 170), 3000);
+            for (int toggle = 0; toggle < 6; ++toggle) {
+                glass->setLiveBackdropEnabled(false);
+                glass->setRenderScale(toggle % 2 ? 1.0f : .5f);
+                glass->setLiveBackdropEnabled(true);
+            }
+            // Keep a request alive while its UI receiver is destroyed.
+            DesktopCapture::request(glass->frameGeometry(), 1, glass->winId(), glass.get(),
+                                    [](DesktopCapture::Frame) {});
+            glass.reset();
+            QTest::qWait(20);
+        }
+        QSettings().setValue(QStringLiteral("appearance/liveBackdrop"), false);
+    }
+
+    void liveCaptureSoak() {
+#ifdef Q_OS_WIN
+        const int duration = qMax(3000, qEnvironmentVariableIntValue("WIDGET_STRESS_MS"));
+        ColorWindow background;
+        const QPoint center = QGuiApplication::primaryScreen()->availableGeometry().center();
+        background.setGeometry(QRect(center - QPoint(320, 230), QSize(640, 460)));
+        background.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&background));
+        ToggleLiveGlass glass;
+        glass.move(center - QPoint(100, 70));
+        glass.setLiveBackdropEnabled(true);
+        glass.show();
+        glass.raise();
+        QVERIFY(QTest::qWaitForWindowExposed(&glass));
+        int sourceFrames = 0;
+        QTimer animation;
+        animation.setInterval(16);
+        animation.setTimerType(Qt::PreciseTimer);
+        connect(&animation, &QTimer::timeout, &background, [&]() {
+            background.color = QColor::fromHsv((++sourceFrames * 13) % 360, 230, 210);
+            background.update();
+            if (sourceFrames % 60 == 0)
+                background.resize(sourceFrames % 120 ? QSize(620, 440) : QSize(680, 500));
+        });
+        animation.start();
+        QTest::qWait(3000); // Warm driver, shaders and the capture pool.
+        PROCESS_MEMORY_COUNTERS_EX initial{};
+        initial.cb = sizeof(initial);
+        QVERIFY(GetProcessMemoryInfo(GetCurrentProcess(),
+            reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&initial), sizeof(initial)));
+        DWORD initialHandles = 0;
+        QVERIFY(GetProcessHandleCount(GetCurrentProcess(), &initialHandles));
+        const DWORD initialGdi = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+        QElapsedTimer elapsed;
+        elapsed.start();
+        int changes = 0;
+        QImage previous = glass.m_lastCompositedBackdrop;
+        while (elapsed.elapsed() < duration) {
+            const quint64 revision = glass.frameRevision();
+            QTest::qWait(250);
+            QVERIFY(glass.frameRevision() > revision);
+            if (glass.m_lastCompositedBackdrop != previous) {
+                ++changes;
+                previous = glass.m_lastCompositedBackdrop;
+            }
+        }
+        animation.stop();
+        PROCESS_MEMORY_COUNTERS_EX finalMemory{};
+        finalMemory.cb = sizeof(finalMemory);
+        QVERIFY(GetProcessMemoryInfo(GetCurrentProcess(),
+            reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&finalMemory), sizeof(finalMemory)));
+        DWORD finalHandles = 0;
+        QVERIFY(GetProcessHandleCount(GetCurrentProcess(), &finalHandles));
+        const DWORD finalGdi = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+        qInfo() << "Soak ms:" << elapsed.elapsed() << "source frames:" << sourceFrames
+                << "changed samples:" << changes
+                << "private bytes:" << initial.PrivateUsage << finalMemory.PrivateUsage
+                << "handles:" << initialHandles << finalHandles
+                << "GDI:" << initialGdi << finalGdi;
+        QVERIFY(changes >= duration / 1000);
+        QVERIFY(finalMemory.PrivateUsage <= initial.PrivateUsage + 64 * 1024 * 1024);
+        QVERIFY(finalHandles <= initialHandles + 64);
+        QVERIFY(finalGdi <= initialGdi + 8);
+        glass.setLiveBackdropEnabled(false);
+#else
+        QSKIP("Requires Windows Graphics Capture");
+#endif
     }
 
     void dragThresholdAndCancellation() {
@@ -811,8 +1315,13 @@ private slots:
             QTest::qWait(5);
         QVERIFY2(centerPixel(upper).red() > 160, "Widget-to-widget update waited for the slow desktop capture");
         qInfo() << "Lower card update with 250 ms desktop cadence:" << latency.elapsed() << "ms";
+        const QColor overlapping = centerPixel(upper);
         lower.move(lower.pos() + QPoint(240, 0));
-        QTRY_VERIFY_WITH_TIMEOUT(centerPixel(upper).blue() > 140, 150);
+        QColor uncovered;
+        QTRY_VERIFY_WITH_TIMEOUT((uncovered = centerPixel(upper),
+            qAbs(uncovered.red() - overlapping.red())
+            + qAbs(uncovered.green() - overlapping.green())
+            + qAbs(uncovered.blue() - overlapping.blue()) > 80), 250);
         upper.setLowPowerRefreshEnabled(false);
     }
 
@@ -834,6 +1343,10 @@ private slots:
                                      - QPoint(300, 220), QSize(600, 440)));
         background.show();
         QVERIFY(QTest::qWaitForWindowExposed(&background));
+        // Showing a non-topmost tool window does not guarantee that Windows
+        // raises it above the app which launched this test process. Establish
+        // the fixture order explicitly before placing the glass above it.
+        background.raise();
         TestGlass glass;
         glass.setWindowFlag(Qt::WindowStaysOnTopHint, topmost);
         glass.setRefractionPower(1.32f);
@@ -983,6 +1496,90 @@ private slots:
 #endif
     }
 
+    void libraryHonorsGlobalLiveBackdropSetting() {
+        QSettings().setValue(QStringLiteral("appearance/liveBackdrop"), false);
+        WidgetLibraryDialog staticLibrary;
+        QVERIFY(!staticLibrary.liveBackdropEnabled());
+        staticLibrary.prepareBackdrop();
+        staticLibrary.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&staticLibrary));
+        QTest::qWait(400);
+        QVERIFY(!staticLibrary.m_liveBackdropTimer.isActive());
+        staticLibrary.hide();
+
+        QSettings().setValue(QStringLiteral("appearance/liveBackdrop"), true);
+        WidgetLibraryDialog liveLibrary;
+        QVERIFY(liveLibrary.liveBackdropEnabled());
+        liveLibrary.prepareBackdrop();
+        liveLibrary.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&liveLibrary));
+        QTRY_VERIFY_WITH_TIMEOUT(liveLibrary.m_liveBackdropTimer.isActive(), 1000);
+        QCOMPARE(liveLibrary.m_liveBackdropTimer.interval(),
+                 qMax(1, liveLibrary.activeDisplayInterval() / 2));
+        liveLibrary.hide();
+        QSettings().setValue(QStringLiteral("appearance/liveBackdrop"), false);
+    }
+
+    void libraryLiveBackdropFollowsAnimatedWindow() {
+#ifndef Q_OS_WIN
+        QSKIP("Requires Windows Graphics Capture");
+#endif
+        QSettings().setValue(QStringLiteral("appearance/liveBackdrop"), true);
+        QSettings().setValue(QStringLiteral("performance/renderScale"), 0.5);
+        ColorWindow background;
+        background.setGeometry(QGuiApplication::primaryScreen()->availableGeometry());
+        background.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&background));
+
+        WidgetLibraryDialog library;
+        library.prepareBackdrop();
+        library.show();
+        library.raise();
+        QVERIFY(QTest::qWaitForWindowExposed(&library));
+        QTRY_VERIFY_WITH_TIMEOUT(library.m_liveBackdropTimer.isActive(), 1000);
+        QTRY_VERIFY_WITH_TIMEOUT(!library.m_backdropCanvas.isNull(), 2000);
+
+        const int interval = library.activeDisplayInterval();
+        background.color = QColor(20, 90, 180);
+        background.update();
+        const quint64 warmupSamples = library.m_liveBackdropSamples;
+        QTRY_VERIFY_WITH_TIMEOUT(library.m_liveBackdropSamples > warmupSamples, 1000);
+
+        const quint64 initialFrames = library.m_liveBackdropFrames;
+        const quint64 initialSamples = library.m_liveBackdropSamples;
+        int sourceFrames = 0;
+        QTimer sourceTimer;
+        sourceTimer.setTimerType(Qt::PreciseTimer);
+        sourceTimer.setInterval(interval);
+        connect(&sourceTimer, &QTimer::timeout, &background, [&]() {
+            background.color = QColor::fromHsv((sourceFrames * 23) % 360, 220, 210);
+            ++sourceFrames;
+            background.update();
+        });
+        QElapsedTimer sampleClock;
+        sampleClock.start();
+        sourceTimer.start();
+        QTest::qWait(1000);
+        sourceTimer.stop();
+        QTest::qWait(interval * 2);
+        const qint64 sampleMs = sampleClock.elapsed();
+        const int changedFrames = int(library.m_liveBackdropFrames - initialFrames);
+        const int capturedSamples = int(library.m_liveBackdropSamples - initialSamples);
+        const int expectedDisplaySamples = qMax(1, int(sampleMs / interval));
+        qInfo() << "Library animated backdrop frames:" << changedFrames
+                << "changed," << capturedSamples << "samples /" << sourceFrames
+                << "source frames at" << interval << "ms cadence in"
+                << sampleMs << "ms";
+        QVERIFY2(capturedSamples >= expectedDisplaySamples * 4 / 5,
+                 qPrintable(QStringLiteral("library sampled only %1/%2 display intervals")
+                                .arg(capturedSamples).arg(expectedDisplaySamples)));
+        QVERIFY2(changedFrames >= qMax(12, sourceFrames / 2),
+                 qPrintable(QStringLiteral("library received only %1/%2 animated source frames")
+                                .arg(changedFrames).arg(sourceFrames)));
+        library.hide();
+        QSettings().setValue(QStringLiteral("appearance/liveBackdrop"), false);
+    }
+
     void desktopCardStaysAboveWallpaperHost() {
 #ifdef Q_OS_WIN
         LiquidGlassWidget glass;
@@ -1067,6 +1664,11 @@ private slots:
     void opacityAndContextRecreation() {
         TestGlass glass;
         glass.setDesktopCaptureEnabled(false);
+        glass.setRenderScale(1.5f);
+        QCOMPARE(glass.renderScale(), 1.5f);
+        glass.setRenderScale(2.0f);
+        QCOMPARE(glass.renderScale(), 1.5f);
+        glass.setRenderScale(1.25f);
         QImage background(200, 140, QImage::Format_RGB32);
         background.fill(QColor(160, 80, 30));
         glass.setBackgroundImage(background);
@@ -1100,6 +1702,252 @@ private slots:
         glass.setParent(nullptr); // stack child must outlive its temporary parent
     }
 
+    void gpuRoundedEdgeHasAnalyticAntialiasing() {
+        TestGlass glass;
+        glass.setDesktopCaptureEnabled(false);
+        glass.setRenderBackend(QtGlassFlowScene::GpuBackend);
+        glass.setRenderScale(1.5f);
+        QImage background(400, 280, QImage::Format_RGB32);
+        background.fill(QColor(180, 90, 35));
+        glass.setBackgroundImage(background);
+        glass.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&glass));
+        QTRY_VERIFY_WITH_TIMEOUT(glass.frameRevision() > 0, 1000);
+        const QImage frame = glass.grabFramebuffer().convertToFormat(QImage::Format_ARGB32);
+        QVERIFY(!frame.isNull());
+        int partialAlpha = 0;
+        for (int y = 0; y < frame.height(); ++y) {
+            for (int x = 0; x < frame.width(); ++x) {
+                const int alpha = qAlpha(frame.pixel(x, y));
+                partialAlpha += alpha > 0 && alpha < 255;
+            }
+        }
+        QVERIFY2(partialAlpha > 0, "rounded GPU silhouette contains no antialiased coverage pixels");
+    }
+
+    void gpuHighQualityBlurHasNoSamplingLattice() {
+        TestGlass glass;
+        glass.setFixedSize(384, 256);
+        glass.setDesktopCaptureEnabled(false);
+        glass.setRenderBackend(QtGlassFlowScene::GpuBackend);
+        glass.setBlurRadius(8);
+        glass.setBlurIterations(1);
+        QImage source(384, 256, QImage::Format_RGB32);
+        source.fill(QColor(20, 30, 50));
+        QPainter painter(&source);
+        painter.fillRect(QRect(180, 116, 24, 24), Qt::white);
+        painter.end();
+        glass.setBackgroundImage(source);
+        glass.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&glass));
+        for (const float quality : {.5f, .75f, 1.f, 1.25f, 1.5f}) {
+            glass.setRenderScale(quality);
+            glass.setBackgroundImage(source);
+            QTest::qWait(60);
+            const QImage frame = glass.grabFramebuffer();
+            QVERIFY(frame.save(QStringLiteral("artifacts/gpu-blur-%1.png").arg(quality)));
+            if (quality < 1.25f)
+                continue;
+            const int cy = frame.height() / 2;
+            const int cx = frame.width() / 2;
+            int largestRise = 0;
+            for (int offset = 2; offset < qRound(75 * glass.devicePixelRatioF()); ++offset) {
+                const int before = qRed(frame.pixel(cx + offset - 1, cy));
+                const int after = qRed(frame.pixel(cx + offset, cy));
+                largestRise = qMax(largestRise, after - before);
+            }
+            qInfo() << "Blur quality" << quality << "largest secondary peak rise" << largestRise;
+            QVERIFY2(largestRise <= 1, "Highlight has repeated sampling peaks/grid lines");
+        }
+    }
+
+    void supersampledWallpaperUsesSmoothInterpolation() {
+        TestGlass glass;
+        QScreen *screen = QGuiApplication::primaryScreen();
+        glass.m_wallpaperScreenName = screen->name();
+        glass.m_wallpaperCanvas = QImage(screen->size(), QImage::Format_RGB32);
+        for (int y = 0; y < glass.m_wallpaperCanvas.height(); ++y) {
+            auto *row = reinterpret_cast<QRgb *>(glass.m_wallpaperCanvas.scanLine(y));
+            for (int x = 0; x < glass.m_wallpaperCanvas.width(); ++x)
+                row[x] = x % 2 ? qRgb(255, 255, 255) : qRgb(0, 0, 0);
+        }
+        glass.m_wallpaperRefreshClock.start();
+        const QImage crop = glass.wallpaperBackdrop(
+            QRect(screen->geometry().topLeft(), QSize(16, 16)), 2.25);
+        int intermediate = 0;
+        for (int y = 0; y < crop.height(); ++y)
+            for (int x = 0; x < crop.width(); ++x) {
+                const int red = qRed(crop.pixel(x, y));
+                intermediate += red > 0 && red < 255;
+            }
+        QVERIFY2(intermediate > crop.width() * crop.height() / 2,
+                 "Wallpaper enlargement produced nearest-neighbour pixel blocks");
+    }
+
+    void actualWeatherHighestQuality() {
+        QSettings().setValue("appearance/scale", .7);
+        QSettings().setValue("performance/renderBackend", 2);
+        QSettings().setValue("performance/renderScale", 1.5);
+        BatteryWidget card(nullptr, BatteryWidget::CardKind::Weather, false,
+                           QStringLiteral("weather-quality"), 1);
+        card.setDesktopLayerEnabled(false);
+        card.setDesktopCaptureEnabled(false);
+        card.setAnimationEnabled(false);
+        card.m_weatherLocation = QStringLiteral("长沙");
+        card.m_weatherTemperature = QStringLiteral("28.4");
+        card.m_weatherDescription = QStringLiteral("多云");
+        card.m_weatherHigh = QStringLiteral("32");
+        card.m_weatherLow = QStringLiteral("23");
+        card.m_weatherCode = 1;
+        card.m_weatherNight = true;
+        for (int i = 0; i < 6; ++i)
+            card.m_weatherHours.append({QString::number(11 + i * 3) + QStringLiteral("时"),
+                QString::number(31 - i), QStringLiteral("多云"), 1});
+        QImage backdrop(card.size() * card.devicePixelRatioF(), QImage::Format_RGB32);
+        backdrop.fill(QColor(24, 37, 67));
+        QPainter source(&backdrop);
+        source.fillRect(QRect(90, backdrop.height() - 45, 24, 24), QColor(255, 226, 153));
+        source.fillRect(QRect(backdrop.width() / 2, backdrop.height() - 80, 18, 60), Qt::white);
+        source.end();
+        card.setBackgroundImage(backdrop);
+        card.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&card));
+        for (auto backend : {QtGlassFlowScene::CpuBackend, QtGlassFlowScene::GpuBackend}) {
+            QSettings().setValue("performance/renderBackend", int(backend));
+            card.setRenderBackend(backend);
+            int edgePixels[2] = {};
+            for (int index = 0; index < 2; ++index) {
+                const int level = index ? 3 : 0;
+                BatteryWidget::setGlobalFontSmoothing(level);
+                card.update();
+                QTest::qWait(70);
+                const QImage frame = card.grabFramebuffer();
+                QVERIFY(frame.save(QStringLiteral("artifacts/actual-weather-backend-%1-aa-%2.png")
+                                   .arg(int(backend)).arg(level)));
+                // The temperature occupies this normalized region of the actual
+                // wide card. The backdrop is dark here; intermediate red values
+                // measure coverage at digit edges, not the bright glyph interior.
+                for (int y = qRound(frame.height() * .24); y < qRound(frame.height() * .45); ++y)
+                    for (int x = qRound(frame.width() * .035); x < qRound(frame.width() * .37); ++x) {
+                        const int red = qRed(frame.pixel(x, y));
+                        edgePixels[index] += red > 100 && red < 220;
+                    }
+            }
+            qInfo() << "Actual weather backend" << backend << "digit edge coverage"
+                    << edgePixels[0] << edgePixels[1];
+            QVERIFY2(edgePixels[1] > edgePixels[0] + 100,
+                     "Highest AA did not smooth the actual 28.4 temperature");
+        }
+        qInfo() << "Weather device scale" << card.devicePixelRatioF()
+                << "backend" << card.effectiveRenderBackend() << "quality" << card.renderScale();
+        BatteryWidget::setGlobalFontSmoothing(2);
+    }
+
+    void highestTextAntialiasingWorksInOpenGL() {
+        TextQualityGlass glass;
+        glass.setFixedSize(480, 160);
+        glass.setDesktopCaptureEnabled(false);
+        glass.setGlassRenderingEnabled(false);
+        glass.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&glass));
+        int partial[2] = {};
+        for (int index = 0; index < 2; ++index) {
+            const int level = index ? 3 : 0;
+            glass.quality = level;
+            BatteryWidget::setGlobalFontSmoothing(level);
+            glass.update();
+            QTest::qWait(70);
+            const QImage frame = glass.grabFramebuffer();
+            QVERIFY(frame.save(QStringLiteral("artifacts/text-aa-%1.png").arg(level)));
+            for (int y = 0; y < frame.height(); ++y)
+                for (int x = 0; x < frame.width(); ++x) {
+                    const int alpha = qAlpha(frame.pixel(x, y));
+                    partial[index] += alpha > 0 && alpha < 255;
+                }
+        }
+        qInfo() << "Native GL text partial coverage:" << partial[0] << partial[1];
+        QVERIFY(partial[1] > partial[0] + 100);
+        // Backdrop quality must not change the text's final device coverage.
+        const QImage nativeText = glass.grabFramebuffer();
+        glass.setRenderScale(.5f);
+        QTest::qWait(60);
+        QCOMPARE(glass.grabFramebuffer(), nativeText);
+        BatteryWidget::setGlobalFontSmoothing(2);
+    }
+
+    void cpuHighQualityBlurHasNoUpscaledGrid() {
+        TestGlass glass;
+        glass.setFixedSize(640, 360);
+        glass.setDesktopCaptureEnabled(false);
+        glass.setRenderBackend(QtGlassFlowScene::CpuBackend);
+        glass.setRenderScale(1.5f);
+        glass.setBlurRadius(6.0f);
+        glass.setBlurIterations(2);
+
+        QImage background(1280, 720, QImage::Format_RGB32);
+        for (int y = 0; y < background.height(); ++y) {
+            QRgb* line = reinterpret_cast<QRgb*>(background.scanLine(y));
+            for (int x = 0; x < background.width(); ++x) {
+                const qreal dx = (x - 790.0) / 250.0;
+                const qreal dy = (y - 270.0) / 150.0;
+                const qreal glow = qExp(-(dx * dx + dy * dy) * 2.0);
+                line[x] = qRgb(qRound(25 + x * 35.0 / background.width() + glow * 190),
+                               qRound(42 + y * 35.0 / background.height() + glow * 155),
+                               qRound(70 + glow * 85));
+            }
+        }
+        glass.setBackgroundImage(background);
+        QElapsedTimer renderClock;
+        renderClock.start();
+        glass.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&glass));
+        QTRY_VERIFY_WITH_TIMEOUT(glass.frameRevision() > 0, 2000);
+        const QImage frame = glass.grabFramebuffer();
+        QVERIFY(!frame.isNull());
+        QVERIFY(frame.save(QStringLiteral("artifacts/cpu-high-quality-blur.png")));
+        QVERIFY2(renderClock.elapsed() < 2000, "high-quality CPU blur exceeded its render budget");
+    }
+
+    void cpuMaximumBlurPreservesRoundHighlights() {
+        TestGlass glass;
+        glass.setFixedSize(240, 240);
+        glass.setDesktopCaptureEnabled(false);
+        glass.setRenderBackend(QtGlassFlowScene::CpuBackend);
+        glass.setRenderScale(1.5f);
+        glass.setBlurRadius(8);
+        glass.setBlurIterations(1);
+        const int extent = qRound(240 * glass.devicePixelRatioF());
+        QImage background(extent, extent, QImage::Format_RGB32);
+        background.fill(Qt::black);
+        QPainter p(&background);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setPen(Qt::NoPen);
+        p.setBrush(Qt::white);
+        p.drawEllipse(QPointF(extent * .5, extent * .5), 10, 10);
+        p.end();
+        glass.setBackgroundImage(background);
+        glass.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&glass));
+        QTest::qWait(60);
+        const QImage lit = glass.grabFramebuffer();
+        QVERIFY(lit.save("artifacts/cpu-maximum-round-highlight.png"));
+        background.fill(Qt::black);
+        glass.setBackgroundImage(background);
+        QTest::qWait(60);
+        const QImage dark = glass.grabFramebuffer();
+        const auto brightness = [&](int dx, int dy) {
+            const int x = extent / 2 + dx, y = extent / 2 + dy;
+            return qRed(lit.pixel(x, y)) - qRed(dark.pixel(x, y));
+        };
+        // Equal-radius positions distinguish a smooth Gaussian-like highlight
+        // from the squared footprint of the old single horizontal/vertical box.
+        const int axis = brightness(20, 0);
+        const int diagonal = brightness(12, 16);
+        qInfo() << "CPU highlight equal-radius brightness" << axis << diagonal;
+        QVERIFY2(qAbs(axis - diagonal) <= 4, "Maximum blur still has a square footprint");
+        QVERIFY(axis > 5);
+    }
+
     void coveredWidgetDoesNotCapture() {
         LiquidGlassWidget glass;
         glass.setAnimationEnabled(true);
@@ -1111,7 +1959,9 @@ private slots:
         cover.show();
         cover.raise();
         QVERIFY(QTest::qWaitForWindowExposed(&cover));
-        QTest::qWait(180);
+        // Let any capture queued just before the cover reached the compositor
+        // finish before taking the suspended-rendering baseline.
+        QTest::qWait(500);
         const quint64 revision = glass.frameRevision();
         for (int i = 0; i < 5; ++i) {
             cover.color = QColor(20 + i * 20, 80, 180);
@@ -1119,6 +1969,28 @@ private slots:
             QTest::qWait(60);
         }
         QCOMPARE(glass.frameRevision(), revision);
+    }
+
+    void cancellingCitySearchHandlesSynchronousFinished() {
+        BatteryWidget weather(nullptr, BatteryWidget::CardKind::Weather, false);
+        delete weather.m_weatherNetwork;
+        auto* network = new PendingNetwork(&weather);
+        weather.m_weatherNetwork = network;
+        bool issued = false;
+        QTimer::singleShot(0, &weather, [&]() {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!dialog)
+                return;
+            if (auto* edit = dialog->findChild<QLineEdit*>()) {
+                edit->setText(QStringLiteral("海淀"));
+                QMetaObject::invokeMethod(edit, "returnPressed", Qt::DirectConnection);
+                issued = bool(network->pending);
+            }
+            dialog->reject();
+        });
+        weather.searchWeatherCity();
+        QVERIFY(issued);
+        QTRY_VERIFY(network->pending.isNull());
     }
 
     void malformedNetworkRepliesAndDictionaryButton() {

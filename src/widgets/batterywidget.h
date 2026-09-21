@@ -16,6 +16,7 @@
 
 class QAction;
 class QIcon;
+class QFont;
 class QSystemTrayIcon;
 class QNetworkAccessManager;
 class QNetworkReply;
@@ -53,6 +54,12 @@ public:
     // Keeping this on the widget core lets the app, tests and preview gallery
     // share exactly the same font registration path.
     static QString pingFangFontFamily();
+    // Applies one of the global font rasterization profiles to both Qt
+    // controls and custom-painted widget text. Levels are 0=off, 1=standard,
+    // 2=clear (default), 3=soft/high-DPI.
+    static void setGlobalFontSmoothing(int level);
+    static int globalFontSmoothing();
+    static void applyFontSmoothing(QFont& font);
     static void shutdown();
 
 protected:
@@ -66,7 +73,8 @@ protected:
     void windowDragFinished() override;
     void showEvent(QShowEvent* event) override;
     void hideEvent(QHideEvent* event) override;
-    bool wallpaperOnlyWhenIdle() const override { return true; }
+    bool wallpaperOnlyWhenIdle() const override { return !liveBackdropEnabled(); }
+    bool directBackdropDuringDrag() const override { return true; }
 
 private:
     friend class WidgetRegression;
@@ -128,6 +136,7 @@ private:
     void arrangeGroup();
     void syncGroupSettings(qreal scale, bool systemBlur, int blurStrength,
                            qreal opacity, bool mouseThrough, bool lowPower,
+                           bool liveBackdrop, qreal renderQuality, int fontSmoothing,
                            RenderBackend renderBackend);
     void moveToGroupPosition();
     void showWidgetLibrary();

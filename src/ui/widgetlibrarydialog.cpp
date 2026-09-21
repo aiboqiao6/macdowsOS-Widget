@@ -141,8 +141,7 @@ protected:
             QFont font = qApp->font();
             font.setPixelSize(size);
             font.setWeight(weight);
-            font.setStyleStrategy(static_cast<QFont::StyleStrategy>(QFont::PreferAntialias | QFont::PreferQuality));
-            font.setHintingPreference(QFont::PreferFullHinting);
+            BatteryWidget::applyFontSmoothing(font);
             p.setPen(color); p.setFont(font);
             ResponsiveLayout::drawSingleLine(p, r, align, value);
         };
@@ -267,16 +266,14 @@ protected:
         QFont footerFont = qApp->font();
         footerFont.setPixelSize(13);
         footerFont.setWeight(QFont::DemiBold);
-        footerFont.setStyleStrategy(static_cast<QFont::StyleStrategy>(QFont::PreferAntialias | QFont::PreferQuality));
-        footerFont.setHintingPreference(QFont::PreferFullHinting);
+        BatteryWidget::applyFontSmoothing(footerFont);
         p.setFont(footerFont);
         ResponsiveLayout::drawSingleLine(p, QRectF(10, 134, width() - 20, 20),
                                    Qt::AlignCenter | Qt::AlignVCenter, m_title);
         p.setPen(QColor(173, 186, 207));
         QFont subtitleFont = qApp->font();
         subtitleFont.setPixelSize(9);
-        subtitleFont.setStyleStrategy(static_cast<QFont::StyleStrategy>(QFont::PreferAntialias | QFont::PreferQuality));
-        subtitleFont.setHintingPreference(QFont::PreferFullHinting);
+        BatteryWidget::applyFontSmoothing(subtitleFont);
         p.setFont(subtitleFont);
         ResponsiveLayout::drawSingleLine(
             p, QRectF(10, 154, width() - 20, 17),
@@ -376,15 +373,18 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     setPanelWindow();
     setDesktopLayerEnabled(false);
     setDesktopCaptureEnabled(false);
+    const QSettings settings;
+    setLiveBackdropEnabled(
+        settings.value(QStringLiteral("appearance/liveBackdrop"), false).toBool());
     setGlassMargins(0);
     setGlassRadius(26.0);
     setBlurRadius(6.0f);
     setBlurIterations(3);
-    // The gallery is much larger than a desktop card. Its glass is already
-    // strongly blurred, so a 60% internal buffer is visually equivalent at
-    // native window size while cutting FBO fill-rate and texture bandwidth by
-    // about 27% compared with the shared 70% default.
-    setRenderScale(0.60f);
+    // The gallery follows the same global quality scale as desktop cards;
+    // otherwise the large panel remains visibly softer even when the user
+    // selected native or supersampled rendering.
+    setRenderScale(float(qBound<qreal>(0.5,
+        settings.value(QStringLiteral("performance/renderScale"), 1.0).toDouble(), 1.5)));
     setNoiseAmount(0.008f);
     setRefractionPower(1.32f);
     Qt::WindowFlags flags = windowFlags();
@@ -406,9 +406,11 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
             update();
         }
     });
-    m_liveBackdropTimer.setTimerType(Qt::CoarseTimer);
-    // Live captures run independently of the short panel animation.
-    m_liveBackdropTimer.setInterval(50);
+    m_liveBackdropTimer.setTimerType(Qt::PreciseTimer);
+    m_liveBackdropTimer.setSingleShot(false);
+    // Live captures run independently of the short panel animation. The
+    // interval is refreshed for the actual monitor in showEvent().
+    m_liveBackdropTimer.setInterval(qMax(1, activeDisplayInterval() / 2));
     connect(&m_liveBackdropTimer, &QTimer::timeout,
             this, &WidgetLibraryDialog::refreshBackdrop);
     setAttribute(Qt::WA_TranslucentBackground, true);
@@ -799,21 +801,28 @@ void WidgetLibraryDialog::updateBackdropFrame()
 
 void WidgetLibraryDialog::refreshBackdrop()
 {
-    if (!isVisible() || m_backdropCaptureRect.isNull()
-        || m_capturePending)
+    if (!liveBackdropEnabled() || desktopDragActive() || !isVisible() || m_backdropCaptureRect.isNull()
+        || m_liveCapturesInFlight >= 2)
         return;
     const QRect area = m_backdropCaptureRect;
     const quint64 generation = m_backdropGeneration;
-    m_capturePending = true;
+    ++m_liveCapturesInFlight;
     requestDesktopComposite(area, [this, generation](QImage image) {
-        m_capturePending = false;
-        if (!isVisible() || generation != m_backdropGeneration || image.isNull())
+        m_liveCapturesInFlight = qMax(0, m_liveCapturesInFlight - 1);
+        if (!isVisible() || desktopDragActive() || generation != m_backdropGeneration)
             return;
-        if (image != m_backdropCanvas) {
+        if (!image.isNull())
+            ++m_liveBackdropSamples;
+        if (!image.isNull() && image != m_backdropCanvas) {
             m_backdropCanvas = std::move(image);
+            ++m_liveBackdropFrames;
             m_lastBackdropGeometry = QRect();
             updateBackdropFrame();
         }
+        // Refill the two-frame pipeline immediately. Waiting for the next GUI
+        // timer tick here lets queued paints leave the capture worker idle.
+        if (liveBackdropEnabled())
+            refreshBackdrop();
     });
 }
 
@@ -871,9 +880,18 @@ void WidgetLibraryDialog::showEvent(QShowEvent* event)
                 // Stop animation wakeups once settled. The worker keeps the
                 // real backdrop live and only changed pixels trigger paint.
                 m_renderTimer.stop();
-                m_liveBackdropTimer.setTimerType(Qt::CoarseTimer);
-                m_liveBackdropTimer.setInterval(50);
-                m_liveBackdropTimer.start();
+                if (liveBackdropEnabled()) {
+                    m_liveBackdropTimer.setTimerType(Qt::PreciseTimer);
+                    // Poll between presentation boundaries so a delayed Qt
+                    // timer wake-up does not skip the following DWM frame.
+                    // WGC still supplies at most one new frame per display
+                    // refresh and unchanged frames are not uploaded.
+                    m_liveBackdropTimer.setInterval(qMax(1, activeDisplayInterval() / 2));
+                    m_liveBackdropTimer.start();
+                    refreshBackdrop();
+                } else {
+                    m_liveBackdropTimer.stop();
+                }
             }
         });
         connect(m_slideAnimation, &QPropertyAnimation::valueChanged,

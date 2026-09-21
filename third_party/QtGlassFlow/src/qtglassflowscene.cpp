@@ -44,6 +44,129 @@ static const float kQuadVerts[] = {
      1.0f,  1.0f, 1.0f, 1.0f,
     -1.0f,  1.0f, 0.0f, 1.0f
 };
+
+QImage boxBlurPass(const QImage &source, int radius, bool horizontal)
+{
+    if (source.isNull() || radius <= 0)
+        return source;
+    QImage result(source.size(), QImage::Format_ARGB32_Premultiplied);
+    const int width = source.width();
+    const int height = source.height();
+    const int window = radius * 2 + 1;
+    if (horizontal) {
+        for (int y = 0; y < height; ++y) {
+            const uchar *input = source.constScanLine(y);
+            uchar *output = result.scanLine(y);
+            int sums[4] = {};
+            for (int offset = -radius; offset <= radius; ++offset) {
+                const uchar *pixel = input + qBound(0, offset, width - 1) * 4;
+                for (int channel = 0; channel < 4; ++channel)
+                    sums[channel] += pixel[channel];
+            }
+            for (int x = 0; x < width; ++x) {
+                for (int channel = 0; channel < 4; ++channel)
+                    output[x * 4 + channel] = uchar((sums[channel] + window / 2) / window);
+                const uchar *removed = input + qBound(0, x - radius, width - 1) * 4;
+                const uchar *added = input + qBound(0, x + radius + 1, width - 1) * 4;
+                for (int channel = 0; channel < 4; ++channel)
+                    sums[channel] += int(added[channel]) - int(removed[channel]);
+            }
+        }
+    } else {
+        for (int x = 0; x < width; ++x) {
+            int sums[4] = {};
+            for (int offset = -radius; offset <= radius; ++offset) {
+                const uchar *pixel = source.constScanLine(qBound(0, offset, height - 1)) + x * 4;
+                for (int channel = 0; channel < 4; ++channel)
+                    sums[channel] += pixel[channel];
+            }
+            for (int y = 0; y < height; ++y) {
+                uchar *output = result.scanLine(y) + x * 4;
+                for (int channel = 0; channel < 4; ++channel)
+                    output[channel] = uchar((sums[channel] + window / 2) / window);
+                const uchar *removed = source.constScanLine(
+                    qBound(0, y - radius, height - 1)) + x * 4;
+                const uchar *added = source.constScanLine(
+                    qBound(0, y + radius + 1, height - 1)) + x * 4;
+                for (int channel = 0; channel < 4; ++channel)
+                    sums[channel] += int(added[channel]) - int(removed[channel]);
+            }
+        }
+    }
+    return result;
+}
+
+QImage boxBlur(QImage image, int radius, int passes)
+{
+    for (int pass = 0; pass < passes; ++pass) {
+        image = boxBlurPass(image, radius, true);
+        image = boxBlurPass(image, radius, false);
+    }
+    return image;
+}
+
+// Keep fractional coverage between passes. Quantizing each axis to 8 bits
+// creates aligned plateaus around highlights, even at native resolution.
+// Several smaller boxes approximate a Gaussian without the rectangular lobes
+// of one/two large boxes; running sums keep the work linear in image size.
+QImage highPrecisionBlur(const QImage &source, int radius, int originalPasses, int passes)
+{
+    QImage image = source.convertToFormat(QImage::Format_RGBA64_Premultiplied);
+    QImage scratch(image.size(), image.format());
+    if (image.isNull() || scratch.isNull())
+        return source;
+    const double variance = originalPasses * radius * (radius + 1.0) / 3.0;
+    int lowerWidth = qFloor(std::sqrt(12.0 * variance / passes + 1.0));
+    if (!(lowerWidth & 1))
+        --lowerWidth;
+    lowerWidth = qMax(1, lowerWidth);
+    const double lowerVariance = (lowerWidth * lowerWidth - 1.0) / 12.0;
+    const int upperCount = qBound(0, qRound((variance - passes * lowerVariance)
+                                          / ((lowerWidth + 1.0) / 3.0)), passes);
+    struct Sum {
+        int r = 0, g = 0, b = 0, a = 0;
+        void add(QRgba64 p) { r += p.red(); g += p.green(); b += p.blue(); a += p.alpha(); }
+        void remove(QRgba64 p) { r -= p.red(); g -= p.green(); b -= p.blue(); a -= p.alpha(); }
+        QRgba64 pixel(int n) const {
+            return QRgba64::fromRgba64((r + n / 2) / n, (g + n / 2) / n,
+                                       (b + n / 2) / n, (a + n / 2) / n);
+        }
+    };
+    const int w = image.width(), h = image.height();
+    for (int pass = 0; pass < passes; ++pass) {
+        const int r = lowerWidth / 2 + (pass < upperCount ? 1 : 0);
+        const int n = r * 2 + 1;
+        for (int y = 0; y < h; ++y) {
+            const auto *input = reinterpret_cast<const QRgba64 *>(image.constScanLine(y));
+            auto *output = reinterpret_cast<QRgba64 *>(scratch.scanLine(y));
+            Sum sum;
+            for (int k = -r; k <= r; ++k)
+                sum.add(input[qBound(0, k, w - 1)]);
+            for (int x = 0; x < w; ++x) {
+                output[x] = sum.pixel(n);
+                sum.remove(input[qMax(0, x - r)]);
+                sum.add(input[qMin(w - 1, x + r + 1)]);
+            }
+        }
+        QVector<Sum> columns(w);
+        for (int k = -r; k <= r; ++k) {
+            const auto *row = reinterpret_cast<const QRgba64 *>(scratch.constScanLine(qBound(0, k, h - 1)));
+            for (int x = 0; x < w; ++x)
+                columns[x].add(row[x]);
+        }
+        for (int y = 0; y < h; ++y) {
+            auto *output = reinterpret_cast<QRgba64 *>(image.scanLine(y));
+            const auto *removed = reinterpret_cast<const QRgba64 *>(scratch.constScanLine(qMax(0, y - r)));
+            const auto *added = reinterpret_cast<const QRgba64 *>(scratch.constScanLine(qMin(h - 1, y + r + 1)));
+            for (int x = 0; x < w; ++x) {
+                output[x] = columns[x].pixel(n);
+                columns[x].remove(removed[x]);
+                columns[x].add(added[x]);
+            }
+        }
+    }
+    return image.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+}
 }
 
 QtGlassFlowScene::QtGlassFlowScene(QWidget *parent)
@@ -56,10 +179,10 @@ QtGlassFlowScene::QtGlassFlowScene(QWidget *parent)
       m_glassRenderingEnabled(true), m_blurOnly(false), m_glassOpacity(1.0f),
       m_blurCacheDirty(true), m_cpuBackdropDirty(true),
       m_renderBackend(AutoBackend), m_effectiveRenderBackend(GpuBackend),
-      // The final widget is still presented at native resolution.  Backdrop
-      // and blur work at 60% of native pixels, which cuts fill-rate and
-      // capture bandwidth by roughly one third while keeping text/UI crisp.
-      m_renderScale(0.60f), m_connectionsDirty(true),
+      // Native resolution is the quality default. Users can explicitly pick
+      // a reduced scale on slower GPUs, but fractional-DPI screens should not
+      // silently start from an upscaled 60% glass buffer.
+      m_renderScale(1.0f), m_connectionsDirty(true),
       m_refractionA(0.7f), m_refractionB(2.3f), m_refractionC(5.2f),
       m_refractionD(6.9f), m_fPower(1.0f), m_blurRadius(2.0f),
       m_blurIterations(2), m_noiseAmount(0.06f), m_attractionDist(160.0f),
@@ -76,10 +199,17 @@ QtGlassFlowScene::QtGlassFlowScene(QWidget *parent)
     fmt.setProfile(QSurfaceFormat::CompatibilityProfile);
     fmt.setVersion(2, 1);
     fmt.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
+    // QOpenGLWidget renders into an offscreen texture which is subsequently
+    // composed by Qt and DWM. Waiting for another swap interval here creates
+    // a second, serial vsync and can halve live-backdrop cadence.
+    fmt.setSwapInterval(0);
     setFormat(fmt);
-    // Other glass windows sample the last completed frame after composition.
-    // Preserve it for static cards; never switch policies during a drag.
-    setUpdateBehavior(QOpenGLWidget::PartialUpdate);
+    // Repaint the full transparent framebuffer on every scheduled frame.
+    // PartialUpdate can expose Qt's cleared backing texture after a framebuffer
+    // read or a DWM composition change, which appears as a one-frame white card.
+    // Other glass windows use m_surfaceSnapshot, so they do not rely on FBO
+    // preservation between paintGL calls.
+    setUpdateBehavior(QOpenGLWidget::NoPartialUpdate);
 }
 
 QtGlassFlowScene::~QtGlassFlowScene()
@@ -235,7 +365,10 @@ void QtGlassFlowScene::setGlassOpacity(float opacity)
 
 void QtGlassFlowScene::setRefreshInterval(int intervalMs)
 {
-    m_refreshInterval = qBound(16, intervalMs, 1000);
+    // High-refresh displays need intervals below 16 ms (120 Hz = 8 ms,
+    // 144 Hz = 6-7 ms, 240 Hz = 4 ms). Presentation is still vsync-bound by
+    // the surface format, so extra timer wakes are coalesced by Qt/DWM.
+    m_refreshInterval = qBound(2, intervalMs, 1000);
     syncTimerCadence();
 }
 
@@ -265,16 +398,25 @@ void QtGlassFlowScene::setRenderingSuspended(bool suspended)
         update();
 }
 
+void QtGlassFlowScene::setContinuousRenderingEnabled(bool enabled)
+{
+    if (m_continuousRendering == enabled)
+        return;
+    m_continuousRendering = enabled;
+    syncTimerCadence();
+}
+
 void QtGlassFlowScene::syncTimerCadence()
 {
     if (!m_timer)
         return;
-    const bool interacting = m_externalInteraction || m_dragIndex >= 0;
+    const bool interacting = m_externalInteraction || m_dragIndex >= 0
+                             || m_continuousRendering;
     // A static card has no time-varying pixels: all visual changes arrive via
     // update() from an input/data event. Stop the timer completely in that
     // state instead of waking the GUI and GPU five times per second. Animated
     // cards (the clock) keep their low idle cadence, and interaction always
-    // restores the requested 60 Hz cadence immediately.
+    // restores the active display's requested cadence immediately.
     if (!isVisible() || m_renderingSuspended || (!interacting && !m_animationEnabled)) {
         m_timer->stop();
         return;
@@ -308,7 +450,7 @@ void QtGlassFlowScene::setRenderBackend(RenderBackend backend)
 
 void QtGlassFlowScene::setRenderScale(float scale)
 {
-    const float next = qBound(0.5f, scale, 1.0f);
+    const float next = qBound(0.5f, scale, 1.5f);
     if (qFuzzyCompare(m_renderScale, next))
         return;
     m_renderScale = next;
@@ -513,7 +655,7 @@ void QtGlassFlowScene::destroyFBOs()
 
 void QtGlassFlowScene::loadBackgroundTexture()
 {
-    QImage image = m_bgImage.isNull() ? QImage(m_bgPath) : m_bgImage;
+    QImage image = m_bgImage.isNull() && !m_bgPath.isEmpty() ? QImage(m_bgPath) : m_bgImage;
     if (image.isNull()) {
         qWarning() << "failed to load background image:" << m_bgPath;
         return;
@@ -595,9 +737,33 @@ void QtGlassFlowScene::runBlurPass()
         return;
     m_blurShader->bind();
     m_blurShader->setUniformValue("u_resolution", QVector2D(float(m_sceneFbo->width()), float(m_sceneFbo->height())));
-    // Blur radius is expressed in native pixels. Scale the kernel along with
-    // the reduced FBO so the perceived logical radius remains unchanged.
-    m_blurShader->setUniformValue("u_radius", m_blurRadius * m_renderScale);
+    // Dilating a fixed seven-tap kernel leaves unsampled gaps and produces a
+    // lattice around highlights. High quality covers every texel, combining
+    // adjacent Gaussian taps with hardware linear filtering. Lower qualities
+    // explicitly trade sampling density for speed as well as FBO resolution.
+    const float sigma = qBound(0.01f, m_blurRadius * m_renderScale * 1.95f, 42.0f);
+    const int stride = m_renderScale < .7f ? 4 : m_renderScale < .9f ? 3
+                     : m_renderScale < 1.2f ? 2 : 1;
+    const int radius = qMin(127, qCeil(sigma * 3.0f));
+    QVector<QVector2D> samples;
+    float total = 1.0f;
+    for (int first = 1; first <= radius; first += 2 * stride) {
+        const int second = first + stride;
+        const float a = std::exp(-float(first * first) / (2 * sigma * sigma));
+        const float b = second <= radius
+            ? std::exp(-float(second * second) / (2 * sigma * sigma)) : 0.0f;
+        const float weight = a + b;
+        if (weight < 1e-8f)
+            break;
+        samples.append(QVector2D((first * a + second * b) / weight, weight));
+        total += 2 * weight;
+    }
+    for (auto& sample : samples)
+        sample.setY(sample.y() / total);
+    m_blurShader->setUniformValue("u_centerWeight", 1.0f / total);
+    m_blurShader->setUniformValue("u_sampleCount", int(samples.size()));
+    if (!samples.isEmpty())
+        m_blurShader->setUniformValueArray("u_samples", samples.constData(), int(samples.size()));
     m_blurShader->setUniformValue("u_texture", 0);
     glActiveTexture(GL_TEXTURE0);
     glDisable(GL_BLEND);
@@ -645,7 +811,7 @@ void QtGlassFlowScene::ensureCpuBackdrop()
 {
     if (!m_cpuBackdropDirty)
         return;
-    QImage source = m_bgImage.isNull() ? QImage(m_bgPath) : m_bgImage;
+    QImage source = m_bgImage.isNull() && !m_bgPath.isEmpty() ? QImage(m_bgPath) : m_bgImage;
     if (source.isNull()) {
         m_cpuBlurredImage = QImage();
         m_cpuBackdropDirty = false;
@@ -661,18 +827,24 @@ void QtGlassFlowScene::ensureCpuBackdrop()
     if (m_bgImageAlreadyFlipped)
         source = source.mirrored(false, true);
 #endif
-    const QSize target(qMax(1, qRound(width() * m_renderScale)),
-                       qMax(1, qRound(height() * m_renderScale)));
+    const qreal dpr = devicePixelRatioF();
+    // CPU quality used to downsample every backdrop by a blur-dependent 1/7
+    // (or worse) and enlarge it again. That shortcut produced the regular
+    // square lattice visible over bright, strongly blurred regions. Economical
+    // modes still follow their selected scale, but native/high/maximum quality
+    // now blur at full device-pixel resolution. Supersampling a CPU image above
+    // native would add no detail to QPainter's native-sized destination.
+    const qreal quality = qBound<qreal>(0.5, m_renderScale, 1.5);
+    const qreal workingScale = qMin<qreal>(1.0, quality);
+    const QSize working(qMax(1, qRound(width() * dpr * workingScale)),
+                        qMax(1, qRound(height() * dpr * workingScale)));
     source = source.convertToFormat(QImage::Format_ARGB32_Premultiplied)
-                 .scaled(target, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-    const int divisor = qBound(2, 2 + qRound(m_blurRadius * .70f)
-                                  + qMax(0, m_blurIterations - 1), 12);
-    const QSize reduced(qMax(1, target.width() / divisor), qMax(1, target.height() / divisor));
-    QImage blurred = source.scaled(reduced, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-    const QSize middle(qMax(1, target.width() / qMax(2, divisor / 2)),
-                       qMax(1, target.height() / qMax(2, divisor / 2)));
-    blurred = blurred.scaled(middle, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-    m_cpuBlurredImage = blurred.scaled(target, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+                 .scaled(working, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    const int radius = qBound(1, qRound(m_blurRadius * workingScale * 1.8), 36);
+    const int passes = qBound(1, m_blurIterations, 3);
+    m_cpuBlurredImage = quality >= 1.25
+        ? highPrecisionBlur(source, radius, passes, quality >= 1.5 ? 5 : 3)
+        : boxBlur(std::move(source), radius, passes);
     m_cpuBackdropDirty = false;
 }
 
@@ -683,6 +855,7 @@ void QtGlassFlowScene::renderCpuGlass(QPainter &painter)
         return;
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
     for (const GlassObject &object : std::as_const(m_objects)) {
         if (!object.visible)
             continue;
@@ -771,7 +944,15 @@ void QtGlassFlowScene::renderGlassObject(int index)
     m_glassShader->setUniformValue("u_c", m_refractionC);
     m_glassShader->setUniformValue("u_d", m_refractionD);
     m_glassShader->setUniformValue("u_fPower", m_blurOnly ? 0.0f : m_fPower);
-    m_glassShader->setUniformValue("u_noise", m_blurOnly ? 0.0f : m_noiseAmount);
+    // Dither is useful at reduced resolution but its deterministic pixel
+    // pattern can itself read as a fine grid. Fade it out with quality and
+    // disable it completely at maximum quality, where the higher precision
+    // sampling makes the trade-off unnecessary.
+    const float ditherWeight = qBound(0.0f, (1.5f - m_renderScale) / 0.9f, 1.0f);
+    const float dither = qMin(m_noiseAmount, 1.0f / 255.0f) * ditherWeight;
+    m_glassShader->setUniformValue("u_noise", m_blurOnly ? 0.0f : dither);
+    m_glassShader->setUniformValue("u_edgeAaScale",
+                                   qBound(0.85f, 0.65f + m_renderScale * 0.45f, 1.30f));
     m_glassShader->setUniformValue("u_time", float(m_clock.elapsed()) * .001f);
     m_glassShader->setUniformValue("u_tintColor", QVector3D(0, 0, 0));
     m_glassShader->setUniformValue("u_tintStrength", 0.0f);
@@ -852,6 +1033,10 @@ void QtGlassFlowScene::updateConnections()
 
 void QtGlassFlowScene::paintGL()
 {
+    // Qt can deliver a paint queued before occlusion even after our timer
+    // stops. Retain the last completed snapshot/revision until resumed.
+    if (m_renderingSuspended)
+        return;
     const qreal dpr = devicePixelRatioF();
     const int nativePixelWidth = qMax(1, qRound(width() * dpr));
     const int nativePixelHeight = qMax(1, qRound(height() * dpr));
@@ -928,8 +1113,12 @@ QImage QtGlassFlowScene::surfaceSnapshot()
     QSurface* previousSurface = previous ? previous->surface() : nullptr;
     makeCurrent();
     const QSize native(qRound(width() * devicePixelRatioF()), qRound(height() * devicePixelRatioF()));
-    const QSize reduced(qMax(1, qRound(native.width() * m_renderScale)),
-                        qMax(1, qRound(native.height() * m_renderScale)));
+    // The visible framebuffer is already at native device resolution. Never
+    // enlarge this snapshot: doing so adds no detail and forces overlapping
+    // cards through a needless upsample/downsample cycle. RenderScale > 1 is
+    // applied to the glass/background FBOs before their native resolve.
+    const QSize reduced(qMax(1, qRound(native.width() * qMin(1.0f, m_renderScale))),
+                        qMax(1, qRound(native.height() * qMin(1.0f, m_renderScale))));
     QSize readSize = native;
     glBindFramebuffer(GL_FRAMEBUFFER, defaultFramebufferObject());
     if (QOpenGLFramebufferObject::hasOpenGLFramebufferBlit()) {
