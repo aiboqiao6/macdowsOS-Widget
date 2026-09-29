@@ -1,4 +1,5 @@
 #include "rendering/liquidglasswidget.h"
+#include "app/appsettings.h"
 
 #include "desktopcapture.h"
 #include "nativewindows.h"
@@ -33,81 +34,6 @@
 #  endif
 #  include <windows.h>
 
-namespace {
-// These compositor entry points are resolved dynamically so the same binary
-// runs on Windows 10 and Windows 11 without importing APIs that are absent on
-// older builds. The shared BlurBehind policy avoids the heavy gray Acrylic
-// tint that some Windows 11 revisions apply to transparent OpenGL windows.
-using SetWindowCompositionAttributeFn = BOOL (WINAPI *)(HWND, void*);
-using DwmSetWindowAttributeFn = HRESULT (WINAPI *)(HWND, DWORD, const void*, DWORD);
-
-struct AccentPolicy {
-    int state;
-    int flags;
-    DWORD gradientColor;
-    int animationId;
-};
-
-struct WindowCompositionAttributeData {
-    int attribute;
-    void* data;
-    SIZE_T dataSize;
-};
-
-constexpr int kWcaAccentPolicy = 19;
-constexpr int kAccentDisabled = 0;
-constexpr int kAccentEnableBlurBehind = 3;
-constexpr DWORD kDwmAttributeSystemBackdropType = 38;
-constexpr DWORD kDwmAttributeUseImmersiveDarkMode = 20;
-constexpr int kDwmSystemBackdropNone = 1;
-
-void setNativeBackdrop(HWND window, bool enabled, qreal opacity)
-{
-    if (!window)
-        return;
-
-    HMODULE dwm = GetModuleHandleW(L"dwmapi.dll");
-    auto setDwmAttribute = dwm
-        ? reinterpret_cast<DwmSetWindowAttributeFn>(
-              GetProcAddress(dwm, "DwmSetWindowAttribute"))
-        : nullptr;
-    if (setDwmAttribute) {
-        // Clear the Win11 backdrop attribute and use the cross-version blur
-        // policy below. DWMSBT_TRANSIENT_WINDOW adds a heavy gray acrylic
-        // tint on some builds and is the source of the opaque rectangle seen
-        // on older cards.
-        const int backdrop = kDwmSystemBackdropNone;
-        setDwmAttribute(window, kDwmAttributeSystemBackdropType,
-                        &backdrop, sizeof(backdrop));
-        const BOOL darkMode = TRUE;
-        setDwmAttribute(window, kDwmAttributeUseImmersiveDarkMode,
-                        &darkMode, sizeof(darkMode));
-    }
-
-    // Windows 10 and older Windows 11 builds do not accept
-    // DWMWA_SYSTEMBACKDROP_TYPE. Use the documented-in-practice Accent
-    // policy as a compatible acrylic/blur-behind fallback.
-    HMODULE user32 = GetModuleHandleW(L"user32.dll");
-    auto setComposition = user32
-        ? reinterpret_cast<SetWindowCompositionAttributeFn>(
-              GetProcAddress(user32, "SetWindowCompositionAttribute"))
-        : nullptr;
-    if (setComposition) {
-        AccentPolicy policy{};
-        policy.state = enabled ? kAccentEnableBlurBehind : kAccentDisabled;
-        // Blur-behind has no acrylic material tint. Keep only a subtle neutral
-        // alpha so the wallpaper stays bright instead of becoming a gray slab.
-        const int alpha = qBound(0, qRound(0x12 * opacity), 0x20);
-        policy.gradientColor = enabled ? (DWORD(alpha) << 24) : 0u;
-        WindowCompositionAttributeData data{};
-        data.attribute = kWcaAccentPolicy;
-        data.data = &policy;
-        data.dataSize = sizeof(policy);
-        setComposition(window, &data);
-    }
-}
-
-} // namespace
 #endif
 
 namespace {
@@ -177,8 +103,11 @@ LiquidGlassWidget::LiquidGlassWidget(QWidget* parent)
     NativeWindows::observeTopology(this, [this]() {
         // Invalidate/recompose promptly when another application changes
         // layers, even while the static-desktop timer is running at 10 Hz.
-        if (isVisible() && m_desktopCaptureEnabled)
-            captureDesktopBackdrop();
+        if (isVisible()) {
+            updateWindowLayer();
+            if (m_desktopCaptureEnabled)
+                captureDesktopBackdrop();
+        }
     });
 }
 
@@ -255,11 +184,11 @@ void LiquidGlassWidget::requestDesktopComposite(const QRect& area,
         return;
     }
     const qreal scale = screen->devicePixelRatio() * renderScale();
-    // Keep a small runway for motion so the previous verified cache remains
-    // useful while a newer frame is in flight.
-    const QRect captureArea = isVisible()
-        ? area.adjusted(-56, -56, 56, 56).intersected(screen->geometry())
-        : area;
+    // Callers use this path for a settled interactive surface. Capture only
+    // the requested rectangle: unlike the desktop-card drag path, it does not
+    // need a movement runway, and the smaller transfer keeps live gallery
+    // updates lighter.
+    const QRect captureArea = area.intersected(screen->geometry());
     DesktopCapture::request(captureArea, scale, winId(), this,
         [this, area, captureArea, scale,
          completed = std::move(completed)](DesktopCapture::Frame frame) {
@@ -281,8 +210,13 @@ void LiquidGlassWidget::requestDesktopComposite(const QRect& area,
         });
 }
 
+void LiquidGlassWidget::compositeDesktopGlass(QImage& image, const QRect& area, WId target)
+{
+    compositeGlassWindows(image, area, nullptr, target);
+}
+
 void LiquidGlassWidget::compositeGlassWindows(QImage& image, const QRect& area,
-                                              const LiquidGlassWidget* excluded)
+                                              const LiquidGlassWidget* excluded, WId target)
 {
 #ifdef Q_OS_WIN
     if (image.isNull())
@@ -301,7 +235,8 @@ void LiquidGlassWidget::compositeGlassWindows(QImage& image, const QRect& area,
         if (widget->isVisible())
             glassWindows.insert(widget->winId(), widget);
     }
-    const WId target = excluded && excluded->isVisible() ? excluded->winId() : 0;
+    if (excluded && excluded->isVisible())
+        target = excluded->winId();
     int targetIndex = -1;
     if (target) {
         for (int i = 0; i < stack.size(); ++i)
@@ -354,34 +289,14 @@ void LiquidGlassWidget::compositeGlassWindows(QImage& image, const QRect& area,
     Q_UNUSED(image);
     Q_UNUSED(area);
     Q_UNUSED(excluded);
+    Q_UNUSED(target);
 #endif
-}
-
-void LiquidGlassWidget::setSystemBlurEnabled(bool enabled)
-{
-    if (m_systemBlur == enabled) {
-        applySystemBlurEffect();
-        return;
-    }
-    m_systemBlur = enabled;
-    QSettings settings;
-    settings.setValue(QStringLiteral("appearance/systemBlur"), enabled);
-    // Keep the same live backdrop FBO path in both materials. In blur-only
-    // mode the glass shader samples the blurred backdrop at 1:1 (no optical
-    // refraction), avoiding the opaque rectangular DWM surface produced by
-    // Acrylic on transparent QOpenGLWidget windows.
-    setGlassRenderingEnabled(true);
-    setBlurOnlyEnabled(enabled);
-    updateMaterialParameters();
-    applySystemBlurEffect();
-    captureDesktopBackdrop();
-    update();
 }
 
 void LiquidGlassWidget::setMaterialBlurStrength(int percent)
 {
     m_blurStrength = qBound(0, percent, 100);
-    QSettings settings;
+    AppSettings settings;
     settings.setValue(QStringLiteral("appearance/blurStrength"), m_blurStrength);
     updateMaterialParameters();
     update();
@@ -390,34 +305,18 @@ void LiquidGlassWidget::setMaterialBlurStrength(int percent)
 void LiquidGlassWidget::updateMaterialParameters()
 {
     const qreal amount = m_blurStrength / 100.0;
-    if (m_systemBlur) {
-        // Pure blur can use a wider kernel because there is no refracted edge
-        // motion to amplify. The iteration count changes in coarse steps so
-        // low settings also reduce GPU cost.
-        // Fewer passes are compensated with a slightly wider kernel so the
-        // perceived softness stays close to the previous material.
-        setBlurRadius(float(0.5 + amount * 13.5));
-        // Two or three separable passes cover the useful radius range. The
-        // old 5-pass ceiling multiplied fullscreen texture traffic without a
-        // proportional visual gain on a small card.
-        setBlurIterations(1 + qRound(amount * 2.0));
-        setNoiseAmount(0.0f);
-        setRefractionPower(0.0f);
-    } else {
-        setBlurRadius(float(0.5 + amount * 9.5));
-        setBlurIterations(1 + qRound(amount * 2.0));
-        setNoiseAmount(0.008f);
-        setRefractionPower(1.32f);
-    }
+    setBlurRadius(float(0.5 + amount * 9.5));
+    setBlurIterations(1 + qRound(amount * 2.0));
+    setNoiseAmount(0.008f);
+    setRefractionPower(1.32f);
 }
 
 void LiquidGlassWidget::setGlassOpacity(qreal opacity)
 {
     m_glassOpacity = qBound<qreal>(0.05, opacity, 1.0);
-    QSettings settings;
+    AppSettings settings;
     settings.setValue(QStringLiteral("appearance/opacity"), m_glassOpacity);
     QtGlassFlowScene::setGlassOpacity(float(m_glassOpacity));
-    applySystemBlurEffect();
     update();
 }
 
@@ -428,7 +327,7 @@ void LiquidGlassWidget::setMouseThroughEnabled(bool enabled)
     if (enabled)
         finishWindowDrag();
     m_mouseThrough = enabled;
-    QSettings settings;
+    AppSettings settings;
     settings.setValue(QStringLiteral("interaction/mouseThrough"), enabled);
     setAttribute(Qt::WA_TransparentForMouseEvents, enabled);
     setMouseTracking(!enabled);
@@ -442,7 +341,6 @@ void LiquidGlassWidget::setMouseThroughEnabled(bool enabled)
     if (wasVisible) {
         setGeometry(oldGeometry);
         show();
-        applySystemBlurEffect();
     }
     updateRefreshRate();
 }
@@ -450,18 +348,20 @@ void LiquidGlassWidget::setMouseThroughEnabled(bool enabled)
 void LiquidGlassWidget::setLowPowerRefreshEnabled(bool enabled)
 {
     m_lowPowerRefresh = enabled;
-    QSettings settings;
+    AppSettings settings;
     settings.setValue(QStringLiteral("interaction/lowPowerRefresh"), enabled);
     updateRefreshRate();
 }
 
-void LiquidGlassWidget::setLiveBackdropEnabled(bool enabled)
+void LiquidGlassWidget::setLiveBackdropEnabled(bool enabled, bool persist)
 {
     if (m_liveBackdropEnabled == enabled)
         return;
     m_liveBackdropEnabled = enabled;
-    QSettings settings;
-    settings.setValue(QStringLiteral("appearance/liveBackdrop"), enabled);
+    if (persist) {
+        AppSettings settings;
+        settings.setValue(QStringLiteral("appearance/liveBackdrop"), enabled);
+    }
     ++m_captureGeneration;
     m_backdropCache.clear();
     m_compositeCanvas = {};
@@ -529,7 +429,7 @@ void LiquidGlassWidget::updateRefreshRate()
         // Live sampling is presentation work, not a housekeeping task.  A
         // coarse timer may be delayed by tens of milliseconds while the card
         // is stationary, which made the enabled setting look frozen.  The
-        // single in-flight request below already provides back-pressure.
+        // bounded in-flight requests below already provide back-pressure.
         m_backdropTimer->setTimerType((dragging || live) ? Qt::PreciseTimer
                                                         : Qt::VeryCoarseTimer);
         const int interval = dragging ? displayInterval
@@ -587,19 +487,6 @@ void LiquidGlassWidget::refreshBackdropTopology()
     }
 }
 
-void LiquidGlassWidget::applySystemBlurEffect()
-{
-#ifdef Q_OS_WIN
-    if (!windowHandle() && !isVisible())
-        return;
-    const HWND window = reinterpret_cast<HWND>(winId());
-    // Clear any stale DWM policy left by a previous process version. The
-    // visible blur is rendered from the captured backdrop FBO so it follows the
-    // rounded SDF exactly on both Windows 10 and Windows 11.
-    setNativeBackdrop(window, false, m_glassOpacity);
-#endif
-}
-
 void LiquidGlassWidget::setGlassMargins(int horizontal, int vertical)
 {
     m_glassMarginsX = qMax(0, horizontal);
@@ -638,43 +525,34 @@ void LiquidGlassWidget::paintGlassSurfaceFrame(QPainter& p, const QRectF& card,
     p.save();
     p.setRenderHint(QPainter::Antialiasing, true);
     p.setBrush(Qt::NoBrush);
-    if (m_systemBlur) {
-        QPen edge(QColor(255, 255, 255, 62), 1.0);
-        edge.setCosmetic(true);
-        p.setPen(edge);
-        p.drawRoundedRect(card.adjusted(.75, .75, -.75, -.75),
-                          qMax<qreal>(0.0, radius - .75),
-                          qMax<qreal>(0.0, radius - .75));
-    } else {
-        // One restrained directional rim is enough: the shader already owns
-        // the SDF alpha edge. The previous base stroke + gradient stroke +
-        // conical stroke + top line stacked into a blue/white double border,
-        // especially along the lower-right edge.
-        QLinearGradient rim(card.topLeft(), card.bottomRight());
-        rim.setColorAt(0.00, QColor(255, 255, 255, 105));
-        rim.setColorAt(0.22, QColor(245, 250, 255, 54));
-        rim.setColorAt(0.52, QColor(220, 232, 246, 18));
-        rim.setColorAt(0.78, QColor(224, 238, 252, 28));
-        rim.setColorAt(1.00, QColor(255, 255, 255, 62));
-        QPen edge(QBrush(rim), 1.0);
-        edge.setCosmetic(true);
-        p.setPen(edge);
-        p.drawRoundedRect(card.adjusted(.75, .75, -.75, -.75),
-                          qMax<qreal>(0.0, radius - .75),
-                          qMax<qreal>(0.0, radius - .75));
+    // One restrained directional rim is enough: the shader already owns
+    // the SDF alpha edge. The previous base stroke + gradient stroke +
+    // conical stroke + top line stacked into a blue/white double border,
+    // especially along the lower-right edge.
+    QLinearGradient rim(card.topLeft(), card.bottomRight());
+    rim.setColorAt(0.00, QColor(255, 255, 255, 105));
+    rim.setColorAt(0.22, QColor(245, 250, 255, 54));
+    rim.setColorAt(0.52, QColor(220, 232, 246, 18));
+    rim.setColorAt(0.78, QColor(224, 238, 252, 28));
+    rim.setColorAt(1.00, QColor(255, 255, 255, 62));
+    QPen edge(QBrush(rim), 1.0);
+    edge.setCosmetic(true);
+    p.setPen(edge);
+    p.drawRoundedRect(card.adjusted(.75, .75, -.75, -.75),
+                      qMax<qreal>(0.0, radius - .75),
+                      qMax<qreal>(0.0, radius - .75));
 
-        p.save();
-        QPainterPath tintPath;
-        tintPath.addRoundedRect(card, radius, radius);
-        p.setClipPath(tintPath);
-        QLinearGradient gloss(card.topLeft(),
-                              QPointF(card.left(), card.top() + card.height() * .40));
-        gloss.setColorAt(0.0, QColor(255, 255, 255, 22));
-        gloss.setColorAt(0.30, QColor(255, 255, 255, 5));
-        gloss.setColorAt(1.0, QColor(255, 255, 255, 0));
-        p.fillRect(card, gloss);
-        p.restore();
-    }
+    p.save();
+    QPainterPath tintPath;
+    tintPath.addRoundedRect(card, radius, radius);
+    p.setClipPath(tintPath);
+    QLinearGradient gloss(card.topLeft(),
+                          QPointF(card.left(), card.top() + card.height() * .40));
+    gloss.setColorAt(0.0, QColor(255, 255, 255, 22));
+    gloss.setColorAt(0.30, QColor(255, 255, 255, 5));
+    gloss.setColorAt(1.0, QColor(255, 255, 255, 0));
+    p.fillRect(card, gloss);
+    p.restore();
     p.restore();
 }
 
@@ -832,6 +710,18 @@ void LiquidGlassWidget::updateCaptureExclusion(bool resetBackdrop)
         < QOperatingSystemVersion(QOperatingSystemVersion::Windows, 10, 0, 19041))
         return;
     const WId id = winId();
+    // Qt's translucent HWND still receives a Windows 11 non-client outline
+    // on some themes. That rectangular border is outside our GL alpha mask.
+    // The glass shader and overlay own the entire rounded edge.
+    using SetDwmAttribute = HRESULT (WINAPI *)(HWND, DWORD, LPCVOID, DWORD);
+    static const auto setDwmAttribute = reinterpret_cast<SetDwmAttribute>(
+        GetProcAddress(GetModuleHandleW(L"dwmapi.dll"), "DwmSetWindowAttribute"));
+    if (setDwmAttribute) {
+        const int disabled = 1; // DWMNCRP_DISABLED
+        const DWORD noBorder = 0xfffffffe; // DWMWA_COLOR_NONE
+        setDwmAttribute(reinterpret_cast<HWND>(id), 2, &disabled, sizeof(disabled));
+        setDwmAttribute(reinterpret_cast<HWND>(id), 34, &noBorder, sizeof(noBorder));
+    }
     if (m_registeredGlassWindow && m_registeredGlassWindow != id)
         NativeWindows::unregisterGlassWindow(m_registeredGlassWindow);
     m_registeredGlassWindow = id;
@@ -850,6 +740,10 @@ void LiquidGlassWidget::updateSystemCaptureMode()
 #ifdef Q_OS_WIN
     if (!isVisible())
         return;
+    // Reuse the existing monitor tick as a fallback for native callers that
+    // suppress WINDOWPOSCHANGING or do not emit a usable reorder event. This
+    // check is independent of live capture and only repositions misplaced cards.
+    updateWindowLayer();
     setSystemCaptureMode(NativeWindows::isSystemCaptureActive());
 #endif
 }
@@ -896,11 +790,13 @@ bool LiquidGlassWidget::captureCompositedBackdrop(QScreen* screen)
     if (!screen || !m_captureExcluded)
         return false;
     updateCompositeCrop();
-    if (m_capturePending)
+    const bool live = m_liveBackdropEnabled && !(m_lowPowerRefresh && m_mouseThrough);
+    if (m_capturesInFlight >= (live && !m_dragging ? 2 : 1))
         return true;
     // Coarse timers may fire up to 5% early; allow that tolerance instead of
     // unintentionally skipping every other idle tick.
-    const int maxAge = m_dragging ? 14 : qMax(1, m_backdropTimer->interval() * 94 / 100);
+    const int maxAge = live && !m_dragging ? 0
+                     : (m_dragging ? 14 : qMax(1, m_backdropTimer->interval() * 94 / 100));
     if (m_compositeCaptureClock.isValid() && m_compositeCaptureClock.elapsed() < maxAge
         && m_lastCompositeGeometry == geometry())
         return true;
@@ -908,24 +804,24 @@ bool LiquidGlassWidget::captureCompositedBackdrop(QScreen* screen)
         && m_compositeCaptureClock.elapsed() < maxAge)
         return true;
     // A padded capture lets movement crop immediately from RAM while the
-    // next desktop frame arrives from the worker. At most one request per
-    // widget can be in flight, so input never builds a queue of stale frames.
+    // next desktop frame arrives from the worker. Live surfaces use a bounded
+    // two-request pipeline so GPU presentation cannot leave the worker idle.
     // Keep a small movement runway so crops stay responsive while dragging,
     // but avoid the 3x pixel area of the previous 128 px pad.
     // A small idle runway keeps motion crops responsive without expanding the
     // capture to a large part of a high-DPI desktop.
-    const int padding = m_dragging ? 96 : 56;
+    const int padding = live && !m_dragging ? 0 : (m_dragging ? 96 : 56);
     const QRect targetGeometry = frameGeometry();
     const QRect area = targetGeometry.adjusted(-padding, -padding, padding, padding);
     const quint64 generation = m_captureGeneration;
-    m_capturePending = true;
+    ++m_capturesInFlight;
     m_compositeCaptureClock.restart();
     // Store only the external desktop. Glass layers are composed at the
     // current position from completed frames, independently of capture age.
     const qreal scale = screen->devicePixelRatio() * renderScale();
     DesktopCapture::request(area, scale, winId(), this,
         [this, area, scale, generation](DesktopCapture::Frame frame) {
-        m_capturePending = false;
+        --m_capturesInFlight;
         if (generation != m_captureGeneration || !isVisible() || !m_desktopCaptureEnabled
             || m_systemCaptureActive || fullyOccluded())
             return;
@@ -942,6 +838,11 @@ bool LiquidGlassWidget::captureCompositedBackdrop(QScreen* screen)
             ++s_surfaceRevision;
             updateCompositeCrop();
         }
+        // Start the next asynchronous request before returning to Qt's
+        // vsynced composition. A queued zero timer here lost a display tick.
+        if (m_liveBackdropEnabled && !(m_lowPowerRefresh && m_mouseThrough)
+            && !desktopDragActive())
+            captureDesktopBackdrop();
     }, m_dragging ? 1 : 0);
     return true;
 }
@@ -983,12 +884,6 @@ void LiquidGlassWidget::updateCompositeCrop()
         return;
     if (m_compositeCanvas.isNull() || !m_compositeArea.contains(frameGeometry()))
         return;
-    if (!m_backdropCache.current()) {
-        // Keep the last complete frame until a verified worker capture arrives.
-        // Clearing the texture here creates a one-frame transparent/black flash
-        // whenever the lower window stack changes during a drag.
-        return;
-    }
     const bool sourceUnchanged = m_lastCropCanvasKey == m_compositeCanvas.cacheKey()
                                  && m_lastCropGeometry == frameGeometry();
     bool overlapping = false;
@@ -1000,6 +895,11 @@ void LiquidGlassWidget::updateCompositeCrop()
     }
     if (sourceUnchanged && overlapping == m_lastCropHadLayers
         && (!overlapping || m_lastCropSceneRevision == s_surfaceRevision))
+        return;
+    // A no-op crop does not consume any captured pixels. Avoid rebuilding the
+    // native capture plan on every render tick in that case; still validate
+    // before every actual composition, including topology/overlap changes.
+    if (!m_backdropCache.current())
         return;
     m_lastCropHadLayers = overlapping;
     m_lastCropSceneRevision = s_surfaceRevision;
@@ -1139,9 +1039,6 @@ void LiquidGlassWidget::showEvent(QShowEvent* event)
         updateRefreshRate();
         m_backdropTimer->start();
     }
-#ifdef Q_OS_WIN
-    applySystemBlurEffect();
-#endif
     QTimer::singleShot(0, this, &LiquidGlassWidget::captureDesktopBackdrop);
     QTimer::singleShot(0, this, &LiquidGlassWidget::refreshBackdropTopology);
 }
@@ -1176,8 +1073,14 @@ void LiquidGlassWidget::updateWindowLayer()
                     panel = widget->winId();
             NativeWindows::placeDragging(winId(), panel);
         }
-    } else if (!m_windowLayerInitialized || actualTopmost) {
-        NativeWindows::placeDesktop(winId());
+    } else {
+        QSet<WId> desktopWidgets;
+        for (LiquidGlassWidget* widget : std::as_const(s_liveGlassWidgets))
+            if (widget->m_desktopLayerEnabled && widget->isVisible())
+                desktopWidgets.insert(widget->winId());
+        if (!m_windowLayerInitialized || actualTopmost
+            || !NativeWindows::isAtDesktopLayer(winId(), desktopWidgets))
+            NativeWindows::placeDesktop(winId());
     }
     m_windowLayerInitialized = true;
 #endif
@@ -1221,6 +1124,32 @@ void LiquidGlassWidget::finishWindowDrag()
     updateRefreshRate();
     captureDesktopBackdrop();
     QTimer::singleShot(0, this, &LiquidGlassWidget::refreshBackdropTopology);
+}
+
+bool LiquidGlassWidget::nativeEvent(const QByteArray& eventType, void* message, qintptr* result)
+{
+#ifdef Q_OS_WIN
+    if (eventType == "windows_generic_MSG" && message && m_desktopLayerEnabled
+        && !m_dragging && isVisible()) {
+        const auto* native = static_cast<MSG*>(message);
+        if (native->message == WM_MOUSEACTIVATE) {
+            *result = MA_NOACTIVATE;
+            return true;
+        }
+        if (native->message == WM_WINDOWPOSCHANGING) {
+            auto* position = reinterpret_cast<WINDOWPOS*>(native->lParam);
+            if (position && !(position->flags & SWP_NOZORDER)) {
+                // Prevent click/owner/Qt raises before Windows presents the
+                // card above applications. Dragging and library panels retain
+                // their own layer policy. Only change the insertion anchor:
+                // Windows ignores NOACTIVATE/NOOWNERZORDER edits in this message.
+                position->hwndInsertAfter = reinterpret_cast<HWND>(
+                    NativeWindows::desktopInsertAfter(reinterpret_cast<WId>(native->hwnd)));
+            }
+        }
+    }
+#endif
+    return QtGlassFlowScene::nativeEvent(eventType, message, result);
 }
 
 bool LiquidGlassWidget::event(QEvent* event)

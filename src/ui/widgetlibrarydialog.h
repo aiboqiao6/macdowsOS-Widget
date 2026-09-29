@@ -15,6 +15,8 @@ class QPainter;
 class QPropertyAnimation;
 class QMouseEvent;
 class QGridLayout;
+class QHBoxLayout;
+class QVBoxLayout;
 class QScrollArea;
 class QPushButton;
 class QLabel;
@@ -27,6 +29,8 @@ class WidgetLibraryDialog final : public LiquidGlassWidget
     Q_OBJECT
 public:
     explicit WidgetLibraryDialog(QWidget* parent = nullptr);
+    static void refreshFontRendering();
+    void setInterfaceScale(qreal scale);
 
     // Capture the already-composited desktop while this window is hidden.
     // The shared QtGlassFlow shader then blurs/refractions this image, so
@@ -59,13 +63,23 @@ private:
     void updateBackdropFrame();
     void selectCategory(int category);
     void applyTileFilter();
+    int scaled(int value) const;
+    int windowScaled(int value) const;
+    int tileColumnCount() const;
     void randomizeRecommendations();
     QList<QFrame*> m_tiles;
     QList<QPushButton*> m_navButtons;
     QGridLayout* m_tileLayout = nullptr;
+    QVBoxLayout* m_sideLayout = nullptr;
+    QVBoxLayout* m_contentLayout = nullptr;
+    QHBoxLayout* m_footerLayout = nullptr;
     QFrame* m_sidebar = nullptr;
+    QFrame* m_footer = nullptr;
+    QPushButton* m_doneButton = nullptr;
     QLabel* m_sectionTitle = nullptr;
     QLineEdit* m_search = nullptr;
+    qreal m_uiScale = 1.0;
+    bool m_scaleApplied = false;
     int m_tileColumns = 0;
     int m_selectedCategory = -1;
     QList<int> m_recommendedTiles;

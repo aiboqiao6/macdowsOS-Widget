@@ -1,5 +1,8 @@
 #include "widgets/batterywidget.h"
+#include "app/appsettings.h"
+#include "config.h"
 #include "ui/widgetlibrarydialog.h"
+#include "ui/liquidglassmenu.h"
 #include "rendering/responsivelayout.h"
 
 #include <QApplication>
@@ -60,6 +63,7 @@
 #include <QtMath>
 #include <QSaveFile>
 #include <QFile>
+#include <QFileInfo>
 #include <QUuid>
 #include <limits>
 #include <utility>
@@ -134,7 +138,7 @@ constexpr qreal kWeatherDailyDividerRatio = .539;
 constexpr qreal kWeatherHourlyTopRatio = .298;
 constexpr qreal kWeatherHourlyIconOffsetRatio = .083;
 constexpr qreal kWeatherHourlyTemperatureOffsetRatio = .170;
-constexpr qreal kWeatherLargeLocationFontRatio = .060;
+constexpr qreal kWeatherLargeLocationFontRatio = .070;
 constexpr qreal kWeatherLargeTemperatureFontRatio = .180;
 constexpr qreal kWeatherCompactConditionFontRatio = .058;
 constexpr qreal kWeatherWideConditionFontRatio = .052;
@@ -435,15 +439,15 @@ public:
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
         }
 #endif
-        animateOpacity(windowOpacity(), 0.0, 235);
+        animateOpacity(windowOpacity(), 0.0, 95);
     }
 
     void dismiss()
     {
-        if (!isVisible())
+        if (!isVisible() || m_hideAfterFade)
             return;
         m_hideAfterFade = true;
-        animateOpacity(windowOpacity(), 0.0, 190);
+        animateOpacity(windowOpacity(), 0.0, 85);
     }
 
 protected:
@@ -662,16 +666,24 @@ QString BatteryWidget::pingFangFontFamily()
 void BatteryWidget::setGlobalFontSmoothing(int level)
 {
     const int next = qBound(0, level, 3);
+    const bool changed = s_fontSmoothingLevel != next;
     s_fontSmoothingLevel = next;
-    QSettings().setValue(QStringLiteral("appearance/fontSmoothing"), next);
+    AppSettings().setValue(QStringLiteral("appearance/fontSmoothing"), next);
     if (auto* app = qobject_cast<QApplication*>(QCoreApplication::instance())) {
         QFont font = app->font();
         font.setFamily(pingFangFamily());
         configureFontSmoothing(font, next);
         app->setFont(font);
-        for (QWidget* window : app->topLevelWidgets()) {
-            if (window)
-                window->update();
+        if (changed)
+            WidgetLibraryDialog::refreshFontRendering();
+        for (QWidget* widget : app->allWidgets()) {
+            // Stylesheet fonts can retain the previous strategy even after
+            // QApplication::setFont(). Update the resolved font on every
+            // existing control, including menus, labels and text inputs.
+            QFont widgetFont = widget->font();
+            configureFontSmoothing(widgetFont, next);
+            widget->setFont(widgetFont);
+            widget->update();
         }
     }
 }
@@ -700,7 +712,7 @@ BatteryWidget::BatteryWidget(QWidget* parent, CardKind kind, bool primary,
     if (m_hostDeviceName.isEmpty())
         m_hostDeviceName = QStringLiteral("本机");
     s_instances.append(this);
-    QSettings settings;
+    AppSettings settings;
     m_uiScale = qBound<qreal>(0.40, settings.value(QStringLiteral("appearance/scale"), 1.0).toDouble(), 2.0);
     setGlassMargins(0);
     const int initialCell = qMax(1, qRound(kGridBaseCell * m_uiScale));
@@ -714,20 +726,16 @@ BatteryWidget::BatteryWidget(QWidget* parent, CardKind kind, bool primary,
     // The clock's second hand uses sub-second interpolation. Keep its idle
     // cadence at the previous ~15 FPS while static cards can sleep at 5 FPS.
     setAnimationEnabled(m_kind == CardKind::Clock);
-    const bool savedSystemBlur = settings.value(QStringLiteral("appearance/systemBlur"), false).toBool();
     const bool savedMouseThrough = settings.value(QStringLiteral("interaction/mouseThrough"), false).toBool();
     const bool savedLowPowerRefresh = settings.value(QStringLiteral("interaction/lowPowerRefresh"), false).toBool();
-    const bool savedLiveBackdrop = settings.value(QStringLiteral("appearance/liveBackdrop"), false).toBool();
+    const bool savedLiveBackdrop = settings.value(QStringLiteral("appearance/liveBackdrop"), true).toBool();
     const int savedFontSmoothing = qBound(0,
         settings.value(QStringLiteral("appearance/fontSmoothing"), 2).toInt(), 3);
-    const int savedBlurStrength = settings.value(QStringLiteral("appearance/blurStrength"), 55).toInt();
+    const int savedBlurStrength = settings.value(QStringLiteral("appearance/blurStrength"), 50).toInt();
     const qreal savedOpacity = settings.value(QStringLiteral("appearance/opacity"), 1.0).toDouble();
-    const int savedBackend = settings.value(QStringLiteral("performance/renderBackend"), 0).toInt();
     const qreal savedRenderQuality = qBound<qreal>(0.5,
-        settings.value(QStringLiteral("performance/renderScale"), 1.0).toDouble(), 1.5);
-    setRenderBackend(static_cast<RenderBackend>(qBound(0, savedBackend, 2)));
+        settings.value(QStringLiteral("performance/renderScale"), 0.60).toDouble(), 1.5);
     setRenderScale(float(savedRenderQuality));
-    setSystemBlurEnabled(savedSystemBlur);
     setMaterialBlurStrength(savedBlurStrength);
     setMouseThroughEnabled(savedMouseThrough);
     setLowPowerRefreshEnabled(savedLowPowerRefresh);
@@ -786,11 +794,11 @@ BatteryWidget::BatteryWidget(QWidget* parent, CardKind kind, bool primary,
     m_settingsTimer.setTimerType(Qt::VeryCoarseTimer);
     // Settings changes from the dialog are pushed directly to every live
     // widget. The poll only covers edits made by another process, so a slower
-    // interval avoids repeated QSettings reads without delaying normal UI
+    // interval avoids repeated JSON reads without delaying normal UI
     // changes.
     m_settingsTimer.setInterval(5000);
     connect(&m_settingsTimer, &QTimer::timeout, this, [this]() {
-        QSettings current;
+        AppSettings current;
         const QString savedLocation = current.value(QStringLiteral("weather/location"),
                                                     QStringLiteral("北京")).toString().trimmed();
         const QString savedCityId = current.value(QStringLiteral("weather/cityId"),
@@ -805,10 +813,7 @@ BatteryWidget::BatteryWidget(QWidget* parent, CardKind kind, bool primary,
         const qreal scale = qBound<qreal>(0.40, current.value(QStringLiteral("appearance/scale"), 1.0).toDouble(), 2.0);
         if (!qFuzzyCompare(scale, m_uiScale))
             applyScale(scale);
-        const bool blur = current.value(QStringLiteral("appearance/systemBlur"), false).toBool();
-        if (blur != systemBlurEnabled())
-            setSystemBlurEnabled(blur);
-        const int blurStrength = qBound(0, current.value(QStringLiteral("appearance/blurStrength"), 55).toInt(), 100);
+        const int blurStrength = qBound(0, current.value(QStringLiteral("appearance/blurStrength"), 50).toInt(), 100);
         if (blurStrength != materialBlurStrength())
             setMaterialBlurStrength(blurStrength);
         const qreal opacity = qBound<qreal>(0.05, current.value(QStringLiteral("appearance/opacity"), 1.0).toDouble(), 1.0);
@@ -820,7 +825,7 @@ BatteryWidget::BatteryWidget(QWidget* parent, CardKind kind, bool primary,
         const bool lowPower = current.value(QStringLiteral("interaction/lowPowerRefresh"), false).toBool();
         if (lowPower != lowPowerRefreshEnabled())
             setLowPowerRefreshEnabled(lowPower);
-        const bool liveBackdrop = current.value(QStringLiteral("appearance/liveBackdrop"), false).toBool();
+        const bool liveBackdrop = current.value(QStringLiteral("appearance/liveBackdrop"), true).toBool();
         if (liveBackdrop != liveBackdropEnabled())
             setLiveBackdropEnabled(liveBackdrop);
         const int fontSmoothing = qBound(0,
@@ -828,13 +833,9 @@ BatteryWidget::BatteryWidget(QWidget* parent, CardKind kind, bool primary,
         if (fontSmoothing != globalFontSmoothing())
             setGlobalFontSmoothing(fontSmoothing);
         const qreal renderQuality = qBound<qreal>(0.5,
-            current.value(QStringLiteral("performance/renderScale"), 1.0).toDouble(), 1.5);
+            current.value(QStringLiteral("performance/renderScale"), 0.60).toDouble(), 1.5);
         if (qAbs(renderQuality - qreal(renderScale())) > 0.001)
             setRenderScale(float(renderQuality));
-        const RenderBackend backend = static_cast<RenderBackend>(
-            qBound(0, current.value(QStringLiteral("performance/renderBackend"), 0).toInt(), 2));
-        if (backend != renderBackend())
-            setRenderBackend(backend);
     });
     m_settingsTimer.start();
 
@@ -866,6 +867,18 @@ void BatteryWidget::shutdown()
 void BatteryWidget::showEvent(QShowEvent* event)
 {
     LiquidGlassWidget::showEvent(event);
+    // Restored or newly seeded cards may have been positioned while their
+    // peers were hidden. Resolve that collision as each card becomes visible.
+    if (overlapsVisibleWidget(geometry(), this)) {
+        const QRect target = nearbyWidgetRect(m_kind, m_variant, pos(), m_uiScale, this);
+        if (target.isValid()) {
+            m_restoringPosition = true;
+            setFixedSize(target.size());
+            move(target.topLeft());
+            m_restoringPosition = false;
+            captureDesktopBackdrop();
+        }
+    }
     for (BatteryWidget* widget : s_instances)
         widget->updateTrayVisibilityLabel();
 }
@@ -992,7 +1005,7 @@ void BatteryWidget::toggleLayout()
 void BatteryWidget::applyScale(qreal scale)
 {
     m_uiScale = qBound<qreal>(0.40, scale, 2.0);
-    QSettings settings;
+    AppSettings settings;
     settings.setValue(QStringLiteral("appearance/scale"), m_uiScale);
     setGlassRadius(34.0 * m_uiScale);
     const int cell = qMax(1, qRound(kGridBaseCell * m_uiScale));
@@ -1003,8 +1016,18 @@ void BatteryWidget::applyScale(qreal scale)
         ? gridGapForArea(currentScreen->availableGeometry(), m_uiScale)
         : qMax(4, qRound(kGridBaseGap * m_uiScale));
     setFixedSize(gridWidgetSize(m_kind, m_variant, cell, gap));
-    moveToGroupPosition();
+    if (isVisible() && overlapsVisibleWidget(geometry(), this)) {
+        const QRect target = nearbyWidgetRect(m_kind, m_variant, pos(), m_uiScale, this);
+        if (target.isValid()) {
+            m_restoringPosition = true;
+            setFixedSize(target.size());
+            move(target.topLeft());
+            m_restoringPosition = false;
+        }
+    }
     updateDashboardObjects();
+    if (m_library)
+        m_library->setInterfaceScale(m_uiScale);
     captureDesktopBackdrop();
     update();
 }
@@ -1086,20 +1109,18 @@ void BatteryWidget::arrangeGroup()
     }
 }
 
-void BatteryWidget::syncGroupSettings(qreal scale, bool systemBlur, int blurStrength,
+void BatteryWidget::syncGroupSettings(qreal scale, int blurStrength,
                                       qreal opacity, bool mouseThrough, bool lowPower,
-                                      bool liveBackdrop, qreal renderQuality, int fontSmoothing,
-                                      RenderBackend renderBackend)
+                                      bool liveBackdrop, qreal renderQuality, int fontSmoothing)
 {
-    QSettings settings;
-    settings.setValue(QStringLiteral("performance/renderBackend"), int(renderBackend));
+    AppSettings settings;
     settings.setValue(QStringLiteral("performance/renderScale"), renderQuality);
     settings.setValue(QStringLiteral("appearance/liveBackdrop"), liveBackdrop);
     settings.setValue(QStringLiteral("appearance/fontSmoothing"), fontSmoothing);
+    settings.sync();
     setGlobalFontSmoothing(fontSmoothing);
-    // Changing material, opacity or input mode must not alter a user's
-    // carefully placed cards. Reflow only when the scale actually changes,
-    // because that is the one setting that changes the grid geometry.
+    // Keep freely placed positions when the card size changes. The explicit
+    // "rearrange" action is the only operation that lays out the full grid.
     bool scaleChanged = false;
     for (BatteryWidget* widget : s_instances) {
         if (widget && !qFuzzyCompare(widget->m_uiScale, scale)) {
@@ -1110,17 +1131,20 @@ void BatteryWidget::syncGroupSettings(qreal scale, bool systemBlur, int blurStre
     for (BatteryWidget* widget : s_instances) {
         if (scaleChanged)
             widget->applyScale(scale);
-        widget->setSystemBlurEnabled(systemBlur);
         widget->setMaterialBlurStrength(blurStrength);
         widget->setGlassOpacity(opacity);
         widget->setMouseThroughEnabled(mouseThrough);
         widget->setLowPowerRefreshEnabled(lowPower);
         widget->setLiveBackdropEnabled(liveBackdrop);
         widget->setRenderScale(float(renderQuality));
-        widget->setRenderBackend(renderBackend);
+        if (widget->m_library) {
+            widget->m_library->setInterfaceScale(scale);
+            widget->m_library->setLiveBackdropEnabled(liveBackdrop);
+            widget->m_library->setRenderScale(float(renderQuality));
+            widget->m_library->setMaterialBlurStrength(blurStrength);
+            widget->m_library->setGlassOpacity(opacity);
+        }
     }
-    if (scaleChanged)
-        arrangeGroup();
     saveAllConfigurations();
 }
 
@@ -1145,9 +1169,9 @@ BatteryWidget::CardKind BatteryWidget::kindFromName(const QString& value)
 
 QString BatteryWidget::configurationPath()
 {
-    const QString directory = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
-    QDir().mkpath(directory);
-    return QDir(directory).filePath(QStringLiteral("widgets.json"));
+    const QString path = AppSettings::filePath();
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    return path;
 }
 
 void BatteryWidget::saveConfiguration() const
@@ -1168,47 +1192,23 @@ void BatteryWidget::saveAllConfigurations()
         item.insert(QStringLiteral("x"), widget->x());
         item.insert(QStringLiteral("y"), widget->y());
         item.insert(QStringLiteral("visible"), widget->isVisible());
-        QScreen* screen = QGuiApplication::screenAt(widget->geometry().center());
-        if (!screen)
-            screen = QGuiApplication::primaryScreen();
-        if (screen) {
-            const QRect area = screen->availableGeometry();
-            const int cell = qMax(1, qRound(kGridBaseCell * widget->m_uiScale));
-            const int gap = gridGapForArea(area, widget->m_uiScale);
-            const int pitch = cell + gap;
-            item.insert(QStringLiteral("screen"), screen->name());
-            item.insert(QStringLiteral("gridColumn"),
-                        qRound((widget->x() - (area.left() + gap)) / qreal(pitch)));
-            item.insert(QStringLiteral("gridRow"),
-                        qRound((widget->y() - (area.top() + gap)) / qreal(pitch)));
-        }
-        item.insert(QStringLiteral("columnSpan"), gridColumnSpan(widget->m_kind, widget->m_variant));
-        item.insert(QStringLiteral("rowSpan"), gridRowSpan(widget->m_kind, widget->m_variant));
         widgets.append(item);
     }
+    const QString path = configurationPath();
     QJsonObject root;
-    root.insert(QStringLiteral("version"), 3);
+    QFile existing(path);
+    if (existing.open(QIODevice::ReadOnly)) {
+        root = QJsonDocument::fromJson(existing.readAll()).object();
+        existing.close();
+    }
+    root.insert(QStringLiteral("version"), 4);
     root.insert(QStringLiteral("scale"), s_instances.isEmpty() ? 1.0 : s_instances.first()->m_uiScale);
-    root.insert(QStringLiteral("gridCellWidth"), s_instances.isEmpty() ? kGridBaseCell
-        : qRound(kGridBaseCell * s_instances.first()->m_uiScale));
-    root.insert(QStringLiteral("gridCellHeight"), s_instances.isEmpty() ? kGridBaseCell
-        : qRound(kGridBaseCell * s_instances.first()->m_uiScale));
-    const qreal rootScale = s_instances.isEmpty() ? 1.0 : s_instances.first()->m_uiScale;
-    QScreen* rootScreen = QGuiApplication::primaryScreen();
-    root.insert(QStringLiteral("gridGap"), rootScreen
-        ? gridGapForArea(rootScreen->availableGeometry(), rootScale)
-        : qMax(4, qRound(kGridBaseGap * rootScale)));
     root.insert(QStringLiteral("widgets"), widgets);
-    QSaveFile file(configurationPath());
+    QSaveFile file(path);
     if (file.open(QIODevice::WriteOnly)) {
         file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
         file.commit();
     }
-}
-
-QPoint BatteryWidget::snappedTopLeft(const QPoint& requested) const
-{
-    return nearestGridRect(m_kind, m_variant, requested, m_uiScale, this).topLeft();
 }
 
 QRect BatteryWidget::nearestGridRect(CardKind kind, int variant,
@@ -1280,20 +1280,123 @@ QRect BatteryWidget::nearestGridRect(CardKind kind, int variant,
     return QRect();
 }
 
+QRect BatteryWidget::nearbyWidgetRect(CardKind kind, int variant,
+                                      const QPoint& requestedTopLeft, qreal scale,
+                                      const BatteryWidget* ignored)
+{
+    const int cell = qMax(1, qRound(kGridBaseCell * scale));
+    QScreen* screen = QGuiApplication::screenAt(requestedTopLeft);
+    if (!screen)
+        screen = QGuiApplication::screenAt(requestedTopLeft + QPoint(cell / 2, cell / 2));
+    if (!screen)
+        return {};
+
+    const QRect area = screen->availableGeometry();
+    const int gap = gridGapForArea(area, scale);
+    const QSize size = gridWidgetSize(kind, variant, cell, gap);
+    const QRect requested(requestedTopLeft, size);
+    const bool overlapping = overlapsVisibleWidget(requested, ignored);
+    // Detect proximity along whole edges and at all four corners, while the
+    // outline itself stays on fixed alignment slots.
+    const int threshold = qMax(96, qRound(180 * scale));
+    qint64 bestDistance = (std::numeric_limits<qint64>::max)();
+    QRect best;
+
+    for (BatteryWidget* neighbor : s_instances) {
+        if (!neighbor || neighbor == ignored || !neighbor->isVisible()
+            || QGuiApplication::screenAt(neighbor->geometry().center()) != screen)
+            continue;
+        const QRect beside = neighbor->geometry();
+        const int verticalOverlap = qMax(0, qMin(requested.bottom(), beside.bottom())
+                                          - qMax(requested.top(), beside.top()) + 1);
+        const int horizontalOverlap = qMax(0, qMin(requested.right(), beside.right())
+                                            - qMax(requested.left(), beside.left()) + 1);
+        const bool besideEdge = verticalOverlap >= qMax(1, qMin(size.height(), beside.height()) / 4);
+        const bool aboveOrBelow = horizontalOverlap >= qMax(1, qMin(size.width(), beside.width()) / 4);
+        const QPoint candidates[] = {
+            {beside.left() - gap - size.width(), beside.top()},
+            {beside.left() - gap - size.width(), beside.bottom() - size.height() + 1},
+            {beside.right() + gap + 1, beside.top()},
+            {beside.right() + gap + 1, beside.bottom() - size.height() + 1},
+            {beside.left(), beside.top() - gap - size.height()},
+            {beside.right() - size.width() + 1, beside.top() - gap - size.height()},
+            {beside.left(), beside.bottom() + gap + 1},
+            {beside.right() - size.width() + 1, beside.bottom() + gap + 1},
+            {beside.left() - gap - size.width(), beside.top() - gap - size.height()},
+            {beside.right() + gap + 1, beside.top() - gap - size.height()},
+            {beside.left() - gap - size.width(), beside.bottom() + gap + 1},
+            {beside.right() + gap + 1, beside.bottom() + gap + 1}
+        };
+        for (int index = 0; index < 12; ++index) {
+            const QPoint position = candidates[index];
+            if (!overlapping) {
+                const int dx = qAbs(position.x() - requestedTopLeft.x());
+                const int dy = qAbs(position.y() - requestedTopLeft.y());
+                if (index < 4) {
+                    if (!besideEdge || dx > threshold)
+                        continue;
+                } else if (index < 8) {
+                    if (!aboveOrBelow || dy > threshold)
+                        continue;
+                } else if (besideEdge || aboveOrBelow
+                           || dx > threshold || dy > threshold) {
+                    continue;
+                }
+            }
+            const QRect candidate(position, size);
+            if (!area.contains(candidate))
+                continue;
+            if (overlapsVisibleWidget(candidate, ignored))
+                continue;
+            const qint64 dx = qint64(position.x()) - requestedTopLeft.x();
+            const qint64 dy = qint64(position.y()) - requestedTopLeft.y();
+            const qint64 distance = dx * dx + dy * dy;
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                best = candidate;
+            }
+        }
+    }
+    if (best.isValid())
+        return best;
+    // When the requested position collides, use any vacant grid cell as a
+    // last resort. A free position must never be committed over another card.
+    return overlapping ? nearestGridRect(kind, variant, requestedTopLeft, scale, ignored)
+                       : QRect();
+}
+
+bool BatteryWidget::overlapsVisibleWidget(const QRect& rect, const BatteryWidget* ignored)
+{
+    for (BatteryWidget* widget : s_instances) {
+        if (widget && widget != ignored && widget->isVisible()
+            && rect.intersects(widget->geometry()))
+            return true;
+    }
+    return false;
+}
+
 void BatteryWidget::showGridPreview(CardKind kind, int variant, const QPoint& desktopPoint)
 {
-    QSettings settings;
+    AppSettings settings;
     const qreal scale = qBound<qreal>(0.40,
         settings.value(QStringLiteral("appearance/scale"), 1.0).toDouble(), 2.0);
     QScreen* screen = QGuiApplication::screenAt(desktopPoint);
-    if (!screen)
-        screen = QGuiApplication::primaryScreen();
-    const QRect area = screen ? screen->availableGeometry() : QRect();
+    if (!screen) {
+        hideGridPreview();
+        return;
+    }
+    const QRect area = screen->availableGeometry();
     const int cell = qMax(1, qRound(kGridBaseCell * scale));
     const int gap = gridGapForArea(area, scale);
     const QSize size = gridWidgetSize(kind, variant, cell, gap);
-    showGridPreviewRect(nearestGridRect(kind, variant,
-        desktopPoint - QPoint(size.width() / 2, size.height() / 2), scale));
+    if (size.width() > area.width() || size.height() > area.height()) {
+        hideGridPreview();
+        return;
+    }
+    const QPoint desired = desktopPoint - QPoint(size.width() / 2, size.height() / 2);
+    const QPoint freePosition(qBound(area.left(), desired.x(), area.right() - size.width() + 1),
+                              qBound(area.top(), desired.y(), area.bottom() - size.height() + 1));
+    showGridPreviewRect(nearbyWidgetRect(kind, variant, freePosition, scale));
 }
 
 void BatteryWidget::showGridPreviewRect(const QRect& rect)
@@ -1313,12 +1416,22 @@ void BatteryWidget::hideGridPreview()
 
 bool BatteryWidget::placeAtDesktopPoint(const QPoint& point)
 {
-    // Center the card under the drop cursor, then snap its top-left to the
-    // nearest scale-aware grid cell.
-    const QPoint desired = point - QPoint(width() / 2, height() / 2);
-    const QRect target = nearestGridRect(m_kind, m_variant, desired, m_uiScale, this);
-    if (!target.isValid())
+    QScreen* screen = QGuiApplication::screenAt(point);
+    if (!screen)
         return false;
+    const QRect area = screen->availableGeometry();
+    const int cell = qMax(1, qRound(kGridBaseCell * m_uiScale));
+    const QSize size = gridWidgetSize(m_kind, m_variant, cell,
+                                      gridGapForArea(area, m_uiScale));
+    if (size.width() > area.width() || size.height() > area.height())
+        return false;
+    const QPoint desired = point - QPoint(size.width() / 2, size.height() / 2);
+    const QPoint freePosition(qBound(area.left(), desired.x(), area.right() - size.width() + 1),
+                              qBound(area.top(), desired.y(), area.bottom() - size.height() + 1));
+    const QRect snapped = nearbyWidgetRect(m_kind, m_variant, freePosition, m_uiScale, this);
+    if (!snapped.isValid() && overlapsVisibleWidget(QRect(freePosition, size), this))
+        return false;
+    const QRect target = snapped.isValid() ? snapped : QRect(freePosition, size);
     m_restoringPosition = true;
     setFixedSize(target.size());
     move(target.topLeft());
@@ -1342,7 +1455,8 @@ BatteryWidget* BatteryWidget::addWidget(CardKind kind, const QPoint& desktopPoin
     return widget;
 }
 
-QImage BatteryWidget::renderPreview(CardKind kind, int variant, const QSize& size)
+QImage BatteryWidget::renderPreview(CardKind kind, int variant, const QSize& size,
+                                    qreal devicePixelRatio)
 {
     if (size.isEmpty())
         return {};
@@ -1358,10 +1472,6 @@ QImage BatteryWidget::renderPreview(CardKind kind, int variant, const QSize& siz
     QSize renderSize = reference;
     renderSize.scale(size, Qt::KeepAspectRatio);
     renderSize = renderSize.expandedTo(QSize(1, 1));
-    // Supersample the shared renderer before the gallery scales it into its
-    // tile. This keeps CJK and numeric glyph edges crisp instead of enlarging
-    // a low-resolution intermediate image.
-    renderSize *= 2;
     preview.m_uiScale = qMin(renderSize.width() / qreal(reference.width()),
                              renderSize.height() / qreal(reference.height()));
     preview.setMinimumSize(0, 0);
@@ -1372,13 +1482,18 @@ QImage BatteryWidget::renderPreview(CardKind kind, int variant, const QSize& siz
     // not allocated until native exposure, yielding the blank cards reported
     // in the gallery. paintOverlay() is the exact desktop payload renderer and
     // is deterministic on an ordinary image paint device.
-    QImage image(renderSize, QImage::Format_ARGB32_Premultiplied);
+    const qreal dpr = qMax<qreal>(1.0, devicePixelRatio);
+    QImage image(QSize(qMax(1, qRound(renderSize.width() * dpr)),
+                      qMax(1, qRound(renderSize.height() * dpr))),
+                 QImage::Format_ARGB32_Premultiplied);
+    image.setDevicePixelRatio(dpr);
     image.fill(Qt::transparent);
     QPainter painter(&image);
+    painter.setRenderHint(QPainter::Antialiasing);
     painter.setPen(Qt::NoPen);
     painter.setBrush(QColor(36, 54, 76, 150));
     const qreal previewRadius = 34.0 * preview.m_uiScale;
-    painter.drawRoundedRect(QRectF(image.rect()), previewRadius, previewRadius);
+    painter.drawRoundedRect(QRectF(QPointF(), QSizeF(renderSize)), previewRadius, previewRadius);
     preview.paintOverlay(painter);
     painter.end();
     return image;
@@ -1391,7 +1506,9 @@ QList<BatteryWidget*> BatteryWidget::restoreWidgets()
     if (!file.open(QIODevice::ReadOnly))
         return result;
     const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
-    const QJsonArray widgets = document.object().value(QStringLiteral("widgets")).toArray();
+    const QJsonObject root = document.object();
+    const int version = root.value(QStringLiteral("version")).toInt();
+    const QJsonArray widgets = root.value(QStringLiteral("widgets")).toArray();
     bool primaryAssigned = false;
     for (const QJsonValue& value : widgets) {
         const QJsonObject item = value.toObject();
@@ -1412,7 +1529,7 @@ QList<BatteryWidget*> BatteryWidget::restoreWidgets()
                                          storedVariant);
         QPoint restoredPosition(item.value(QStringLiteral("x")).toInt(),
                                 item.value(QStringLiteral("y")).toInt());
-        if (item.contains(QStringLiteral("gridColumn"))
+        if (version < 4 && item.contains(QStringLiteral("gridColumn"))
             && item.contains(QStringLiteral("gridRow"))) {
             QScreen* targetScreen = nullptr;
             const QString screenName = item.value(QStringLiteral("screen")).toString();
@@ -1436,8 +1553,42 @@ QList<BatteryWidget*> BatteryWidget::restoreWidgets()
                              item.value(QStringLiteral("gridRow")).toInt() * pitch);
             }
         }
-        const QRect restoredTarget = nearestGridRect(kind, widget->m_variant, restoredPosition,
-                                                     widget->m_uiScale, widget);
+        QRect restoredTarget;
+        if (version < 4) {
+            restoredTarget = nearestGridRect(kind, widget->m_variant,
+                                             restoredPosition, widget->m_uiScale, widget);
+        } else {
+            const int cell = qMax(1, qRound(kGridBaseCell * widget->m_uiScale));
+            QScreen* screen = nullptr;
+            int bestOverlap = 0;
+            // The saved center may be outside every screen after a monitor
+            // change, even while part of the card is still visible.
+            for (QScreen* candidate : QGuiApplication::screens()) {
+                const QRect candidateArea = candidate->availableGeometry();
+                const int candidateGap = gridGapForArea(candidateArea, widget->m_uiScale);
+                const QSize candidateSize = gridWidgetSize(
+                    kind, widget->m_variant, cell, candidateGap);
+                const QRect overlap = candidateArea.intersected(
+                    QRect(restoredPosition, candidateSize));
+                const int pixels = overlap.isValid() ? overlap.width() * overlap.height() : 0;
+                if (pixels > bestOverlap) {
+                    bestOverlap = pixels;
+                    screen = candidate;
+                }
+            }
+            if (!screen)
+                screen = QGuiApplication::primaryScreen();
+            const QRect area = screen ? screen->availableGeometry() : QRect();
+            const int gap = gridGapForArea(area, widget->m_uiScale);
+            const QSize size = gridWidgetSize(kind, widget->m_variant, cell, gap);
+            if (screen) {
+                restoredPosition.setX(qBound(area.left(), restoredPosition.x(),
+                    qMax(area.left(), area.right() - size.width() + 1)));
+                restoredPosition.setY(qBound(area.top(), restoredPosition.y(),
+                    qMax(area.top(), area.bottom() - size.height() + 1)));
+            }
+            restoredTarget = QRect(restoredPosition, size);
+        }
         if (!restoredTarget.isValid()) {
             delete widget;
             continue;
@@ -1457,8 +1608,7 @@ QList<BatteryWidget*> BatteryWidget::restoreWidgets()
         result.first()->m_primary = true;
         result.first()->setupTrayIcon();
     }
-    // Migrate legacy x/y-only files to explicit grid coordinates once all
-    // occupancy decisions are final.
+    // Migrate older grid configurations to exact positions after restoration.
     if (!result.isEmpty())
         saveAllConfigurations();
     return result;
@@ -1466,6 +1616,17 @@ QList<BatteryWidget*> BatteryWidget::restoreWidgets()
 
 void BatteryWidget::showWidgetLibrary()
 {
+    // Context menus are available on every card. Keep the tray owner's
+    // existing gallery as the shared entry point instead of creating one
+    // independent topmost/capturing panel for each card.
+    if (!m_primary) {
+        for (BatteryWidget* widget : std::as_const(s_instances)) {
+            if (widget && widget != this && widget->m_primary) {
+                widget->showWidgetLibrary();
+                return;
+            }
+        }
+    }
     if (!m_library) {
         // A topmost tool must not be natively owned by a desktop card.
         m_library = new WidgetLibraryDialog;
@@ -1503,9 +1664,12 @@ void BatteryWidget::showWidgetLibrary()
                 });
     }
     // The gallery can outlive a settings dialog. Reapply the current global
-    // backdrop and quality settings every time it is opened.
+    // scale, backdrop and quality settings every time it is opened.
+    m_library->setInterfaceScale(m_uiScale);
     m_library->setLiveBackdropEnabled(liveBackdropEnabled());
     m_library->setRenderScale(renderScale());
+    m_library->setMaterialBlurStrength(materialBlurStrength());
+    m_library->setGlassOpacity(glassOpacity());
     if (!m_library->isVisible()) {
         m_library->prepareBackdrop();
         m_library->show();
@@ -1842,9 +2006,6 @@ void BatteryWidget::handleDictionaryReply(QNetworkReply* reply)
 
 void BatteryWidget::searchWeatherCity()
 {
-    if (m_kind != CardKind::Weather)
-        return;
-
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("搜索城市或区县"));
     dialog.setModal(true);
@@ -1864,7 +2025,9 @@ void BatteryWidget::searchWeatherCity()
     auto* searchLayout = new QHBoxLayout(searchRow);
     searchLayout->setContentsMargins(0, 0, 0, 0);
     searchLayout->setSpacing(8);
-    auto* edit = new QLineEdit(m_weatherLocation, searchRow);
+    auto* edit = new QLineEdit(
+        AppSettings().value(QStringLiteral("weather/location"), m_weatherLocation).toString(),
+        searchRow);
     edit->setPlaceholderText(QStringLiteral("输入城市、区或县"));
     edit->selectAll();
     auto* searchButton = new QPushButton(QStringLiteral("搜索"), searchRow);
@@ -1882,6 +2045,10 @@ void BatteryWidget::searchWeatherCity()
                                              QDialogButtonBox::AcceptRole);
     chooseButton->setEnabled(false);
     layout->addWidget(buttons);
+    // The shared settings dialog is also opened from battery, clock and
+    // dictionary cards, which do not own a weather network manager.
+    auto* searchNetwork = m_weatherNetwork ? m_weatherNetwork
+                                           : new QNetworkAccessManager(&dialog);
 
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     connect(results, &QListWidget::itemSelectionChanged, &dialog,
@@ -1894,7 +2061,7 @@ void BatteryWidget::searchWeatherCity()
     });
 
     QPointer<QNetworkReply> searchReply;
-    const auto performSearch = [this, edit, results, resultLabel, searchButton,
+    const auto performSearch = [searchNetwork, edit, results, resultLabel, searchButton,
                                 chooseButton, &searchReply]() {
         const QString originalQuery = edit->text().trimmed();
         if (originalQuery.isEmpty()) {
@@ -1924,7 +2091,7 @@ void BatteryWidget::searchWeatherCity()
                           QStringLiteral("Mozilla/5.0 macdowsOS Widget/1.0"));
         request.setRawHeader("Referer", "https://www.weather.com.cn/");
         request.setTransferTimeout(15000);
-        QNetworkReply* issuedReply = m_weatherNetwork->get(request);
+        QNetworkReply* issuedReply = searchNetwork->get(request);
         searchReply = issuedReply;
         issuedReply->setProperty("weatherSearch", true);
         connect(issuedReply, &QNetworkReply::finished, results,
@@ -2009,7 +2176,7 @@ void BatteryWidget::searchWeatherCity()
     const QString city = results->currentItem()->data(Qt::UserRole + 1).toString();
     if (cityId.isEmpty() || city.isEmpty())
         return;
-    QSettings settings;
+    AppSettings settings;
     settings.setValue(QStringLiteral("weather/location"), city);
     settings.setValue(QStringLiteral("weather/cityId"), cityId);
     for (BatteryWidget* widget : s_instances) {
@@ -2349,22 +2516,9 @@ void BatteryWidget::showSettingsDialog()
     scaleBox->setCurrentIndex(selected);
     form->addRow(QStringLiteral("显示大小"), scaleBox);
 
-    auto* materialBox = new QComboBox(&dialog);
-    materialBox->addItem(QStringLiteral("液态玻璃（折射 + 模糊）"), false);
-    materialBox->addItem(QStringLiteral("仅模糊（Windows 10 / 11）"), true);
-    materialBox->setCurrentIndex(systemBlurEnabled() ? 1 : 0);
-    form->addRow(QStringLiteral("背景材质"), materialBox);
-
     auto* liveBackdrop = new QCheckBox(QStringLiteral("实时渲染窗口后的内容"), &dialog);
     liveBackdrop->setChecked(liveBackdropEnabled());
     form->addRow(QStringLiteral("背景采样"), liveBackdrop);
-
-    auto* renderBox = new QComboBox(&dialog);
-    renderBox->addItem(QStringLiteral("自动（推荐）"), int(RenderBackend::AutoBackend));
-    renderBox->addItem(QStringLiteral("GPU · OpenGL Shader"), int(RenderBackend::GpuBackend));
-    renderBox->addItem(QStringLiteral("CPU · 软件缓存模糊"), int(RenderBackend::CpuBackend));
-    renderBox->setCurrentIndex(renderBox->findData(int(renderBackend())));
-    form->addRow(QStringLiteral("渲染方式"), renderBox);
 
     auto* qualityBox = new QComboBox(&dialog);
     qualityBox->addItem(QStringLiteral("节能（60% 设备像素）"), 0.60);
@@ -2386,7 +2540,7 @@ void BatteryWidget::showSettingsDialog()
     fontSmoothingBox->addItem(QStringLiteral("关闭"), 0);
     fontSmoothingBox->addItem(QStringLiteral("标准（灰阶）"), 1);
     fontSmoothingBox->addItem(QStringLiteral("清晰（推荐）"), 2);
-    fontSmoothingBox->addItem(QStringLiteral("最高（字形超采样）"), 3);
+    fontSmoothingBox->addItem(QStringLiteral("最高（原生像素）"), 3);
     fontSmoothingBox->setCurrentIndex(
         qMax(0, fontSmoothingBox->findData(globalFontSmoothing())));
     form->addRow(QStringLiteral("字体抗锯齿"), fontSmoothingBox);
@@ -2395,7 +2549,9 @@ void BatteryWidget::showSettingsDialog()
     auto* locationLayout = new QHBoxLayout(locationRow);
     locationLayout->setContentsMargins(0, 0, 0, 0);
     locationLayout->setSpacing(8);
-    auto* locationEdit = new QLineEdit(m_weatherLocation, locationRow);
+    auto* locationEdit = new QLineEdit(
+        AppSettings().value(QStringLiteral("weather/location"), m_weatherLocation).toString(),
+        locationRow);
     locationEdit->setReadOnly(true);
     locationEdit->setPlaceholderText(QStringLiteral("请搜索并选择区县"));
     auto* locationButton = new QPushButton(QStringLiteral("搜索区县…"), locationRow);
@@ -2404,7 +2560,8 @@ void BatteryWidget::showSettingsDialog()
     form->addRow(QStringLiteral("天气地区"), locationRow);
     connect(locationButton, &QPushButton::clicked, this, [this, locationEdit]() {
         searchWeatherCity();
-        locationEdit->setText(m_weatherLocation);
+        locationEdit->setText(
+            AppSettings().value(QStringLiteral("weather/location"), m_weatherLocation).toString());
     });
 
     auto* blurRow = new QWidget(&dialog);
@@ -2473,15 +2630,13 @@ void BatteryWidget::showSettingsDialog()
     if (dialog.exec() == QDialog::Accepted) {
         setStartupEnabled(startup->isChecked());
         syncGroupSettings(scaleBox->currentData().toDouble(),
-                          materialBox->currentData().toBool(),
                           blurSlider->value(),
                           opacitySlider->value() / 100.0,
                           mouseThrough->isChecked(),
                           lowPower->isChecked() && mouseThrough->isChecked(),
                           liveBackdrop->isChecked(),
                           qualityBox->currentData().toDouble(),
-                          fontSmoothingBox->currentData().toInt(),
-                          static_cast<RenderBackend>(renderBox->currentData().toInt()));
+                          fontSmoothingBox->currentData().toInt());
         if (m_startupAction) {
             QSignalBlocker blocker(m_startupAction);
             m_startupAction->setChecked(startup->isChecked());
@@ -2515,6 +2670,7 @@ void BatteryWidget::setStartupEnabled(bool enabled)
         runKey.remove(QStringLiteral("macdowsOSBattery"));
     }
     runKey.sync();
+    AppSettings().setValue(QStringLiteral("startup/enabled"), enabled);
 #else
     Q_UNUSED(enabled);
 #endif
@@ -2534,7 +2690,9 @@ void BatteryWidget::showAboutDialog()
     auto* title = new QLabel(QStringLiteral("macdowsOS Widget"), &dialog);
     title->setStyleSheet(QStringLiteral("font-size:20px; font-weight:600;"));
     layout->addWidget(title);
-    auto* text = new QLabel(QStringLiteral("雾蓝回针MistBlueSt 版本 1.0.0 beta2 版本号 20260921100b2"), &dialog);
+    auto* text = new QLabel(QStringLiteral("雾蓝回针MistBlueSt 版本 %1 版本号 %2")
+        .arg(QString::fromLatin1(AppConfig::Version),
+            QString::fromLatin1(AppConfig::BuildId)), &dialog);
     text->setStyleSheet(QStringLiteral("color:#aab5c8; line-height:1.4;"));
     text->setWordWrap(true);
     layout->addWidget(text);
@@ -3418,10 +3576,6 @@ void BatteryWidget::paintOverlay(QPainter& p)
                                       + cardHeight * kWeatherSummaryDividerRatio;
         const qreal hourlyTop = card.top()
                                 + cardHeight * kWeatherHourlyTopRatio;
-        ResponsiveLayout::drawLine(
-            p, weatherMetrics, QPointF(content.left(), summaryDividerY),
-            QPointF(content.right(), summaryDividerY),
-            QColor(255, 255, 255, 105), .003);
         const int hourCount = qMin(kWeatherHourlySlots, m_weatherHours.size());
         if (hourCount > 0) {
             const qreal cellW = w / kWeatherHourlySlots;
@@ -3774,12 +3928,12 @@ void BatteryWidget::windowDragFinished()
     hideGridPreview();
     bool shouldSave = false;
     if (!m_restoringPosition) {
-        const QRect target = nearestGridRect(m_kind, m_variant, pos(), m_uiScale, this);
+        const QRect target = nearbyWidgetRect(m_kind, m_variant, pos(), m_uiScale, this);
         m_restoringPosition = true;
         if (target.isValid()) {
             setFixedSize(target.size());
             move(target.topLeft());
-        } else {
+        } else if (overlapsVisibleWidget(geometry(), this)) {
             move(m_dragOrigin);
         }
         m_restoringPosition = false;
@@ -3816,19 +3970,26 @@ void BatteryWidget::contextMenuEvent(QContextMenuEvent* event)
     if (!event)
         return;
 
-    QMenu menu(this);
+    QFont menuFont(pingFangFontFamily());
+    menuFont.setPixelSize(16);
+    applyFontSmoothing(menuFont);
+    LiquidGlassMenu menu(menuFont, this);
+    QAction* addAction = menu.addGlassAction(QStringLiteral("添加小组件…"), LiquidGlassMenu::Icon::Add);
+    menu.addSeparator();
     QAction* cityAction = nullptr;
     if (m_kind == CardKind::Weather) {
-        cityAction = menu.addAction(QStringLiteral("搜索城市…"));
+        cityAction = menu.addGlassAction(QStringLiteral("搜索城市…"), LiquidGlassMenu::Icon::Search);
         menu.addSeparator();
     }
-    QAction* removeAction = menu.addAction(QStringLiteral("删除此组件"));
+    QAction* removeAction = menu.addGlassAction(QStringLiteral("删除此组件"), LiquidGlassMenu::Icon::Remove);
     // Keep one card alive as the tray/settings owner. This avoids leaving a
     // running process with no way to reopen the widget library after the last
     // card is removed.
     removeAction->setEnabled(s_instances.size() > 1);
     QAction* selected = menu.exec(event->globalPos());
-    if (selected == cityAction) {
+    if (selected == addAction) {
+        showWidgetLibrary();
+    } else if (cityAction && selected == cityAction) {
         searchWeatherCity();
     } else if (selected == removeAction && removeAction->isEnabled()) {
         const bool wasPrimary = m_primary;
@@ -3862,5 +4023,5 @@ void BatteryWidget::moveEvent(QMoveEvent* event)
 {
     LiquidGlassWidget::moveEvent(event);
     if (!m_restoringPosition && windowDragging())
-        showGridPreviewRect(nearestGridRect(m_kind, m_variant, pos(), m_uiScale, this));
+        showGridPreviewRect(nearbyWidgetRect(m_kind, m_variant, pos(), m_uiScale, this));
 }

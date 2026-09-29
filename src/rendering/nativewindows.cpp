@@ -97,6 +97,12 @@ NativeWindows::Stack NativeWindows::snapshot()
             return TRUE;
         wchar_t name[128]{};
         GetClassNameW(window, name, 128);
+        // Windows may create a separate SysShadow HWND behind a popup even
+        // when Qt requests NoDropShadowWindowHint. It is decoration, not an
+        // independent content layer; WGC returns an opaque black rectangle
+        // for it. Including it hides the real backdrop below glass menus.
+        if (wcscmp(name, L"SysShadow") == 0)
+            return TRUE;
         const bool desktop = window == GetShellWindow() || wcscmp(name, L"Progman") == 0
                              || wcscmp(name, L"WorkerW") == 0;
         const LONG_PTR style = GetWindowLongPtrW(window, GWL_EXSTYLE);
@@ -106,8 +112,9 @@ NativeWindows::Stack NativeWindows::snapshot()
         // process-local registry.  They remain capturable by Snipping Tool,
         // Game Bar and other system screenshot/recording APIs because their
         // native display affinity is no longer WDA_EXCLUDEFROMCAPTURE.
-        const bool excluded = affinity == 0x11
-                              || NativeWindows::isGlassWindow(reinterpret_cast<WId>(window));
+        const bool excluded = affinity != 0
+                              || NativeWindows::isGlassWindow(reinterpret_cast<WId>(window))
+                              || !NativeWindows::isCaptureCandidate(reinterpret_cast<WId>(window));
         stack.append({reinterpret_cast<WId>(window),
                       QRect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top),
                       desktop, !desktop && !(style & (WS_EX_LAYERED | WS_EX_TRANSPARENT)) && !excluded,
@@ -153,6 +160,36 @@ bool NativeWindows::isGlassWindow(WId id)
         return false;
     QMutexLocker locker(&glassWindowsMutex);
     return glassWindows.contains(id);
+}
+
+bool NativeWindows::isCaptureCandidate(WId id)
+{
+#ifdef Q_OS_WIN
+    const HWND window = reinterpret_cast<HWND>(id);
+    if (!window || !IsWindow(window) || !IsWindowVisible(window) || IsIconic(window)
+        || GetAncestor(window, GA_ROOT) != window)
+        return false;
+    if (GetWindowLongPtrW(window, GWL_STYLE) & WS_CHILD)
+        return false;
+    DWORD affinity = 0;
+    if (GetWindowDisplayAffinity(window, &affinity) && affinity != 0)
+        return false;
+    wchar_t name[128]{};
+    if (!GetClassNameW(window, name, int(std::size(name))))
+        return false;
+    const QString windowClass = QString::fromWCharArray(name);
+    // WGC can throw internally before returning HRESULT for these transient
+    // HWNDs. In particular, QComboBox creates a separate Qt Popup HWND.
+    return windowClass != QStringLiteral("SysShadow")
+        && windowClass != QStringLiteral("#32768")
+        && windowClass != QStringLiteral("ComboLBox")
+        && windowClass != QStringLiteral("tooltips_class32")
+        && !windowClass.contains(QStringLiteral("QWindowPopup"))
+        && !windowClass.contains(QStringLiteral("QWindowToolTip"));
+#else
+    Q_UNUSED(id);
+    return false;
+#endif
 }
 
 bool NativeWindows::isSystemCaptureActive()
@@ -298,15 +335,12 @@ bool NativeWindows::isTopmost(WId id)
 #endif
 }
 
-void NativeWindows::placeDesktop(WId id)
+WId NativeWindows::desktopInsertAfter(WId id)
 {
 #ifdef Q_OS_WIN
-    const HWND window = reinterpret_cast<HWND>(id);
-    constexpr UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
-    SetWindowPos(window, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
     // Never insert after a topmost HWND: Windows would promote this window
     // back into the topmost band, even immediately after HWND_NOTOPMOST.
-    HWND previousNormal = HWND_TOP;
+    HWND previousNormal = HWND_NOTOPMOST;
     HWND after = HWND_BOTTOM;
     for (const Window& entry : snapshot()) {
         if (entry.id == id || entry.topmost)
@@ -314,7 +348,47 @@ void NativeWindows::placeDesktop(WId id)
         if (entry.desktop) { after = previousNormal; break; }
         previousNormal = reinterpret_cast<HWND>(entry.id);
     }
-    SetWindowPos(window, after, 0, 0, 0, 0, flags);
+    return reinterpret_cast<WId>(after);
+#else
+    Q_UNUSED(id);
+    return 0;
+#endif
+}
+
+bool NativeWindows::isAtDesktopLayer(WId id, const QSet<WId>& desktopWidgets)
+{
+#ifdef Q_OS_WIN
+    const Stack& stack = cachedStack();
+    const int index = indexOf(stack, id);
+    if (index < 0 || stack.at(index).topmost)
+        return false;
+    for (int i = 0; i < index; ++i)
+        // A topmost shell overlay cannot be overtaken by a bottom-layer card.
+        // Do not start an endless repair cycle while such an overlay is shown.
+        if (stack.at(i).desktop && !stack.at(i).topmost)
+            return false;
+    for (int i = index + 1; i < stack.size(); ++i) {
+        const Window& below = stack.at(i);
+        if (below.desktop)
+            break;
+        if (!desktopWidgets.contains(below.id))
+            return false;
+    }
+#else
+    Q_UNUSED(id);
+    Q_UNUSED(desktopWidgets);
+#endif
+    return true;
+}
+
+void NativeWindows::placeDesktop(WId id)
+{
+#ifdef Q_OS_WIN
+    const HWND window = reinterpret_cast<HWND>(id);
+    constexpr UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+    // Insert directly into the desktop band. An unconditional NOTOPMOST
+    // first moves an already-normal card to the front of all normal apps.
+    SetWindowPos(window, reinterpret_cast<HWND>(desktopInsertAfter(id)), 0, 0, 0, 0, flags);
     // An anchor can be promoted concurrently by another process.
     if (isTopmost(id))
         SetWindowPos(window, HWND_BOTTOM, 0, 0, 0, 0, flags);

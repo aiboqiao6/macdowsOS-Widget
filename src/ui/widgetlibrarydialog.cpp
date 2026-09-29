@@ -1,6 +1,7 @@
 #include "ui/widgetlibrarydialog.h"
 #include "widgets/batterywidget.h"
 #include "rendering/responsivelayout.h"
+#include "app/appsettings.h"
 
 #include <QApplication>
 #include <QCursor>
@@ -10,6 +11,7 @@
 #include <QGridLayout>
 #include <QGuiApplication>
 #include <QHash>
+#include <QIconEngine>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -17,8 +19,8 @@
 #include <QMouseEvent>
 #include <QOperatingSystemVersion>
 #include <QPainter>
-#include <QPixmap>
 #include <QPainterPath>
+#include <QPixmap>
 #include <QPropertyAnimation>
 #include <QPushButton>
 #include <QRandomGenerator>
@@ -28,7 +30,6 @@
 #include <QSet>
 #include <QStyle>
 #include <QSizePolicy>
-#include <QSettings>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <algorithm>
@@ -42,13 +43,18 @@
 
 namespace {
 
-QIcon makeNavIcon(int category)
+// Enlarge the gallery surface independently of its controls and previews.
+// The available desktop work area still bounds the final window geometry.
+constexpr int kGalleryWidth = 1320 * 3 / 2;
+constexpr int kGalleryHeight = 800 * 3 / 2;
+constexpr qreal kGalleryContentZoom = 1.5;
+
+void paintNavIcon(QPainter& p, const QRectF& bounds, int category)
 {
-    QPixmap pixmap(30, 30);
-    pixmap.fill(Qt::transparent);
-    QPainter p(&pixmap);
+    p.save();
     p.setRenderHint(QPainter::Antialiasing, true);
-    const QRectF canvas = QRectF(pixmap.rect()).adjusted(3, 3, -3, -3);
+    const qreal inset = qMin(bounds.width(), bounds.height()) * .1;
+    const QRectF canvas = bounds.adjusted(inset, inset, -inset, -inset);
     const ResponsiveLayout::Metrics metrics(canvas);
     const QColor ink = category == 1 ? QColor(111, 232, 157, 245)
                       : category == 2 ? QColor(122, 194, 255, 245)
@@ -84,8 +90,38 @@ QIcon makeNavIcon(int category)
         p.drawRoundedRect(metrics.rect(.16, .56, .28, .28), 2, 2);
         p.drawRoundedRect(metrics.rect(.56, .56, .28, .28), 2, 2);
     }
-    p.end();
-    return QIcon(pixmap);
+    p.restore();
+}
+
+class NavIconEngine final : public QIconEngine
+{
+public:
+    explicit NavIconEngine(int category) : m_category(category) {}
+    QIconEngine* clone() const override { return new NavIconEngine(m_category); }
+    void paint(QPainter* painter, const QRect& rect, QIcon::Mode, QIcon::State) override
+    {
+        paintNavIcon(*painter, rect, m_category);
+    }
+    QPixmap pixmap(const QSize& size, QIcon::Mode mode, QIcon::State state) override
+    {
+        return scaledPixmap(size, mode, state, 1.0);
+    }
+    QPixmap scaledPixmap(const QSize& size, QIcon::Mode, QIcon::State, qreal scale) override
+    {
+        QPixmap result(size * scale);
+        result.setDevicePixelRatio(scale);
+        result.fill(Qt::transparent);
+        QPainter painter(&result);
+        paintNavIcon(painter, QRectF(QPointF(), QSizeF(size)), m_category);
+        return result;
+    }
+private:
+    int m_category;
+};
+
+QIcon makeNavIcon(int category)
+{
+    return QIcon(new NavIconEngine(category));
 }
 
 QHash<QString, QImage>& previewCache()
@@ -98,42 +134,76 @@ class DragTile final : public QFrame
 {
 public:
     DragTile(const QString& title, const QString& subtitle, int kind,
-             int variant, int category, WidgetLibraryDialog* owner)
+             int variant, int category, WidgetLibraryDialog* owner, qreal scale)
         : QFrame(owner), m_title(title), m_subtitle(subtitle), m_kind(kind),
-          m_variant(variant), m_category(category), m_owner(owner)
+          m_variant(variant), m_category(category), m_owner(owner), m_scale(scale)
     {
         setObjectName(QStringLiteral("widgetTile"));
         setProperty("tileTitle", title);
-        setFixedSize(220, 176);
+        setFixedSize(qRound(220 * m_scale), qRound(176 * m_scale));
         setAttribute(Qt::WA_Hover, true);
         setCursor(Qt::OpenHandCursor);
         m_press = QPoint(-1, -1);
-        // Rendering the real widget is deliberately done before the tile can
-        // receive paint events; QWidget::render() is not re-entrant from a
-        // paintEvent. The cached image is then a pure draw operation below.
+        // The preview paints the real payload into an image without exposing
+        // an OpenGL window. Cache it at this tile's actual screen density.
+        refreshPreview();
+    }
+
+    void setScale(qreal scale)
+    {
+        if (qFuzzyCompare(m_scale, scale))
+            return;
+        m_scale = scale;
+        setFixedSize(qRound(220 * m_scale), qRound(176 * m_scale));
+        refreshPreview();
+    }
+
+    void refreshPreview()
+    {
         const QSize previewSize(204, 128);
-        const QString key = QStringLiteral("%1:%2:%3x%4")
-            .arg(m_kind).arg(m_variant).arg(previewSize.width()).arg(previewSize.height());
+        const qreal dpr = devicePixelRatioF() * m_scale;
+        const QString key = QStringLiteral("%1:%2:%3x%4:%5:%6")
+            .arg(m_kind).arg(m_variant).arg(previewSize.width()).arg(previewSize.height())
+            .arg(dpr, 0, 'g', 12).arg(BatteryWidget::globalFontSmoothing());
         if (!previewCache().contains(key))
             previewCache().insert(key, BatteryWidget::renderPreview(
-                static_cast<BatteryWidget::CardKind>(m_kind), m_variant, previewSize));
+                static_cast<BatteryWidget::CardKind>(m_kind), m_variant, previewSize, dpr));
+        m_preview = previewCache().value(key);
+        update();
     }
 
 protected:
+    bool event(QEvent* event) override
+    {
+        const bool handled = QFrame::event(event);
+        if (event->type() == QEvent::DevicePixelRatioChange || event->type() == QEvent::Show)
+            refreshPreview();
+        return handled;
+    }
+
     void paintEvent(QPaintEvent*) override
     {
         QPainter p(this);
+        p.scale(m_scale, m_scale);
         p.setRenderHint(QPainter::Antialiasing);
+        p.setRenderHint(QPainter::TextAntialiasing,
+                        BatteryWidget::globalFontSmoothing() > 0);
+        p.setRenderHint(QPainter::SmoothPixmapTransform);
         // The gallery itself owns the single liquid-glass surface. A tile is
         // intentionally chrome-free so previews float directly on that pane,
         // matching the reference: no second rounded card or duplicate rim.
-        const QRectF preview(8, 2, width() - 16, 128);
+        const QRectF preview(8, 2, 204, 128);
         const ResponsiveLayout::Metrics previewMetrics(preview);
-        const QString previewKey = QStringLiteral("%1:%2:%3x%4")
-            .arg(m_kind).arg(m_variant).arg(qRound(preview.width())).arg(qRound(preview.height()));
-        const QImage actualPreview = previewCache().value(previewKey);
-        if (!actualPreview.isNull()) {
-            ResponsiveLayout::drawImageFitted(p, preview, actualPreview);
+        if (!m_preview.isNull()) {
+            const QTransform device = p.deviceTransform();
+            const QPointF origin = preview.center()
+                - QPointF(m_preview.deviceIndependentSize().width() * .5,
+                          m_preview.deviceIndependentSize().height() * .5);
+            const QPoint pixelOrigin = device.map(origin).toPoint();
+            p.save();
+            p.setRenderHint(QPainter::SmoothPixmapTransform, false);
+            p.drawImage(device.inverted().map(QPointF(pixelOrigin)), m_preview);
+            p.restore();
         } else {
         const auto text = [&p](const QRectF& r, const QString& value, int size,
                                const QColor& color, QFont::Weight weight = QFont::Normal,
@@ -264,21 +334,21 @@ protected:
 
         p.setPen(QColor(247, 249, 253));
         QFont footerFont = qApp->font();
-        footerFont.setPixelSize(13);
+        footerFont.setPixelSize(14);
         footerFont.setWeight(QFont::DemiBold);
         BatteryWidget::applyFontSmoothing(footerFont);
         p.setFont(footerFont);
-        ResponsiveLayout::drawSingleLine(p, QRectF(10, 134, width() - 20, 20),
+        ResponsiveLayout::drawSingleLine(p, QRectF(10, 134, 200, 20),
                                    Qt::AlignCenter | Qt::AlignVCenter, m_title);
         p.setPen(QColor(173, 186, 207));
         QFont subtitleFont = qApp->font();
-        subtitleFont.setPixelSize(9);
+        subtitleFont.setPixelSize(12);
         BatteryWidget::applyFontSmoothing(subtitleFont);
         p.setFont(subtitleFont);
         ResponsiveLayout::drawSingleLine(
-            p, QRectF(10, 154, width() - 20, 17),
+            p, QRectF(10, 154, 200, 17),
             Qt::AlignCenter | Qt::AlignVCenter,
-            QFontMetrics(p.font()).elidedText(m_subtitle, Qt::ElideRight, width() - 28));
+            QFontMetrics(p.font()).elidedText(m_subtitle, Qt::ElideRight, 192));
     }
 
     void mousePressEvent(QMouseEvent* event) override
@@ -356,12 +426,29 @@ private:
     int m_kind = 0;
     int m_variant = 0;
     int m_category = -1;
+    QImage m_preview;
     QPoint m_press;
     bool m_dragging = false;
     WidgetLibraryDialog* m_owner = nullptr;
+    qreal m_scale = 1.0;
 };
 
 } // namespace
+
+void WidgetLibraryDialog::refreshFontRendering()
+{
+    previewCache().clear();
+    if (!qApp)
+        return;
+    for (QWidget* widget : qApp->allWidgets()) {
+        auto* library = qobject_cast<WidgetLibraryDialog*>(widget);
+        if (!library)
+            continue;
+        for (QFrame* tile : std::as_const(library->m_tiles))
+            static_cast<DragTile*>(tile)->refreshPreview();
+        library->update();
+    }
+}
 
 WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     : LiquidGlassWidget(parent)
@@ -373,20 +460,17 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     setPanelWindow();
     setDesktopLayerEnabled(false);
     setDesktopCaptureEnabled(false);
-    const QSettings settings;
+    const AppSettings settings;
+    m_uiScale = qBound<qreal>(0.40,
+        settings.value(QStringLiteral("appearance/scale"), 1.0).toDouble(), 2.0);
     setLiveBackdropEnabled(
-        settings.value(QStringLiteral("appearance/liveBackdrop"), false).toBool());
+        settings.value(QStringLiteral("appearance/liveBackdrop"), true).toBool());
     setGlassMargins(0);
-    setGlassRadius(26.0);
-    setBlurRadius(6.0f);
-    setBlurIterations(3);
-    // The gallery follows the same global quality scale as desktop cards;
-    // otherwise the large panel remains visibly softer even when the user
-    // selected native or supersampled rendering.
+    setGlassRadius(26.0 * m_uiScale);
     setRenderScale(float(qBound<qreal>(0.5,
-        settings.value(QStringLiteral("performance/renderScale"), 1.0).toDouble(), 1.5)));
-    setNoiseAmount(0.008f);
-    setRefractionPower(1.32f);
+        settings.value(QStringLiteral("performance/renderScale"), 0.60).toDouble(), 1.5)));
+    setMaterialBlurStrength(settings.value(QStringLiteral("appearance/blurStrength"), 50).toInt());
+    setGlassOpacity(settings.value(QStringLiteral("appearance/opacity"), 1.0).toDouble());
     Qt::WindowFlags flags = windowFlags();
     flags.setFlag(Qt::WindowStaysOnBottomHint, false);
     flags.setFlag(Qt::WindowStaysOnTopHint, true);
@@ -420,24 +504,8 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     // LiquidGlassWidget uses a compact default size for desktop cards.  The
     // gallery is a larger surface, so clear that inherited maximum constraint.
     setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
-    setMinimumSize(320, 240);
-    resize(1180, 720);
-    setStyleSheet(QStringLiteral(
-        "WidgetLibraryDialog { background:transparent; color:#f7f9fd; border:0; }"
-        "QFrame#sidebar { background:rgba(238,245,251,36); border-right:1px solid rgba(255,255,255,74); }"
-        "QFrame#footer { background:rgba(235,243,251,42); border-top:1px solid rgba(255,255,255,76); }"
-        "QLabel#sectionTitle { color:#f8fbff; font-size:18px; font-weight:600; }"
-        "QLabel#footerHint { color:rgba(246,250,255,225); font-size:13px; }"
-        "QPushButton#navButton, QPushButton#navSelected { text-align:left; border:0; border-radius:12px; padding-left:10px; color:rgba(246,249,253,230); font-size:13px; }"
-        "QPushButton#navButton:hover { background:rgba(255,255,255,48); }"
-        "QPushButton#navSelected { background:rgba(255,255,255,104); color:#ffffff; font-weight:600; }"
-        "QPushButton#doneButton { background:#1684f7; border:1px solid rgba(255,255,255,90); border-radius:18px; color:white; font-size:14px; font-weight:600; padding:0 23px; }"
-        "QPushButton#doneButton:hover { background:#3195fb; }"
-        "QScrollArea, QScrollArea > QWidget, QScrollArea > QWidget > QWidget { background:transparent; border:0; }"
-        "QScrollBar:vertical { width:7px; background:transparent; }"
-        "QScrollBar::handle:vertical { background:rgba(255,255,255,96); border-radius:3px; min-height:35px; }"
-        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }"));
-
+    setMinimumSize(windowScaled(320), windowScaled(240));
+    resize(windowScaled(kGalleryWidth), windowScaled(kGalleryHeight));
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
@@ -455,6 +523,7 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     sidebar->setObjectName(QStringLiteral("sidebar"));
     sidebar->setFixedWidth(270);
     auto* sideLayout = new QVBoxLayout(sidebar);
+    m_sideLayout = sideLayout;
     sideLayout->setContentsMargins(18, 22, 16, 18);
     sideLayout->setSpacing(5);
 
@@ -465,7 +534,7 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     search->setFixedHeight(36);
     search->setStyleSheet(QStringLiteral(
         "QLineEdit { border:1px solid rgba(255,255,255,75); border-radius:18px; "
-        "padding:0 12px; color:#f7fbff; background:rgba(238,246,253,54); font-size:13px; }"
+        "padding:0 12px; color:#f7fbff; background:rgba(238,246,253,54); font-size:15px; }"
         "QLineEdit:focus { border:1px solid rgba(255,255,255,145); background:rgba(238,246,253,74); }"));
     sideLayout->addWidget(search);
 
@@ -494,6 +563,7 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     content->setAttribute(Qt::WA_NoSystemBackground);
     content->setAutoFillBackground(false);
     auto* contentLayout = new QVBoxLayout(content);
+    m_contentLayout = contentLayout;
     contentLayout->setContentsMargins(30, 23, 25, 12);
     contentLayout->setSpacing(12);
     auto* sectionTitle = new QLabel(QStringLiteral("推荐"), content);
@@ -514,7 +584,8 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     tileLayout->setVerticalSpacing(14);
     const auto addTile = [this, tileLayout](const QString& title, const QString& subtitle,
                                              int kind, int variant, int category) {
-        auto* tile = new DragTile(title, subtitle, kind, variant, category, this);
+        auto* tile = new DragTile(title, subtitle, kind, variant, category,
+                                  this, m_uiScale * kGalleryContentZoom);
         tile->setProperty("tileKind", kind);
         tile->setProperty("tileVariant", variant);
         tile->setProperty("tileCategory", category);
@@ -541,24 +612,148 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     root->addWidget(body, 1);
 
     auto* footer = new QFrame(this);
+    m_footer = footer;
     footer->setObjectName(QStringLiteral("footer"));
     footer->setFixedHeight(70);
     auto* footerLayout = new QHBoxLayout(footer);
+    m_footerLayout = footerLayout;
     footerLayout->setContentsMargins(24, 0, 23, 0);
     auto* footerHint = new QLabel(QStringLiteral("将小组件拖放到桌面…"), footer);
     footerHint->setObjectName(QStringLiteral("footerHint"));
     footerLayout->addWidget(footerHint);
     footerLayout->addStretch(1);
     auto* done = new QPushButton(QStringLiteral("完成"), footer);
+    m_doneButton = done;
     done->setObjectName(QStringLiteral("doneButton"));
     done->setFixedHeight(36);
     footerLayout->addWidget(done);
     root->addWidget(footer);
     connect(done, &QPushButton::clicked, this, &WidgetLibraryDialog::closeGallery);
 
+    setInterfaceScale(m_uiScale);
     randomizeRecommendations();
     applyTileFilter();
 
+}
+
+int WidgetLibraryDialog::scaled(int value) const
+{
+    return qMax(1, qRound(value * m_uiScale * kGalleryContentZoom));
+}
+
+int WidgetLibraryDialog::windowScaled(int value) const
+{
+    return qMax(1, qRound(value * m_uiScale));
+}
+
+int WidgetLibraryDialog::tileColumnCount() const
+{
+    const int sidebarWidth = width() < scaled(650) ? 0 : qMin(scaled(270), width() / 4);
+    return qBound(1, (width() - sidebarWidth - scaled(55) + scaled(14))
+                     / scaled(234), 4);
+}
+
+void WidgetLibraryDialog::setInterfaceScale(qreal scale)
+{
+    const qreal newScale = qBound<qreal>(0.40, scale, 2.0);
+    if (m_scaleApplied && qFuzzyCompare(m_uiScale, newScale))
+        return;
+    if (m_scaleApplied)
+        previewCache().clear();
+    m_scaleApplied = true;
+    if (m_slideAnimation && m_slideAnimation->state() == QAbstractAnimation::Running)
+        m_slideAnimation->stop();
+    m_uiScale = newScale;
+    setGlassRadius(26.0 * m_uiScale);
+    // A radius rounded above half of a fractional-scale control height makes
+    // Qt's style-sheet renderer fall back to square corners.
+    const int controlRadius = qMin(scaled(18), scaled(36) / 2);
+
+    const QString style = QStringLiteral(
+        "WidgetLibraryDialog { background:transparent; color:#f7f9fd; border:0; }"
+        "QFrame#sidebar, QFrame#footer { background:transparent; border:0; }"
+        "QLabel#sectionTitle { color:#f8fbff; font-size:%1px; font-weight:600; }"
+        "QLabel#footerHint { color:rgba(246,250,255,225); font-size:%2px; }"
+        "QPushButton#navButton, QPushButton#navSelected { text-align:left; border:0; border-radius:%3px; padding-left:%4px; color:rgba(246,249,253,230); font-size:%2px; }"
+        "QPushButton#navButton:hover { background:rgba(255,255,255,48); }"
+        "QPushButton#navSelected { background:rgba(255,255,255,104); color:#ffffff; font-weight:600; }"
+        "QPushButton#doneButton { background:#1684f7; border:1px solid rgba(255,255,255,90); border-radius:%5px; color:white; font-size:%2px; font-weight:600; padding:0 %6px; }"
+        "QPushButton#doneButton:hover { background:#3195fb; }"
+        "QScrollArea, QScrollArea > QWidget, QScrollArea > QWidget > QWidget { background:transparent; border:0; }"
+        "QScrollBar:vertical { width:%7px; background:transparent; }"
+        "QScrollBar::handle:vertical { background:rgba(255,255,255,96); border-radius:%8px; min-height:%9px; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }")
+        .arg(scaled(19)).arg(scaled(15)).arg(scaled(12)).arg(scaled(10))
+        .arg(controlRadius).arg(scaled(23)).arg(scaled(7)).arg(scaled(3))
+        .arg(scaled(35));
+    setStyleSheet(style);
+    if (m_sidebar)
+        m_sidebar->setFixedWidth(scaled(270));
+    if (m_sideLayout) {
+        m_sideLayout->setContentsMargins(scaled(18), scaled(22), scaled(16), scaled(18));
+        m_sideLayout->setSpacing(scaled(5));
+    }
+    if (m_search) {
+        m_search->setFixedHeight(scaled(36));
+        m_search->setStyleSheet(QStringLiteral(
+            "QLineEdit { border:1px solid rgba(255,255,255,75); border-radius:%1px; "
+            "padding:0 %2px; color:#f7fbff; background:rgba(238,246,253,54); font-size:%3px; }"
+            "QLineEdit:focus { border:1px solid rgba(255,255,255,145); background:rgba(238,246,253,74); }")
+            .arg(controlRadius).arg(scaled(12)).arg(scaled(15)));
+    }
+    for (QPushButton* button : std::as_const(m_navButtons)) {
+        button->setFixedHeight(scaled(39));
+        button->setIconSize(QSize(scaled(27), scaled(27)));
+    }
+    if (m_contentLayout) {
+        m_contentLayout->setContentsMargins(scaled(30), scaled(23), scaled(25), scaled(12));
+        m_contentLayout->setSpacing(scaled(12));
+    }
+    if (m_tileLayout) {
+        m_tileLayout->setContentsMargins(0, 0, 0, scaled(12));
+        m_tileLayout->setHorizontalSpacing(scaled(14));
+        m_tileLayout->setVerticalSpacing(scaled(14));
+    }
+    for (QFrame* tile : std::as_const(m_tiles))
+        static_cast<DragTile*>(tile)->setScale(m_uiScale * kGalleryContentZoom);
+    if (m_footer)
+        m_footer->setFixedHeight(scaled(70));
+    if (m_footerLayout)
+        m_footerLayout->setContentsMargins(scaled(24), 0, scaled(23), 0);
+    if (m_doneButton)
+        m_doneButton->setFixedHeight(scaled(36));
+
+    QScreen* screen = isVisible() ? QGuiApplication::screenAt(geometry().center())
+                                  : QGuiApplication::screenAt(QCursor::pos());
+    if (!screen)
+        screen = QGuiApplication::primaryScreen();
+    const QRect area = screen ? screen->availableGeometry() : QRect();
+    const int maxWidth = screen ? qMax(1, area.width() - 32) : QWIDGETSIZE_MAX;
+    const int maxHeight = screen ? qMax(1, area.height() - 32) : QWIDGETSIZE_MAX;
+    setMinimumSize(qMin(windowScaled(320), maxWidth),
+                   qMin(windowScaled(240), maxHeight));
+    resize(qMin(windowScaled(kGalleryWidth), maxWidth),
+           qMin(windowScaled(kGalleryHeight), maxHeight));
+    if (isVisible() && screen) {
+        const int targetX = area.left() + (area.width() - width()) / 2;
+        const int targetY = area.bottom() - height() - 8;
+        move(targetX, targetY);
+        m_backdropRect = geometry();
+        m_backdropCaptureRect = QRect(targetX, targetY, width(),
+                                      qMax(1, area.bottom() - targetY + 1));
+        QImage backdrop = captureDesktopComposite(screen, m_backdropCaptureRect,
+                                                   this, renderScale());
+        if (!backdrop.isNull()) {
+            m_backdropCanvas = std::move(backdrop);
+            m_lastBackdropGeometry = QRect();
+            updateBackdropFrame();
+        }
+        if (liveBackdropEnabled()) {
+            m_liveBackdropTimer.setInterval(qMax(1, activeDisplayInterval() / 2));
+            m_liveBackdropTimer.start();
+        }
+    }
+    applyTileFilter();
 }
 
 void WidgetLibraryDialog::randomizeRecommendations()
@@ -632,8 +827,7 @@ void WidgetLibraryDialog::applyTileFilter()
             visible.append(tile);
         m_tileLayout->removeWidget(tile);
     }
-    const int sidebarWidth = width() < 650 ? 0 : qMin(270, width() / 4);
-    const int columns = qBound(1, (width() - sidebarWidth - 55 + 14) / 234, 4);
+    const int columns = tileColumnCount();
     m_tileColumns = columns;
     for (int i = 0; i < visible.size(); ++i)
         m_tileLayout->addWidget(visible.at(i), i / columns, i % columns);
@@ -679,8 +873,10 @@ void WidgetLibraryDialog::prepareBackdrop()
         return;
 
     const QRect area = screen->availableGeometry();
-    const int targetWidth = qMin(1180, qMax(1, area.width() - 32));
-    const int targetHeight = qMin(720, qMax(1, area.height() - 32));
+    const int targetWidth = qMin(windowScaled(kGalleryWidth), qMax(1, area.width() - 32));
+    const int targetHeight = qMin(windowScaled(kGalleryHeight), qMax(1, area.height() - 32));
+    setMinimumSize(qMin(windowScaled(320), targetWidth),
+                   qMin(windowScaled(240), targetHeight));
     const int targetX = area.left() + (area.width() - targetWidth) / 2;
     const int targetY = area.bottom() - targetHeight - 8;
     m_backdropRect = QRect(targetX, targetY, targetWidth, targetHeight);
@@ -714,12 +910,12 @@ void WidgetLibraryDialog::resizeEvent(QResizeEvent* event)
     LiquidGlassWidget::resizeEvent(event);
     if (!m_tileLayout || !m_sidebar)
         return;
-    const bool compact = width() < 650;
+    const bool compact = width() < scaled(650);
     m_sidebar->setVisible(!compact);
-    const int sidebarWidth = compact ? 0 : qMin(270, width() / 4);
+    const int sidebarWidth = compact ? 0 : qMin(scaled(270), width() / 4);
     if (!compact)
         m_sidebar->setFixedWidth(sidebarWidth);
-    const int columns = qBound(1, (width() - sidebarWidth - 55 + 14) / 234, 4);
+    const int columns = tileColumnCount();
     if (columns == m_tileColumns)
         return;
     m_tileColumns = columns;
@@ -804,7 +1000,12 @@ void WidgetLibraryDialog::refreshBackdrop()
     if (!liveBackdropEnabled() || desktopDragActive() || !isVisible() || m_backdropCaptureRect.isNull()
         || m_liveCapturesInFlight >= 2)
         return;
-    const QRect area = m_backdropCaptureRect;
+    // The prepared strip is needed while the gallery slides in, but once the
+    // panel is settled it needlessly captures a much taller desktop region on
+    // every live update. Sample only the visible panel; the next animation is
+    // preceded by prepareBackdrop()/setInterfaceScale(), which rebuilds the
+    // strip cache when the geometry changes.
+    const QRect area = geometry();
     const quint64 generation = m_backdropGeneration;
     ++m_liveCapturesInFlight;
     requestDesktopComposite(area, [this, generation](QImage image) {
@@ -815,6 +1016,8 @@ void WidgetLibraryDialog::refreshBackdrop()
             ++m_liveBackdropSamples;
         if (!image.isNull() && image != m_backdropCanvas) {
             m_backdropCanvas = std::move(image);
+            m_backdropRect = geometry();
+            m_backdropCaptureRect = m_backdropRect;
             ++m_liveBackdropFrames;
             m_lastBackdropGeometry = QRect();
             updateBackdropFrame();
@@ -918,17 +1121,42 @@ void WidgetLibraryDialog::paintOverlay(QPainter& painter)
 {
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, true);
-    const QRectF bounds = QRectF(rect()).adjusted(.7, .7, -.7, -.7);
+    // Child frames paint after the GL surface and can leak rectangular
+    // backgrounds beyond its alpha silhouette. Paint their tint here with
+    // the same rounded outline; their controls remain ordinary widgets.
+    QPainterPath silhouette;
+    silhouette.addRoundedRect(QRectF(rect()), 26.0 * m_uiScale, 26.0 * m_uiScale);
+    const auto panelTint = [&](QWidget* panel, const QColor& color) {
+        if (!panel || !panel->isVisible()) return QRectF();
+        const QRectF area(panel->mapTo(this, QPoint()), panel->size());
+        QPainterPath panelPath;
+        panelPath.addRect(area);
+        painter.fillPath(silhouette.intersected(panelPath), color);
+        return area;
+    };
+    const QRectF sidebar = panelTint(m_sidebar, QColor(238, 245, 251, 36));
+    const QRectF footer = panelTint(m_footer, QColor(235, 243, 251, 42));
+    if (!sidebar.isEmpty()) {
+        painter.setPen(QColor(255, 255, 255, 74));
+        painter.drawLine(sidebar.topRight(), sidebar.bottomRight());
+    }
+    if (!footer.isEmpty()) {
+        painter.setPen(QColor(255, 255, 255, 76));
+        painter.drawLine(footer.topLeft(), footer.topRight());
+    }
+    const qreal edge = qMax<qreal>(0.5, 0.7 * m_uiScale);
+    const QRectF bounds = QRectF(rect()).adjusted(edge, edge, -edge, -edge);
     QLinearGradient rim(bounds.topLeft(), bounds.bottomRight());
     rim.setColorAt(0.0, QColor(255, 255, 255, 172));
     rim.setColorAt(.24, QColor(255, 255, 255, 60));
     rim.setColorAt(.62, QColor(200, 220, 242, 38));
     rim.setColorAt(1.0, QColor(255, 255, 255, 130));
     painter.setBrush(Qt::NoBrush);
-    painter.setPen(QPen(QBrush(rim), 1.2));
-    painter.drawRoundedRect(bounds, 26, 26);
-    painter.setPen(QPen(QColor(255, 255, 255, 55), 1.0));
-    painter.drawLine(QPointF(28, 1.4), QPointF(width() - 28, 1.4));
+    painter.setPen(QPen(QBrush(rim), 1.2 * m_uiScale));
+    painter.drawRoundedRect(bounds, windowScaled(26), windowScaled(26));
+    painter.setPen(QPen(QColor(255, 255, 255, 55), m_uiScale));
+    painter.drawLine(QPointF(windowScaled(28), 1.4 * m_uiScale),
+                     QPointF(width() - windowScaled(28), 1.4 * m_uiScale));
     painter.restore();
 }
 

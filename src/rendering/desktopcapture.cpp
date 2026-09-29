@@ -10,6 +10,7 @@
 #include <QRunnable>
 #include <QScreen>
 #include <QThreadPool>
+#include <QTimer>
 #include <QVector>
 #include <QtMath>
 #include <chrono>
@@ -190,6 +191,7 @@ struct Plan {
     QRegion valid;
     quint64 scene = 1469598103934665603ull;
     QRect targetBounds;
+    quint64 topology = 1469598103934665603ull;
 };
 
 QRect projectToCapture(const QRect& nativeRect, const CapturePart& part)
@@ -224,14 +226,14 @@ bool graphicsCaptureReady()
         bool ready = false;
         bool owned = false;
         Apartment() {
-            try {
-                winrt::init_apartment(winrt::apartment_type::multi_threaded);
-                ready = owned = true;
-            } catch (const winrt::hresult_error& error) {
-                ready = error.code() == RPC_E_CHANGED_MODE;
-            }
+            // A GUI thread may already be STA. That is a supported state for
+            // this caller, so inspect the HRESULT instead of intentionally
+            // throwing a WinRT exception that breaks the Visual Studio debugger.
+            const HRESULT result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            owned = SUCCEEDED(result); // S_FALSE still needs CoUninitialize.
+            ready = owned || result == RPC_E_CHANGED_MODE;
         }
-        ~Apartment() { if (owned) winrt::uninit_apartment(); }
+        ~Apartment() { if (owned) CoUninitialize(); }
     };
     static thread_local Apartment apartment;
     static thread_local const bool supported = [] {
@@ -326,7 +328,20 @@ public:
                     return {};
                 frame = m_state->latest;
             }
-            return copyFrame(frame->frame, windowBounds, requestedBounds, outputSize);
+            const qint64 timestamp = frame->frame.SystemRelativeTime().count();
+            if (!m_lastImage.pixels.isNull() && m_lastTimestamp == timestamp
+                && m_lastWindowBounds == windowBounds && m_lastRequestedBounds == requestedBounds
+                && m_lastOutputSize == outputSize)
+                return m_lastImage;
+            Image image = copyFrame(frame->frame, windowBounds, requestedBounds, outputSize);
+            if (!image.pixels.isNull()) {
+                m_lastTimestamp = timestamp;
+                m_lastWindowBounds = windowBounds;
+                m_lastRequestedBounds = requestedBounds;
+                m_lastOutputSize = outputSize;
+                m_lastImage = image;
+            }
+            return image;
         } catch (...) {
             m_valid = false;
             return {};
@@ -363,8 +378,20 @@ private:
 
         auto interop = winrt::get_activation_factory<wgc::GraphicsCaptureItem,
                                                       IGraphicsCaptureItemInterop>();
-        winrt::check_hresult(interop->CreateForWindow(
-            m_window, winrt::guid_of<wgc::GraphicsCaptureItem>(), winrt::put_abi(m_item)));
+        // Recheck after device creation: a popup can disappear while the D3D
+        // device is being initialized. HRESULT handling avoids an additional
+        // application throw, but cannot suppress a throw inside the Windows
+        // implementation; unsupported HWNDs must be rejected before this call.
+        if (!validWindow())
+            return;
+        const HRESULT itemResult = interop->CreateForWindow(
+            m_window, winrt::guid_of<wgc::GraphicsCaptureItem>(), winrt::put_abi(m_item));
+        if (FAILED(itemResult)) {
+            m_item = nullptr;
+            qWarning("Windows Graphics Capture cannot create an item for HWND %p (HRESULT 0x%08lx)",
+                     static_cast<void*>(m_window), static_cast<unsigned long>(itemResult));
+            return;
+        }
         m_size = m_item.Size();
         if (m_size.Width <= 0 || m_size.Height <= 0)
             return;
@@ -382,13 +409,18 @@ private:
         });
         try { m_session.IsCursorCaptureEnabled(false); } catch (...) {}
         try { m_session.IsBorderRequired(false); } catch (...) {}
+        // Recent Windows versions expose an explicit capture throttle. Ask
+        // for every available compositor update, including high-Hz displays.
+        if (auto cadence = m_session.try_as<wgc::IGraphicsCaptureSession5>())
+            cadence.MinUpdateInterval(std::chrono::milliseconds(0));
         m_token = m_pool.FrameArrived([state = m_state](auto const& sender, auto const&) {
             try {
                 std::lock_guard<std::mutex> lock(state->mutex);
                 if (state->stopping || state->recreating)
                     return;
-                auto frame = sender.TryGetNextFrame();
-                if (frame) {
+                // Drain queued frames: displaying the oldest pool entry can
+                // keep a busy source visibly behind even with frequent paints.
+                while (auto frame = sender.TryGetNextFrame()) {
                     state->contentSize = frame.ContentSize();
                     state->latest = std::make_shared<CapturedFrame>(std::move(frame));
                 }
@@ -406,7 +438,7 @@ private:
 
     bool validWindow() const
     {
-        return m_window && IsWindow(m_window) && !IsIconic(m_window);
+        return NativeWindows::isCaptureCandidate(reinterpret_cast<WId>(m_window));
     }
 
     void ensureSize()
@@ -573,6 +605,11 @@ private:
     }
 
     HWND m_window = nullptr;
+    qint64 m_lastTimestamp = -1;
+    QRect m_lastWindowBounds;
+    QRect m_lastRequestedBounds;
+    QSize m_lastOutputSize;
+    Image m_lastImage;
     std::chrono::steady_clock::time_point m_lastUsed = std::chrono::steady_clock::now();
     std::atomic_bool m_valid = false;
     std::shared_ptr<FrameState> m_state = std::make_shared<FrameState>();
@@ -599,6 +636,12 @@ private:
 using CapturedWindowImage = WindowCaptureStream::Image;
 using WindowCaptureStreams = QHash<WId, std::shared_ptr<WindowCaptureStream>>;
 
+QCache<WId, std::chrono::steady_clock::time_point>& failedWindowCaptures()
+{
+    static thread_local QCache<WId, std::chrono::steady_clock::time_point> failures(64);
+    return failures;
+}
+
 WindowCaptureStreams& windowCaptureStreams()
 {
     // Construct the apartment first so TLS destroys the streams before COM.
@@ -610,6 +653,7 @@ WindowCaptureStreams& windowCaptureStreams()
 void clearWindowCaptureStreams()
 {
     windowCaptureStreams().clear();
+    failedWindowCaptures().clear();
 }
 
 void pruneWindowCaptureStreams()
@@ -630,10 +674,17 @@ CapturedWindowImage captureWindowGraphics(HWND window, const QRect& windowBounds
                                           const QSize& outputSize)
 {
     try {
-        if (!graphicsCaptureReady() || !window || !IsWindow(window))
+        if (!NativeWindows::isCaptureCandidate(reinterpret_cast<WId>(window)) || !graphicsCaptureReady())
             return {};
         auto& streams = windowCaptureStreams();
         const WId id = reinterpret_cast<WId>(window);
+        auto& failures = failedWindowCaptures();
+        const auto now = std::chrono::steady_clock::now();
+        if (const auto* retryAfter = failures.object(id)) {
+            if (now < *retryAfter)
+                return {};
+            failures.remove(id);
+        }
         auto stream = streams.value(id);
         if (!stream) {
             if (streams.size() >= 8) {
@@ -644,8 +695,12 @@ CapturedWindowImage captureWindowGraphics(HWND window, const QRect& windowBounds
                 streams.erase(oldest);
             }
             stream = std::make_shared<WindowCaptureStream>(window);
-            if (!stream->valid())
+            if (!stream->valid()) {
+                // Avoid recreating a rejected item dozens of times per second
+                // while the same unsupported or closing window remains listed.
+                failures.insert(id, new std::chrono::steady_clock::time_point(now + std::chrono::seconds(1)));
                 return {};
+            }
             streams.insert(id, stream);
         }
         return stream->latestImage(windowBounds, requestedBounds, outputSize);
@@ -677,7 +732,7 @@ TargetReconstruction reconstructTarget(QImage& image, const QVector<CapturePart>
         QRegion projected;
         for (const CapturePart& part : parts)
             projected += projectToCapture(lower.bounds, part);
-        if (projected.isEmpty() || lower.desktop)
+        if (projected.isEmpty())
             continue;
         if (lower.excluded)
             continue;
@@ -708,7 +763,10 @@ TargetReconstruction reconstructTarget(QImage& image, const QVector<CapturePart>
         // evidence of failure. Never replace them with an old frame or a GDI
         // screenshot (which may include our own glass window).
         if (captured.pixels.isNull()) {
-            remaining -= paintRegion;
+            // WorkerW/Progman may host a live wallpaper. Try the other shell
+            // host if one cannot be captured; only then use the file fallback.
+            if (!lower.desktop)
+                remaining -= paintRegion;
             continue;
         }
         QPainter painter(&image);
@@ -783,6 +841,11 @@ Plan capturePlan(const QVector<CapturePart>& parts, const QSize& size, WId targe
                 plan.valid -= projectToCapture(bounds, part);
         }
         if (i > targetIndex && intersects) {
+            // WGC captures each HWND independently. Moving a lower window
+            // changes its layout, not its identity as a safe backdrop source.
+            // Only relevant windows participate; unrelated UI elsewhere must
+            // not invalidate this crop while their native windows initialize.
+            plan.topology = (plan.topology ^ quint64(window.id)) * 1099511628211ull;
             hash(window.id);
             hash(window.bounds.x()); hash(window.bounds.y());
             hash(window.bounds.width()); hash(window.bounds.height());
@@ -797,20 +860,22 @@ Plan capturePlan(const QVector<CapturePart>& parts, const QSize& size, WId targe
 }
 
 DesktopCapture::Frame grabFrame(const QVector<CapturePart>& parts, const QSize& size,
-                                const QRect& area, qreal scale, WId target, const Plan& queued)
+                                const QRect& area, qreal scale, WId target, const Plan& queued,
+                                bool validateOnReturn = true)
 {
 #ifdef Q_OS_WIN
     pruneWindowCaptureStreams();
 #endif
     const NativeWindows::Stack beforeStack = NativeWindows::snapshot();
     const Plan before = capturePlan(parts, size, target, beforeStack);
-    if (!queued.scene || queued.scene != before.scene
+    if (!queued.scene || (target ? queued.topology != before.topology : queued.scene != before.scene)
         || queued.targetBounds != before.targetBounds)
         return {};
     if ((queued.valid & before.valid).isEmpty()) {
         QImage blank(size, QImage::Format_RGB32);
         blank.fill(Qt::black);
-        return {std::move(blank), {}, area, before.scene, target, scale, before.targetBounds};
+        return {std::move(blank), {}, area, before.scene, target, scale, before.targetBounds,
+                false, target ? before.topology : 0};
     }
     const bool targeted = target && NativeWindows::indexOf(beforeStack, target) >= 0;
     QImage image;
@@ -825,27 +890,53 @@ DesktopCapture::Frame grabFrame(const QVector<CapturePart>& parts, const QSize& 
     }
     const TargetReconstruction reconstructed = reconstructTarget(
         image, parts, target, beforeStack);
-    const NativeWindows::Stack afterStack = NativeWindows::snapshot();
-    const Plan after = capturePlan(parts, size, target, afterStack);
-    if (before.scene != after.scene || before.targetBounds != after.targetBounds || image.isNull())
+    // Async delivery validates against a fresh native stack on the GUI thread
+    // before exposing any pixels. Avoid doing that same enumeration twice.
+    const Plan after = validateOnReturn ? capturePlan(parts, size, target) : before;
+    if ((targeted ? before.topology != after.topology : before.scene != after.scene)
+        || before.targetBounds != after.targetBounds || image.isNull())
         return {};
     const QRegion stable = queued.valid & before.valid & after.valid;
     const QRegion valid = targeted
         ? (reconstructed.valid & stable)
         : ((stable - reconstructed.target) | (reconstructed.valid & stable));
-    return {std::move(image), valid, area, after.scene, target, scale, after.targetBounds};
+    // Geometry still identifies the cache layout, so newly uncovered areas
+    // are rebuilt from wallpaper instead of retaining a moving-window ghost.
+    return {std::move(image), valid, area, before.scene, target, scale, before.targetBounds,
+            false, targeted ? before.topology : 0};
 }
 
 class CaptureWorker final : public QObject {
 public:
     explicit CaptureWorker(QObject* parent) : QObject(parent) {
+        // Keep one capture lane so live requests reuse the same WGC/D3D
+        // stream and do not compete for GPU readback bandwidth.
         pool.setMaxThreadCount(1);
-        // Let the capture thread retire after live sampling stops. Its
-        // thread-local WGC streams then close promptly instead of continuing
-        // to receive compositor frames after the last panel is hidden.
-        pool.setExpiryTimeout(1000);
+        // Do not destroy D3D/WGC thread-local objects during Windows thread
+        // detach. Some AMD drivers then wait for another thread while holding
+        // the loader lock, freezing later GUI/plugin loads. Keep the lane
+        // alive and release their capture resources in ordinary work items.
+        pool.setExpiryTimeout(-1);
+        idleCleanup.setSingleShot(true);
+        idleCleanup.setTimerType(Qt::CoarseTimer);
+        connect(&idleCleanup, &QTimer::timeout, this, [this]() {
+            const qint64 remaining = 1500 - lastRequest.elapsed();
+            if (remaining > 0) {
+                idleCleanup.start(int(remaining));
+                return;
+            }
+#ifdef Q_OS_WIN
+            pool.start(QRunnable::create([]() { clearWindowCaptureStreams(); }));
+#endif
+        });
+    }
+    void noteRequest() {
+        lastRequest.restart();
+        if (!idleCleanup.isActive())
+            idleCleanup.start(1500);
     }
     ~CaptureWorker() override {
+        idleCleanup.stop();
         pool.clear();
 #ifdef Q_OS_WIN
         // Destroy WGC sessions on the worker thread that owns their cache
@@ -855,6 +946,9 @@ public:
         pool.waitForDone();
     }
     QThreadPool pool;
+private:
+    QTimer idleCleanup;
+    QElapsedTimer lastRequest;
 };
 
 QPointer<CaptureWorker>& captureWorkerInstance()
@@ -871,15 +965,16 @@ void DesktopCapture::request(const QRect& area, qreal pixelScale, WId target, QO
     if (!worker)
         worker = new CaptureWorker(qApp);
     CaptureWorker* owner = worker;
+    owner->noteRequest();
     const auto parts = captureParts(area, pixelScale);
     const QSize size(qMax(1, qRound(area.width() * pixelScale)),
                      qMax(1, qRound(area.height() * pixelScale)));
-    const auto queued = capturePlan(parts, size, target);
+    const auto queued = capturePlan(parts, size, target, NativeWindows::cachedStack());
     const QPointer<QObject> guard(context);
     owner->pool.start(QRunnable::create([owner, parts, size, area, pixelScale, target, queued, guard,
                                        completed = std::move(completed)]() {
         Frame frame;
-        try { frame = grabFrame(parts, size, area, pixelScale, target, queued); }
+        try { frame = grabFrame(parts, size, area, pixelScale, target, queued, false); }
         catch (...) {} // Always release the caller's in-flight slot on failure.
         QMetaObject::invokeMethod(owner, [guard, completed, frame = std::move(frame)]() mutable {
             if (guard) {
@@ -895,13 +990,19 @@ DesktopCapture::Frame DesktopCapture::grab(const QRect& area, qreal pixelScale, 
     const auto parts = captureParts(area, pixelScale);
     const QSize size(qMax(1, qRound(area.width() * pixelScale)),
                      qMax(1, qRound(area.height() * pixelScale)));
-    Frame frame = grabFrame(parts, size, area, pixelScale, target,
-                            capturePlan(parts, size, target));
+    Frame frame;
+    try {
+        frame = grabFrame(parts, size, area, pixelScale, target,
+                          capturePlan(parts, size, target));
+    } catch (...) {
+        // Match the asynchronous path: a transient capture/device failure
+        // yields an empty frame instead of escaping through the GUI event loop.
+    }
 #ifdef Q_OS_WIN
     // Synchronous grabs run on their caller (normally the GUI thread) and do
     // not form a live stream. Close any session created for this one-shot read
     // immediately; asynchronous worker requests retain and reuse theirs.
-    clearWindowCaptureStreams();
+    try { clearWindowCaptureStreams(); } catch (...) {}
 #endif
     return frame;
 }
@@ -922,7 +1023,8 @@ bool DesktopCapture::validate(Frame& frame)
     if (frame.image.isNull() || !frame.scene)
         return false;
     const Plan current = capturePlan(captureParts(frame.area, frame.scale), frame.image.size(), frame.target);
-    if (current.scene != frame.scene || current.targetBounds != frame.targetBounds) {
+    if ((frame.topology ? current.topology != frame.topology : current.scene != frame.scene)
+        || current.targetBounds != frame.targetBounds) {
         frame = {};
         return false;
     }
@@ -936,6 +1038,7 @@ void DesktopCapture::Cache::clear()
     image = {};
     area = {};
     scene = 0;
+    topology = 0;
     target = 0;
     recentlyCovered = {};
     coverageClock.invalidate();
@@ -943,8 +1046,10 @@ void DesktopCapture::Cache::clear()
 
 bool DesktopCapture::Cache::current() const
 {
-    return scene && scene == capturePlan(captureParts(area, scale), image.size(), target,
-                                         NativeWindows::cachedStack()).scene;
+    if (!scene) return false;
+    const Plan current = capturePlan(captureParts(area, scale), image.size(), target,
+                                      NativeWindows::cachedStack());
+    return current.scene && (topology ? topology == current.topology : scene == current.scene);
 }
 
 QImage DesktopCapture::Cache::merge(Frame frame, const std::function<QImage()>& fallback)
@@ -985,6 +1090,7 @@ QImage DesktopCapture::Cache::merge(Frame frame, const std::function<QImage()>& 
         coverageClock.invalidate();
     }
     target = frame.target;
+    topology = frame.topology;
     scale = frame.scale;
     // DWM can present the previous position for a frame after native geometry
     // changes. Hold newly uncovered pixels briefly instead of admitting ghosts.

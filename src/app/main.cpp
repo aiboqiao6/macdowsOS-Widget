@@ -1,8 +1,14 @@
 #include "widgets/batterywidget.h"
+#include "ui/firstrunwizard.h"
+#include "app/appsettings.h"
+#include "config.h"
 
 #include <QApplication>
+#include <QDir>
+#include <QFileInfo>
 #include <QFontDatabase>
-#include <QSettings>
+#include <QStandardPaths>
+#include <QTimer>
 
 #ifdef Q_OS_WIN
 #  ifndef NOMINMAX
@@ -40,6 +46,7 @@ int main(int argc, char* argv[])
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("macdowsOS Widget"));
     app.setApplicationDisplayName(QStringLiteral("macdowsOS Widget"));
+    app.setApplicationVersion(QString::fromLatin1(AppConfig::Version));
     app.setOrganizationName(QStringLiteral("macdowsOS"));
     // All widget artwork and Qt controls use the bundled PingFang face. The
     // registration happens before any windows are restored so text metrics
@@ -47,10 +54,25 @@ int main(int argc, char* argv[])
     const QString pingFangFamily = BatteryWidget::pingFangFontFamily();
     QFont applicationFont(pingFangFamily);
     app.setFont(applicationFont);
-    BatteryWidget::setGlobalFontSmoothing(qBound(0,
-        QSettings().value(QStringLiteral("appearance/fontSmoothing"), 2).toInt(), 3));
     // The tray icon owns the app lifetime when the floating card is hidden.
     app.setQuitOnLastWindowClosed(false);
+
+    const QString configPath = QDir(QStandardPaths::writableLocation(
+        QStandardPaths::AppConfigLocation)).filePath(QStringLiteral("widgets.json"));
+    const bool firstRun = !QFileInfo::exists(configPath);
+    if (firstRun) {
+        FirstRunWizard wizard;
+        if (!wizard.run()) {
+            BatteryWidget::shutdown();
+#ifdef Q_OS_WIN
+            ReleaseMutex(instanceMutex);
+            CloseHandle(instanceMutex);
+#endif
+            return 0;
+        }
+    }
+    BatteryWidget::setGlobalFontSmoothing(qBound(0,
+        AppSettings().value(QStringLiteral("appearance/fontSmoothing"), 2).toInt(), 3));
 
     // Restore user-created independent cards from widgets.json. On first run
     // seed the reference layout with four cards; every card owns its window,
@@ -64,6 +86,10 @@ int main(int argc, char* argv[])
         for (BatteryWidget* widget : widgets)
             widget->show();
         widgets.first()->saveConfiguration();
+    }
+    if (firstRun) {
+        BatteryWidget* owner = widgets.first();
+        QTimer::singleShot(0, owner, &BatteryWidget::showSettingsDialog);
     }
     const int result = app.exec();
     BatteryWidget::shutdown();

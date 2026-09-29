@@ -42,21 +42,22 @@ public:
     int cardVariant() const { return m_variant; }
     bool placeAtDesktopPoint(const QPoint& point);
     void saveConfiguration() const;
+    void showSettingsDialog();
 
     static QList<BatteryWidget*> restoreWidgets();
     static BatteryWidget* addWidget(CardKind kind, const QPoint& desktopPoint,
                                     int variant = -1);
     // Render the same card payload used on the desktop for the widget gallery.
-    // The gallery scales this image into its preview canvas; no second visual
-    // implementation is needed for individual widget styles.
-    static QImage renderPreview(CardKind kind, int variant, const QSize& size);
+    // Size is logical; pixels are generated at the target screen's density.
+    static QImage renderPreview(CardKind kind, int variant, const QSize& size,
+                                qreal devicePixelRatio = 1.0);
     // Registers the bundled PingFang face and returns its Qt family name.
     // Keeping this on the widget core lets the app, tests and preview gallery
     // share exactly the same font registration path.
     static QString pingFangFontFamily();
     // Applies one of the global font rasterization profiles to both Qt
     // controls and custom-painted widget text. Levels are 0=off, 1=standard,
-    // 2=clear (default), 3=soft/high-DPI.
+    // 2=clear (default), 3=native-pixel grayscale with full hinting.
     static void setGlobalFontSmoothing(int level);
     static int globalFontSmoothing();
     static void applyFontSmoothing(QFont& font);
@@ -110,7 +111,6 @@ private:
     void setupTrayIcon();
     void toggleWidgetVisibility();
     void toggleLayout();
-    void showSettingsDialog();
     void applyScale(qreal scale);
     void updateTrayVisibilityLabel();
     void updateLayoutLabel();
@@ -134,16 +134,19 @@ private:
                            int weatherCode = -1) const;
     void drawDashboardInfo(QPainter& painter, const QRectF& card) const;
     void arrangeGroup();
-    void syncGroupSettings(qreal scale, bool systemBlur, int blurStrength,
+    void syncGroupSettings(qreal scale, int blurStrength,
                            qreal opacity, bool mouseThrough, bool lowPower,
-                           bool liveBackdrop, qreal renderQuality, int fontSmoothing,
-                           RenderBackend renderBackend);
+                           bool liveBackdrop, qreal renderQuality, int fontSmoothing);
     void moveToGroupPosition();
     void showWidgetLibrary();
-    QPoint snappedTopLeft(const QPoint& requested) const;
     static QRect nearestGridRect(CardKind kind, int variant,
                                  const QPoint& requestedTopLeft, qreal scale,
                                  const BatteryWidget* ignored = nullptr);
+    static QRect nearbyWidgetRect(CardKind kind, int variant,
+                                  const QPoint& requestedTopLeft, qreal scale,
+                                  const BatteryWidget* ignored = nullptr);
+    static bool overlapsVisibleWidget(const QRect& rect,
+                                      const BatteryWidget* ignored = nullptr);
     static void showGridPreview(CardKind kind, int variant, const QPoint& desktopPoint);
     static void showGridPreviewRect(const QRect& rect);
     static void hideGridPreview();

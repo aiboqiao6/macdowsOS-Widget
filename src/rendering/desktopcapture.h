@@ -19,6 +19,7 @@ struct Frame {
     qreal scale = 1;
     QRect targetBounds; // physical coordinates at the instant of capture
     bool validated = false; // checked on the GUI thread immediately before delivery
+    quint64 topology = 0; // WGC source identities/order, independent of their positions
 };
 // All geometry is in Qt desktop coordinates. Capture is performed on a single
 // worker pool; callbacks run on the GUI thread only while their context is alive.
@@ -41,6 +42,7 @@ private:
     QImage image;
     QRect area;
     quint64 scene = 0;
+    quint64 topology = 0;
     WId target = 0;
     qreal scale = 1;
     QRegion recentlyCovered;

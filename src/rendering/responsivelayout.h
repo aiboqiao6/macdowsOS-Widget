@@ -13,16 +13,15 @@
 
 namespace ResponsiveLayout {
 
-// Rasterize high-AA glyph outlines at four times their device size, then resolve
-// coverage once. The image reaches the GL painter at exactly 1:1 device
-// pixels, bypassing its scaled glyph atlas. The cache is independent of the
-// glass render scale, so backdrop quality never lowers text resolution.
+// Rasterize at the final device size with the font's hinting intact. Outlining
+// at 4x and shrinking discards stem fitting, softening small CJK/menu text.
+// A native-size coverage image also bypasses the GL painter's scaled atlas.
+// Backdrop quality never changes this text cache's resolution.
 inline bool drawHighQualityText(QPainter& painter, const QPointF& baseline,
                                 const QString& value)
 {
     const QFont font = painter.font();
     if (font.hintingPreference() != QFont::PreferFullHinting
-        || !(font.styleStrategy() & QFont::NoSubpixelAntialias)
         || !(font.styleStrategy() & QFont::PreferQuality))
         return false;
     const QTransform transform = painter.deviceTransform();
@@ -32,10 +31,16 @@ inline bool drawHighQualityText(QPainter& painter, const QPointF& baseline,
         return false;
     const qreal logicalPixels = font.pixelSize() > 0 ? font.pixelSize()
         : font.pointSizeF() * painter.device()->logicalDpiY() / 72.0;
-    constexpr int samples = 4;
     QFont rasterFont(font);
-    rasterFont.setHintingPreference(QFont::PreferNoHinting);
-    rasterFont.setPixelSize(qMax(1, qRound(logicalPixels * transform.m11() * samples)));
+    rasterFont.setPixelSize(qMax(1, qRound(logicalPixels * transform.m11())));
+    // Coverage is composited over translucent glass: RGB subpixel masks would
+    // leave colored fringes. Keep grayscale AA and the selected full hinting.
+    rasterFont.setStyleStrategy(static_cast<QFont::StyleStrategy>(
+        rasterFont.styleStrategy() | QFont::NoSubpixelAntialias));
+    if (font.letterSpacingType() == QFont::AbsoluteSpacing)
+        rasterFont.setLetterSpacing(QFont::AbsoluteSpacing,
+                                   font.letterSpacing() * transform.m11());
+    rasterFont.setWordSpacing(font.wordSpacing() * transform.m11());
     const QColor color = painter.pen().color();
     const QString key = rasterFont.key() + QChar('|')
         + QString::number(color.rgba(), 16) + QChar('|') + value;
@@ -44,26 +49,21 @@ inline bool drawHighQualityText(QPainter& painter, const QPointF& baseline,
     GlyphImage* glyph = cache.object(key);
     std::unique_ptr<GlyphImage> oversized;
     if (!glyph) {
-        QPainterPath outline;
-        outline.addText(QPointF(), rasterFont, value);
-        if (outline.isEmpty())
-            return false; // Let Qt handle fonts without scalable outlines.
-        const QRectF ink = outline.boundingRect();
-        const QRect bounds(QPoint(qFloor(ink.left() / samples) - 2, qFloor(ink.top() / samples) - 2),
-                           QPoint(qCeil(ink.right() / samples) + 2, qCeil(ink.bottom() / samples) + 2));
+        const QRect bounds = QFontMetricsF(rasterFont).boundingRect(value)
+            .toAlignedRect().adjusted(-2, -2, 2, 2);
         if (bounds.isEmpty() || qint64(bounds.width()) * bounds.height() > 1024 * 1024)
             return false;
-        QImage coverage(bounds.size() * samples, QImage::Format_ARGB32_Premultiplied);
+        QImage coverage(bounds.size(), QImage::Format_ARGB32_Premultiplied);
         if (coverage.isNull())
             return false;
         coverage.fill(Qt::transparent);
         QPainter raster(&coverage);
-        raster.setRenderHint(QPainter::Antialiasing);
-        raster.translate(-bounds.left() * samples, -bounds.top() * samples);
-        raster.fillPath(outline, color);
+        raster.setRenderHint(QPainter::TextAntialiasing, true);
+        raster.setFont(rasterFont);
+        raster.setPen(color);
+        raster.drawText(-QPointF(bounds.topLeft()), value);
         raster.end();
-        glyph = new GlyphImage{coverage.scaled(bounds.size(), Qt::IgnoreAspectRatio,
-                                               Qt::SmoothTransformation), bounds.topLeft()};
+        glyph = new GlyphImage{coverage, bounds.topLeft()};
         const int cost = qMax(1, int(glyph->pixels.sizeInBytes() / 1024));
         if (cost > cache.maxCost())
             oversized.reset(glyph);
@@ -159,8 +159,12 @@ inline QRectF drawSingleLine(QPainter& painter, const QRectF& area,
                  + (metrics.ascent() - metrics.descent()) * .5;
     else if (alignment.testFlag(Qt::AlignBottom))
         baseline = area.bottom() - metrics.descent();
+    const bool previousTextAntialiasing = painter.testRenderHint(QPainter::TextAntialiasing);
+    painter.setRenderHint(QPainter::TextAntialiasing,
+        !(fittedFont.styleStrategy() & QFont::NoAntialias));
     if (!drawHighQualityText(painter, QPointF(x, baseline), value))
         painter.drawText(QPointF(x, baseline), value);
+    painter.setRenderHint(QPainter::TextAntialiasing, previousTextAntialiasing);
     painter.setFont(originalFont);
     return glyphBounds.translated(x, baseline);
 }
@@ -175,7 +179,10 @@ inline QRectF drawImageFitted(QPainter& painter, const QRectF& area,
     const QRectF target(area.center().x() - fitted.width() * .5,
                         area.center().y() - fitted.height() * .5,
                         fitted.width(), fitted.height());
+    painter.save();
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
     painter.drawImage(target, image);
+    painter.restore();
     return target;
 }
 

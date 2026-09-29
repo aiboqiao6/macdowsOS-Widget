@@ -9,7 +9,6 @@
 #include <QImage>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QPainterPath>
 #include <QShowEvent>
 #include <QHideEvent>
 #include <QTimer>
@@ -34,7 +33,9 @@ static const char *kBlitFragSrc =
     "#version 120\n"
     "varying vec2 v_texcoord;\n"
     "uniform sampler2D u_texture;\n"
-    "void main() { gl_FragColor = texture2D(u_texture, v_texcoord); }\n";
+    "uniform bool u_flipY;\n"
+    "void main() { vec2 uv = v_texcoord; if (u_flipY) uv.y = 1.0 - uv.y;"
+    "gl_FragColor = texture2D(u_texture, uv); }\n";
 
 static const float kQuadVerts[] = {
     -1.0f, -1.0f, 0.0f, 0.0f,
@@ -45,128 +46,6 @@ static const float kQuadVerts[] = {
     -1.0f,  1.0f, 0.0f, 1.0f
 };
 
-QImage boxBlurPass(const QImage &source, int radius, bool horizontal)
-{
-    if (source.isNull() || radius <= 0)
-        return source;
-    QImage result(source.size(), QImage::Format_ARGB32_Premultiplied);
-    const int width = source.width();
-    const int height = source.height();
-    const int window = radius * 2 + 1;
-    if (horizontal) {
-        for (int y = 0; y < height; ++y) {
-            const uchar *input = source.constScanLine(y);
-            uchar *output = result.scanLine(y);
-            int sums[4] = {};
-            for (int offset = -radius; offset <= radius; ++offset) {
-                const uchar *pixel = input + qBound(0, offset, width - 1) * 4;
-                for (int channel = 0; channel < 4; ++channel)
-                    sums[channel] += pixel[channel];
-            }
-            for (int x = 0; x < width; ++x) {
-                for (int channel = 0; channel < 4; ++channel)
-                    output[x * 4 + channel] = uchar((sums[channel] + window / 2) / window);
-                const uchar *removed = input + qBound(0, x - radius, width - 1) * 4;
-                const uchar *added = input + qBound(0, x + radius + 1, width - 1) * 4;
-                for (int channel = 0; channel < 4; ++channel)
-                    sums[channel] += int(added[channel]) - int(removed[channel]);
-            }
-        }
-    } else {
-        for (int x = 0; x < width; ++x) {
-            int sums[4] = {};
-            for (int offset = -radius; offset <= radius; ++offset) {
-                const uchar *pixel = source.constScanLine(qBound(0, offset, height - 1)) + x * 4;
-                for (int channel = 0; channel < 4; ++channel)
-                    sums[channel] += pixel[channel];
-            }
-            for (int y = 0; y < height; ++y) {
-                uchar *output = result.scanLine(y) + x * 4;
-                for (int channel = 0; channel < 4; ++channel)
-                    output[channel] = uchar((sums[channel] + window / 2) / window);
-                const uchar *removed = source.constScanLine(
-                    qBound(0, y - radius, height - 1)) + x * 4;
-                const uchar *added = source.constScanLine(
-                    qBound(0, y + radius + 1, height - 1)) + x * 4;
-                for (int channel = 0; channel < 4; ++channel)
-                    sums[channel] += int(added[channel]) - int(removed[channel]);
-            }
-        }
-    }
-    return result;
-}
-
-QImage boxBlur(QImage image, int radius, int passes)
-{
-    for (int pass = 0; pass < passes; ++pass) {
-        image = boxBlurPass(image, radius, true);
-        image = boxBlurPass(image, radius, false);
-    }
-    return image;
-}
-
-// Keep fractional coverage between passes. Quantizing each axis to 8 bits
-// creates aligned plateaus around highlights, even at native resolution.
-// Several smaller boxes approximate a Gaussian without the rectangular lobes
-// of one/two large boxes; running sums keep the work linear in image size.
-QImage highPrecisionBlur(const QImage &source, int radius, int originalPasses, int passes)
-{
-    QImage image = source.convertToFormat(QImage::Format_RGBA64_Premultiplied);
-    QImage scratch(image.size(), image.format());
-    if (image.isNull() || scratch.isNull())
-        return source;
-    const double variance = originalPasses * radius * (radius + 1.0) / 3.0;
-    int lowerWidth = qFloor(std::sqrt(12.0 * variance / passes + 1.0));
-    if (!(lowerWidth & 1))
-        --lowerWidth;
-    lowerWidth = qMax(1, lowerWidth);
-    const double lowerVariance = (lowerWidth * lowerWidth - 1.0) / 12.0;
-    const int upperCount = qBound(0, qRound((variance - passes * lowerVariance)
-                                          / ((lowerWidth + 1.0) / 3.0)), passes);
-    struct Sum {
-        int r = 0, g = 0, b = 0, a = 0;
-        void add(QRgba64 p) { r += p.red(); g += p.green(); b += p.blue(); a += p.alpha(); }
-        void remove(QRgba64 p) { r -= p.red(); g -= p.green(); b -= p.blue(); a -= p.alpha(); }
-        QRgba64 pixel(int n) const {
-            return QRgba64::fromRgba64((r + n / 2) / n, (g + n / 2) / n,
-                                       (b + n / 2) / n, (a + n / 2) / n);
-        }
-    };
-    const int w = image.width(), h = image.height();
-    for (int pass = 0; pass < passes; ++pass) {
-        const int r = lowerWidth / 2 + (pass < upperCount ? 1 : 0);
-        const int n = r * 2 + 1;
-        for (int y = 0; y < h; ++y) {
-            const auto *input = reinterpret_cast<const QRgba64 *>(image.constScanLine(y));
-            auto *output = reinterpret_cast<QRgba64 *>(scratch.scanLine(y));
-            Sum sum;
-            for (int k = -r; k <= r; ++k)
-                sum.add(input[qBound(0, k, w - 1)]);
-            for (int x = 0; x < w; ++x) {
-                output[x] = sum.pixel(n);
-                sum.remove(input[qMax(0, x - r)]);
-                sum.add(input[qMin(w - 1, x + r + 1)]);
-            }
-        }
-        QVector<Sum> columns(w);
-        for (int k = -r; k <= r; ++k) {
-            const auto *row = reinterpret_cast<const QRgba64 *>(scratch.constScanLine(qBound(0, k, h - 1)));
-            for (int x = 0; x < w; ++x)
-                columns[x].add(row[x]);
-        }
-        for (int y = 0; y < h; ++y) {
-            auto *output = reinterpret_cast<QRgba64 *>(image.scanLine(y));
-            const auto *removed = reinterpret_cast<const QRgba64 *>(scratch.constScanLine(qMax(0, y - r)));
-            const auto *added = reinterpret_cast<const QRgba64 *>(scratch.constScanLine(qMin(h - 1, y + r + 1)));
-            for (int x = 0; x < w; ++x) {
-                output[x] = columns[x].pixel(n);
-                columns[x].remove(removed[x]);
-                columns[x].add(added[x]);
-            }
-        }
-    }
-    return image.convertToFormat(QImage::Format_ARGB32_Premultiplied);
-}
 }
 
 QtGlassFlowScene::QtGlassFlowScene(QWidget *parent)
@@ -176,9 +55,8 @@ QtGlassFlowScene::QtGlassFlowScene(QWidget *parent)
       m_quadVbo(QOpenGLBuffer::VertexBuffer), m_quadInitialized(false),
       m_bgTexture(0), m_bgWidth(0), m_bgHeight(0), m_bgDirty(false),
       m_bgImageAlreadyFlipped(false),
-      m_glassRenderingEnabled(true), m_blurOnly(false), m_glassOpacity(1.0f),
-      m_blurCacheDirty(true), m_cpuBackdropDirty(true),
-      m_renderBackend(AutoBackend), m_effectiveRenderBackend(GpuBackend),
+      m_glassRenderingEnabled(true), m_glassOpacity(1.0f),
+      m_blurCacheDirty(true),
       // Native resolution is the quality default. Users can explicitly pick
       // a reduced scale on slower GPUs, but fractional-DPI screens should not
       // silently start from an upscaled 60% glass buffer.
@@ -210,6 +88,11 @@ QtGlassFlowScene::QtGlassFlowScene(QWidget *parent)
     // Other glass windows use m_surfaceSnapshot, so they do not rely on FBO
     // preservation between paintGL calls.
     setUpdateBehavior(QOpenGLWidget::NoPartialUpdate);
+    connect(this, &QOpenGLWidget::frameSwapped, this, [this]() {
+        if (isVisible() && m_continuousRendering && !m_renderingSuspended
+            && m_refreshInterval < 64)
+            update();
+    });
 }
 
 QtGlassFlowScene::~QtGlassFlowScene()
@@ -305,8 +188,7 @@ void QtGlassFlowScene::setBackgroundImage(const QString &path)
     m_bgImageAlreadyFlipped = false;
     m_bgDirty = true;
     m_blurCacheDirty = true;
-    m_cpuBackdropDirty = true;
-    if (isValid()) {
+    if (isValid() && m_gpuReady) {
         makeCurrent();
         loadBackgroundTexture();
         doneCurrent();
@@ -329,12 +211,14 @@ void QtGlassFlowScene::setBackgroundImageInternal(const QImage &image,
 {
     if (image.isNull())
         return;
+    if (m_bgImage.cacheKey() == image.cacheKey()
+        && m_bgImageAlreadyFlipped == alreadyFlipped)
+        return;
     m_bgPath.clear();
     m_bgImage = image;
     m_bgImageAlreadyFlipped = alreadyFlipped;
     m_bgDirty = true;
     m_blurCacheDirty = true;
-    m_cpuBackdropDirty = true;
     update();
 }
 
@@ -343,14 +227,6 @@ void QtGlassFlowScene::setGlassRenderingEnabled(bool enabled)
     if (m_glassRenderingEnabled == enabled)
         return;
     m_glassRenderingEnabled = enabled;
-    update();
-}
-
-void QtGlassFlowScene::setBlurOnlyEnabled(bool enabled)
-{
-    if (m_blurOnly == enabled)
-        return;
-    m_blurOnly = enabled;
     update();
 }
 
@@ -433,29 +309,15 @@ void QtGlassFlowScene::syncTimerCadence()
         m_timer->start();
 }
 
-void QtGlassFlowScene::setRenderBackend(RenderBackend backend)
-{
-    if (m_renderBackend == backend)
-        return;
-    m_renderBackend = backend;
-    if (isValid())
-        makeCurrent();
-    updateEffectiveBackend();
-    if (isValid())
-        doneCurrent();
-    m_blurCacheDirty = true;
-    m_cpuBackdropDirty = true;
-    update();
-}
-
 void QtGlassFlowScene::setRenderScale(float scale)
 {
     const float next = qBound(0.5f, scale, 1.5f);
     if (qFuzzyCompare(m_renderScale, next))
         return;
     m_renderScale = next;
+    m_blurKernelSigma = -1.0f;
+    m_blurKernelSamples.clear();
     m_blurCacheDirty = true;
-    m_cpuBackdropDirty = true;
     update();
 }
 
@@ -468,8 +330,9 @@ void QtGlassFlowScene::setBlurRadius(float value)
     if (qFuzzyCompare(m_blurRadius, next))
         return;
     m_blurRadius = next;
+    m_blurKernelSigma = -1.0f;
+    m_blurKernelSamples.clear();
     m_blurCacheDirty = true;
-    m_cpuBackdropDirty = true;
     update();
 }
 
@@ -480,7 +343,6 @@ void QtGlassFlowScene::setBlurIterations(int value)
         return;
     m_blurIterations = next;
     m_blurCacheDirty = true;
-    m_cpuBackdropDirty = true;
     update();
 }
 
@@ -565,9 +427,8 @@ void QtGlassFlowScene::initializeGL()
     compileProgram(m_glassShader, QStringLiteral(":/qtglassflow/shaders/scene_vertex.glsl"),
                    QStringLiteral(":/qtglassflow/shaders/scene_fragment.glsl"));
     m_gpuReady = m_blitShader->isLinked() && m_blurShader->isLinked() && m_glassShader->isLinked();
-    updateEffectiveBackend();
     initQuad();
-    if (!m_bgPath.isEmpty() || !m_bgImage.isNull())
+    if (m_gpuReady && (!m_bgPath.isEmpty() || !m_bgImage.isNull()))
         loadBackgroundTexture();
 
     if (!m_timer) {
@@ -593,17 +454,11 @@ void QtGlassFlowScene::resizeGL(int w, int h)
     const qreal dpr = devicePixelRatioF();
     const int nativePixelWidth = qMax(1, qRound(width() * dpr));
     const int nativePixelHeight = qMax(1, qRound(height() * dpr));
-    if (m_effectiveRenderBackend == CpuBackend) {
-        destroyFBOs();
-        glViewport(0, 0, nativePixelWidth, nativePixelHeight);
-        m_cpuBackdropDirty = true;
-        return;
-    }
     const int pixelWidth = qMax(1, qRound(nativePixelWidth * m_renderScale));
     const int pixelHeight = qMax(1, qRound(nativePixelHeight * m_renderScale));
-    createFBOs(pixelWidth, pixelHeight);
+    if (m_gpuReady)
+        createFBOs(pixelWidth, pixelHeight);
     m_blurCacheDirty = true;
-    m_cpuBackdropDirty = true;
     glViewport(0, 0, nativePixelWidth, nativePixelHeight);
 }
 
@@ -660,13 +515,8 @@ void QtGlassFlowScene::loadBackgroundTexture()
         qWarning() << "failed to load background image:" << m_bgPath;
         return;
     }
-#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
-    if (!m_bgImageAlreadyFlipped)
-        image = image.flipped(Qt::Vertical);
-#else
-    if (!m_bgImageAlreadyFlipped)
-        image = image.mirrored(false, true);
-#endif
+    // Handle orientation in the background blit; upload the shared pixels
+    // directly instead of allocating/flipping an image on every update.
     // DesktopCapture and wallpaperBackdrop are RGB32 images on Windows.
     // Upload those buffers in their native BGRA layout instead of converting
     // and copying the entire crop to RGBA on every update.  Keep conversion
@@ -721,6 +571,7 @@ void QtGlassFlowScene::renderBackgroundToFbo()
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, m_bgTexture);
         m_blitShader->setUniformValue("u_texture", 0);
+        m_blitShader->setUniformValue("u_flipY", !m_bgImageAlreadyFlipped);
         drawFullscreenQuad(m_blitShader);
         glBindTexture(GL_TEXTURE_2D, 0);
         m_blitShader->release();
@@ -744,26 +595,32 @@ void QtGlassFlowScene::runBlurPass()
     const float sigma = qBound(0.01f, m_blurRadius * m_renderScale * 1.95f, 42.0f);
     const int stride = m_renderScale < .7f ? 4 : m_renderScale < .9f ? 3
                      : m_renderScale < 1.2f ? 2 : 1;
-    const int radius = qMin(127, qCeil(sigma * 3.0f));
-    QVector<QVector2D> samples;
-    float total = 1.0f;
-    for (int first = 1; first <= radius; first += 2 * stride) {
-        const int second = first + stride;
-        const float a = std::exp(-float(first * first) / (2 * sigma * sigma));
-        const float b = second <= radius
-            ? std::exp(-float(second * second) / (2 * sigma * sigma)) : 0.0f;
-        const float weight = a + b;
-        if (weight < 1e-8f)
-            break;
-        samples.append(QVector2D((first * a + second * b) / weight, weight));
-        total += 2 * weight;
+    if (!qFuzzyCompare(m_blurKernelSigma, sigma) || m_blurKernelStride != stride) {
+        m_blurKernelSigma = sigma;
+        m_blurKernelStride = stride;
+        m_blurKernelSamples.clear();
+        const int radius = qMin(127, qCeil(sigma * 3.0f));
+        float total = 1.0f;
+        for (int first = 1; first <= radius; first += 2 * stride) {
+            const int second = first + stride;
+            const float a = std::exp(-float(first * first) / (2 * sigma * sigma));
+            const float b = second <= radius
+                ? std::exp(-float(second * second) / (2 * sigma * sigma)) : 0.0f;
+            const float weight = a + b;
+            if (weight < 1e-8f)
+                break;
+            m_blurKernelSamples.append(QVector2D((first * a + second * b) / weight, weight));
+            total += 2 * weight;
+        }
+        for (auto& sample : m_blurKernelSamples)
+            sample.setY(sample.y() / total);
+        m_blurKernelCenterWeight = 1.0f / total;
     }
-    for (auto& sample : samples)
-        sample.setY(sample.y() / total);
-    m_blurShader->setUniformValue("u_centerWeight", 1.0f / total);
-    m_blurShader->setUniformValue("u_sampleCount", int(samples.size()));
-    if (!samples.isEmpty())
-        m_blurShader->setUniformValueArray("u_samples", samples.constData(), int(samples.size()));
+    m_blurShader->setUniformValue("u_centerWeight", m_blurKernelCenterWeight);
+    m_blurShader->setUniformValue("u_sampleCount", int(m_blurKernelSamples.size()));
+    if (!m_blurKernelSamples.isEmpty())
+        m_blurShader->setUniformValueArray("u_samples", m_blurKernelSamples.constData(),
+                                           int(m_blurKernelSamples.size()));
     m_blurShader->setUniformValue("u_texture", 0);
     glActiveTexture(GL_TEXTURE0);
     glDisable(GL_BLEND);
@@ -788,105 +645,6 @@ void QtGlassFlowScene::runBlurPass()
     m_blurShader->release();
 }
 
-void QtGlassFlowScene::updateEffectiveBackend()
-{
-    if (m_renderBackend == CpuBackend || (context() && !m_gpuReady)) {
-        m_effectiveRenderBackend = CpuBackend;
-        return;
-    }
-    m_effectiveRenderBackend = GpuBackend;
-    if (m_renderBackend != AutoBackend || !QOpenGLContext::currentContext())
-        return;
-    const GLubyte *renderer = glGetString(GL_RENDERER);
-    if (!renderer)
-        return;
-    const QString name = QString::fromLatin1(reinterpret_cast<const char *>(renderer)).toLower();
-    if (name.contains("gdi generic") || name.contains("llvmpipe")
-        || name.contains("softpipe") || name.contains("software")
-        || name.contains("microsoft basic render"))
-        m_effectiveRenderBackend = CpuBackend;
-}
-
-void QtGlassFlowScene::ensureCpuBackdrop()
-{
-    if (!m_cpuBackdropDirty)
-        return;
-    QImage source = m_bgImage.isNull() && !m_bgPath.isEmpty() ? QImage(m_bgPath) : m_bgImage;
-    if (source.isNull()) {
-        m_cpuBlurredImage = QImage();
-        m_cpuBackdropDirty = false;
-        return;
-    }
-    // Live desktop crops are kept in OpenGL orientation to avoid an extra
-    // upload-time copy. The software fallback still works in image (top-left)
-    // coordinates, so restore that orientation before CPU scaling/blur.
-#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
-    if (m_bgImageAlreadyFlipped)
-        source = source.flipped(Qt::Vertical);
-#else
-    if (m_bgImageAlreadyFlipped)
-        source = source.mirrored(false, true);
-#endif
-    const qreal dpr = devicePixelRatioF();
-    // CPU quality used to downsample every backdrop by a blur-dependent 1/7
-    // (or worse) and enlarge it again. That shortcut produced the regular
-    // square lattice visible over bright, strongly blurred regions. Economical
-    // modes still follow their selected scale, but native/high/maximum quality
-    // now blur at full device-pixel resolution. Supersampling a CPU image above
-    // native would add no detail to QPainter's native-sized destination.
-    const qreal quality = qBound<qreal>(0.5, m_renderScale, 1.5);
-    const qreal workingScale = qMin<qreal>(1.0, quality);
-    const QSize working(qMax(1, qRound(width() * dpr * workingScale)),
-                        qMax(1, qRound(height() * dpr * workingScale)));
-    source = source.convertToFormat(QImage::Format_ARGB32_Premultiplied)
-                 .scaled(working, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-    const int radius = qBound(1, qRound(m_blurRadius * workingScale * 1.8), 36);
-    const int passes = qBound(1, m_blurIterations, 3);
-    m_cpuBlurredImage = quality >= 1.25
-        ? highPrecisionBlur(source, radius, passes, quality >= 1.5 ? 5 : 3)
-        : boxBlur(std::move(source), radius, passes);
-    m_cpuBackdropDirty = false;
-}
-
-void QtGlassFlowScene::renderCpuGlass(QPainter &painter)
-{
-    ensureCpuBackdrop();
-    if (m_cpuBlurredImage.isNull())
-        return;
-    painter.save();
-    painter.setRenderHint(QPainter::Antialiasing, true);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-    for (const GlassObject &object : std::as_const(m_objects)) {
-        if (!object.visible)
-            continue;
-        const QRectF objectRect(object.position, object.size);
-        const qreal radius = qBound<qreal>(0, object.cornerRadius,
-                                           qMin(objectRect.width(), objectRect.height()) * .5);
-        QPainterPath shape;
-        shape.addRoundedRect(objectRect, radius, radius);
-        painter.save();
-        painter.setClipPath(shape);
-        painter.setOpacity(m_glassOpacity);
-        painter.drawImage(QRectF(rect()), m_cpuBlurredImage);
-        painter.setOpacity(1.0);
-        QLinearGradient sheen(objectRect.topLeft(), objectRect.bottomLeft());
-        sheen.setColorAt(0, QColor(255, 255, 255, 36));
-        sheen.setColorAt(.35, QColor(255, 255, 255, 8));
-        sheen.setColorAt(1, QColor(20, 28, 40, 18));
-        painter.fillPath(shape, sheen);
-        painter.restore();
-        QLinearGradient rim(objectRect.topLeft(), objectRect.bottomRight());
-        rim.setColorAt(0, QColor(255, 255, 255, 150));
-        rim.setColorAt(.5, QColor(255, 255, 255, 28));
-        rim.setColorAt(1, QColor(255, 255, 255, 95));
-        painter.setBrush(Qt::NoBrush);
-        painter.setPen(QPen(QBrush(rim), 1.0));
-        painter.drawRoundedRect(objectRect.adjusted(.6, .6, -.6, -.6),
-                                qMax<qreal>(0, radius - .6), qMax<qreal>(0, radius - .6));
-    }
-    painter.restore();
-}
-
 void QtGlassFlowScene::blitTextureToScreen(GLuint texture)
 {
     glDisable(GL_BLEND);
@@ -894,6 +652,7 @@ void QtGlassFlowScene::blitTextureToScreen(GLuint texture)
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, texture);
     m_blitShader->setUniformValue("u_texture", 0);
+    m_blitShader->setUniformValue("u_flipY", false);
     drawFullscreenQuad(m_blitShader);
     glBindTexture(GL_TEXTURE_2D, 0);
     m_blitShader->release();
@@ -922,6 +681,32 @@ void QtGlassFlowScene::renderGlassObject(int index)
     if (index < 0 || index >= m_objects.size() || !m_objects[index].visible)
         return;
     const GlassObject &object = m_objects[index];
+
+    // The fragment shader evaluates the SDF, connection union and refraction
+    // for every fragment of its fullscreen quad. Restrict it to the union of
+    // this object and its connected neighbours. The one-pixel expansion keeps
+    // analytic edge coverage identical at the scissor boundary.
+    QRectF drawBounds(object.position, object.size);
+    for (const Connection &connection : std::as_const(m_connections)) {
+        if (connection.objA != index && connection.objB != index)
+            continue;
+        const int other = connection.objA == index ? connection.objB : connection.objA;
+        if (other >= 0 && other < m_objects.size() && m_objects[other].visible)
+            drawBounds = drawBounds.united(QRectF(m_objects[other].position,
+                                                   m_objects[other].size));
+    }
+    const qreal deviceScale = devicePixelRatioF();
+    const int nativeWidth = qMax(1, qRound(width() * deviceScale));
+    const int nativeHeight = qMax(1, qRound(height() * deviceScale));
+    const int left = qMax(0, qFloor((drawBounds.left() - 1.5) * deviceScale));
+    const int top = qMax(0, qFloor((drawBounds.top() - 1.5) * deviceScale));
+    const int right = qMin(nativeWidth, qCeil((drawBounds.right() + 1.5) * deviceScale));
+    const int bottom = qMin(nativeHeight, qCeil((drawBounds.bottom() + 1.5) * deviceScale));
+    if (right <= left || bottom <= top)
+        return;
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(left, nativeHeight - bottom, right - left, bottom - top);
+
     const QPointF centerWidget(object.position.x() + object.size.width() * .5,
                                object.position.y() + object.size.height() * .5);
     const QPointF centerNdc = widgetToNdc(centerWidget);
@@ -937,20 +722,20 @@ void QtGlassFlowScene::renderGlassObject(int index)
     const float dpr = float(devicePixelRatioF());
     m_glassShader->setUniformValue("u_objHalfSizePx", QVector2D(float(object.size.width()) * dpr * .5f,
                                                                    float(object.size.height()) * dpr * .5f));
-    m_glassShader->setUniformValue("u_cornerRadiusPx", object.cornerRadius * dpr);
+    m_glassShader->setUniformValue("u_cornerRadiusPx", float(object.cornerRadius * dpr));
     m_glassShader->setUniformValue("u_powerFactor", power);
     m_glassShader->setUniformValue("u_a", m_refractionA);
     m_glassShader->setUniformValue("u_b", m_refractionB);
     m_glassShader->setUniformValue("u_c", m_refractionC);
     m_glassShader->setUniformValue("u_d", m_refractionD);
-    m_glassShader->setUniformValue("u_fPower", m_blurOnly ? 0.0f : m_fPower);
+    m_glassShader->setUniformValue("u_fPower", m_fPower);
     // Dither is useful at reduced resolution but its deterministic pixel
     // pattern can itself read as a fine grid. Fade it out with quality and
     // disable it completely at maximum quality, where the higher precision
     // sampling makes the trade-off unnecessary.
     const float ditherWeight = qBound(0.0f, (1.5f - m_renderScale) / 0.9f, 1.0f);
     const float dither = qMin(m_noiseAmount, 1.0f / 255.0f) * ditherWeight;
-    m_glassShader->setUniformValue("u_noise", m_blurOnly ? 0.0f : dither);
+    m_glassShader->setUniformValue("u_noise", dither);
     m_glassShader->setUniformValue("u_edgeAaScale",
                                    qBound(0.85f, 0.65f + m_renderScale * 0.45f, 1.30f));
     m_glassShader->setUniformValue("u_time", float(m_clock.elapsed()) * .001f);
@@ -997,6 +782,7 @@ void QtGlassFlowScene::renderGlassObject(int index)
     drawFullscreenQuad(m_glassShader);
     glBindTexture(GL_TEXTURE_2D, 0);
     m_glassShader->release();
+    glDisable(GL_SCISSOR_TEST);
 }
 
 void QtGlassFlowScene::updateConnections()
@@ -1042,14 +828,11 @@ void QtGlassFlowScene::paintGL()
     const int nativePixelHeight = qMax(1, qRound(height() * dpr));
     const int pixelWidth = qMax(1, qRound(nativePixelWidth * m_renderScale));
     const int pixelHeight = qMax(1, qRound(nativePixelHeight * m_renderScale));
-    const bool useCpu = m_effectiveRenderBackend == CpuBackend;
-    if (useCpu && m_sceneFbo)
-        destroyFBOs();
-    if (!useCpu && (!m_sceneFbo || m_sceneFbo->width() != pixelWidth
-                    || m_sceneFbo->height() != pixelHeight))
+    if (m_gpuReady && (!m_sceneFbo || m_sceneFbo->width() != pixelWidth
+                       || m_sceneFbo->height() != pixelHeight))
         createFBOs(pixelWidth, pixelHeight);
 
-    if (m_glassRenderingEnabled && !useCpu) {
+    if (m_glassRenderingEnabled && m_gpuReady) {
         if (m_bgDirty)
             loadBackgroundTexture();
         updateConnections();
@@ -1058,22 +841,16 @@ void QtGlassFlowScene::paintGL()
             runBlurPass();
             m_blurCacheDirty = false;
         }
-    } else if (useCpu) {
-        ensureCpuBackdrop();
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, defaultFramebufferObject());
     // The widget's default framebuffer remains native resolution. Only the
     // cached backdrop and blur passes use the reduced render target above.
     glViewport(0, 0, nativePixelWidth, nativePixelHeight);
+    glDisable(GL_SCISSOR_TEST);
     glClearColor(0, 0, 0, 0);
     glClear(GL_COLOR_BUFFER_BIT);
-    if (m_glassRenderingEnabled && useCpu) {
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing, true);
-        renderCpuGlass(painter);
-        painter.end();
-    } else if (m_glassRenderingEnabled) {
+    if (m_glassRenderingEnabled && m_gpuReady) {
         for (int i = 0; i < m_objects.size(); ++i)
             renderGlassObject(i);
     }
@@ -1081,7 +858,8 @@ void QtGlassFlowScene::paintGL()
 
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
-    painter.setRenderHint(QPainter::TextAntialiasing, true);
+    painter.setRenderHint(QPainter::TextAntialiasing,
+                          !(painter.font().styleStrategy() & QFont::NoAntialias));
     QFont font = painter.font();
     font.setPointSizeF(12.0);
     font.setBold(true);

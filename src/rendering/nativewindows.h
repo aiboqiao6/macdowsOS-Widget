@@ -36,6 +36,9 @@ int indexOf(const Stack& stack, WId id);
 void registerGlassWindow(WId id);
 void unregisterGlassWindow(WId id);
 bool isGlassWindow(WId id);
+// Cheap native preflight for WGC sources. Reject transient popup/tooltip and
+// protected HWNDs before GraphicsCapture.dll is asked to create a capture item.
+bool isCaptureCandidate(WId id);
 // True while a Windows screenshot/clipping surface owns the foreground.
 // This allows cards to become capturable for that short interval only.
 bool isSystemCaptureActive();
@@ -44,6 +47,8 @@ bool isSystemCaptureActive();
 HiddenWindows hideApplicationWindows(const QSet<WId>& preservedWindows);
 void restoreApplicationWindows(const HiddenWindows& windows);
 void placeDesktop(WId id);
+WId desktopInsertAfter(WId id);
+bool isAtDesktopLayer(WId id, const QSet<WId>& desktopWidgets);
 void placeDragging(WId id, WId panelAbove = 0);
 bool isTopmost(WId id);
 void observeTopology(QObject* context, std::function<void()> changed);

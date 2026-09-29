@@ -16,6 +16,7 @@ x86/
 [Rr]elease/
 artifacts/
 Generated Files/
+tests/build/
 
 # Compiler, debugger and Qt generated files
 *.obj

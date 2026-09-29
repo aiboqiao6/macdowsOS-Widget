@@ -37,6 +37,9 @@ public:
     static QImage captureDesktopComposite(QScreen* screen, const QRect& area,
                                           LiquidGlassWidget* excluded = nullptr,
                                           qreal renderScale = 1.0);
+    // Popup hosts can share lower-card composition without becoming a
+    // draggable desktop widget. The image must contain verified external pixels.
+    static void compositeDesktopGlass(QImage& image, const QRect& area, WId target = 0);
 
     void setGlassMargins(int horizontal, int vertical = -1);
     void setGlassRadius(qreal radius);
@@ -46,10 +49,6 @@ public:
                         int blurIterations = 3,
                         float noiseAmount = 0.012f);
 
-    // Material switch. Blur-only keeps the live desktop sampling path but
-    // disables refraction, avoiding DWM/OpenGL compositor artifacts.
-    void setSystemBlurEnabled(bool enabled);
-    bool systemBlurEnabled() const { return m_systemBlur; }
     void setMaterialBlurStrength(int percent);
     int materialBlurStrength() const { return m_blurStrength; }
     void setGlassOpacity(qreal opacity);
@@ -65,7 +64,7 @@ public:
     // backdrop mode samples the actual lower window stack as well, while the
     // capture compositor still removes this process' own glass surfaces to
     // prevent recursive glare.
-    void setLiveBackdropEnabled(bool enabled);
+    void setLiveBackdropEnabled(bool enabled, bool persist = true);
     bool liveBackdropEnabled() const { return m_liveBackdropEnabled; }
 
     // A quality change also changes the required backdrop resolution.  The
@@ -114,6 +113,7 @@ protected:
     // live surface follows the same display-refresh policy.
     int activeDisplayInterval() const;
     bool event(QEvent* event) override;
+    bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
     void moveEvent(QMoveEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void showEvent(QShowEvent* event) override;
@@ -128,7 +128,6 @@ private:
     void updateWindowMask();
     bool rebuildWallpaperCanvas(QScreen* screen);
     QImage wallpaperBackdrop(const QRect& area, qreal scale);
-    void applySystemBlurEffect();
     void updateMaterialParameters();
     void updateRefreshRate();
     bool hasOverlappingDesktopWidget() const;
@@ -141,7 +140,7 @@ private:
     static void refreshDragRendering();
     bool fullyOccluded() const;
     static void compositeGlassWindows(QImage& image, const QRect& area,
-                                      const LiquidGlassWidget* excluded);
+                                      const LiquidGlassWidget* excluded, WId target = 0);
     void updateWindowLayer();
     void finishWindowDrag();
 
@@ -150,7 +149,6 @@ private:
     int m_glassMarginsX = 0;
     int m_glassMarginsY = 0;
     qreal m_glassRadius = 30.0;
-    bool m_systemBlur = false;
     bool m_mouseThrough = false;
     bool m_lowPowerRefresh = false;
     bool m_liveBackdropEnabled = false;
@@ -166,7 +164,7 @@ private:
     bool m_captureExcluded = false;
     WId m_registeredGlassWindow = 0;
     bool m_systemCaptureActive = false;
-    bool m_capturePending = false;
+    int m_capturesInFlight = 0;
     quint64 m_captureGeneration = 0;
     DesktopCapture::Cache m_backdropCache;
     QImage m_compositeCanvas;

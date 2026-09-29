@@ -28,7 +28,6 @@ class QtGlassFlowScene : public QOpenGLWidget, protected QOpenGLFunctions
     Q_OBJECT
 public:
     enum State { Normal, Hovered, Pressed };
-    enum RenderBackend { AutoBackend, GpuBackend, CpuBackend };
 
     struct GlassObject {
         QPointF position;
@@ -71,8 +70,6 @@ public:
 
     void setGlassRenderingEnabled(bool enabled);
     bool glassRenderingEnabled() const { return m_glassRenderingEnabled; }
-    void setBlurOnlyEnabled(bool enabled);
-    bool blurOnlyEnabled() const { return m_blurOnly; }
     void setGlassOpacity(float opacity);
     float glassOpacity() const { return m_glassOpacity; }
     void setRefreshInterval(int intervalMs);
@@ -85,9 +82,6 @@ public:
     void setAnimationEnabled(bool enabled);
     void setContinuousRenderingEnabled(bool enabled);
     void setRenderingSuspended(bool suspended);
-    void setRenderBackend(RenderBackend backend);
-    RenderBackend renderBackend() const { return m_renderBackend; }
-    RenderBackend effectiveRenderBackend() const { return m_effectiveRenderBackend; }
     quint64 frameRevision() const { return m_frameRevision; }
     // Read the last completed frame without asking QOpenGLWidget to render
     // again. Cache one reduced, premultiplied image per visual revision.
@@ -125,6 +119,7 @@ protected:
     void leaveEvent(QEvent *event) override;
 
 private:
+    friend class WidgetRegression;
     bool compileProgram(QOpenGLShaderProgram *prog,
                         const QString &vertPath,
                         const QString &fragPath);
@@ -138,9 +133,6 @@ private:
     void runBlurPass();
     void blitTextureToScreen(GLuint tex);
     void renderGlassObject(int index);
-    void renderCpuGlass(QPainter &painter);
-    void ensureCpuBackdrop();
-    void updateEffectiveBackend();
     void updateConnections();
     void syncTimerCadence();
     void setBackgroundImageInternal(const QImage &image, bool alreadyFlipped);
@@ -172,13 +164,8 @@ private:
     bool m_bgImageAlreadyFlipped;
     bool m_bgDirty;
     bool m_glassRenderingEnabled;
-    bool m_blurOnly;
     float m_glassOpacity;
     bool m_blurCacheDirty;
-    bool m_cpuBackdropDirty;
-    QImage m_cpuBlurredImage;
-    RenderBackend m_renderBackend;
-    RenderBackend m_effectiveRenderBackend;
     float m_renderScale;
 
     QVector<GlassObject> m_objects;
@@ -195,6 +182,14 @@ private:
     float m_noiseAmount;
     float m_attractionDist;
     float m_globalPower;
+
+    // The Gaussian offsets only depend on the blur settings and render scale.
+    // Keep them across backdrop updates; live capture can otherwise rebuild
+    // the same exp() table once per frame.
+    float m_blurKernelSigma = -1.0f;
+    int m_blurKernelStride = 0;
+    QVector<QVector2D> m_blurKernelSamples;
+    float m_blurKernelCenterWeight = 1.0f;
 
     QTimer *m_timer;
     int m_refreshInterval;
