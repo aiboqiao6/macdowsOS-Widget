@@ -1,7 +1,4 @@
-// Modified for macdowsOS Widget on 2026-09-13.
-// Changes include reusable background input, adaptive frame scheduling,
-// reduced-resolution rendering, and desktop-widget integration.
-// Distributed under GNU GPL v3.0; see ../LICENSE.
+// 基于 QtGlassFlow 修改，增加背景输入、按需刷新与桌面集成。采用 GPL v3，见项目根目录 LICENSE。
 
 #include "qtglassflowscene.h"
 #include "renderdiagnostics.h"
@@ -23,10 +20,7 @@
 #include <cmath>
 
 namespace {
-// QPainter and native integrations can leave pixel-transfer state in this
-// context. CPU image pointers must never be interpreted as PBO offsets, and
-// QImage row padding must not become visible pixels. Restore the caller's state
-// so reading another glass surface is safe inside Qt's composition as well.
+// 保护像素传输状态，防止 CPU 指针被当作 PBO 偏移，或把图像行填充误读为像素。
 class PixelTransferScope final {
 public:
     PixelTransferScope(QOpenGLFunctions* gl, bool upload, int rowLength = 0)
@@ -101,9 +95,7 @@ QtGlassFlowScene::QtGlassFlowScene(QWidget *parent)
       m_bgImageAlreadyFlipped(false),
       m_glassRenderingEnabled(true), m_glassOpacity(1.0f),
       m_blurCacheDirty(true),
-      // Native resolution is the quality default. Users can explicitly pick
-      // a reduced scale on slower GPUs, but fractional-DPI screens should not
-      // silently start from an upscaled 60% glass buffer.
+      // 渲染器内部默认使用原生分辨率，应用可根据保存的画质设置覆盖。
       m_renderScale(1.0f), m_connectionsDirty(true),
       m_refractionA(0.7f), m_refractionB(2.3f), m_refractionC(5.2f),
       m_refractionD(6.9f), m_fPower(1.0f), m_blurRadius(2.0f),
@@ -122,16 +114,10 @@ QtGlassFlowScene::QtGlassFlowScene(QWidget *parent)
     fmt.setVersion(2, 1);
     fmt.setAlphaBufferSize(8);
     fmt.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
-    // QOpenGLWidget renders into an offscreen texture which is subsequently
-    // composed by Qt and DWM. Waiting for another swap interval here creates
-    // a second, serial vsync and can halve live-backdrop cadence.
+    // QOpenGLWidget 的结果由 Qt 与 DWM 合成，此处额外等待垂直同步会降低实时背景帧率。
     fmt.setSwapInterval(0);
     setFormat(fmt);
-    // Repaint the full transparent framebuffer on every scheduled frame.
-    // PartialUpdate can expose Qt's cleared backing texture after a framebuffer
-    // read or a DWM composition change, which appears as a one-frame white card.
-    // Other glass windows use m_surfaceSnapshot, so they do not rely on FBO
-    // preservation between paintGL calls.
+    // 每次完整重绘透明帧缓冲，避免 Qt 重组后暴露已清空纹理；下层读取使用独立快照缓存。
     setUpdateBehavior(QOpenGLWidget::NoPartialUpdate);
     connect(this, &QOpenGLWidget::frameSwapped, this, [this]() {
         if (isVisible() && m_continuousRendering && !m_renderingSuspended
@@ -154,6 +140,7 @@ void QtGlassFlowScene::cleanupGL()
     disconnect(context(), &QOpenGLContext::aboutToBeDestroyed,
                this, &QtGlassFlowScene::cleanupGL);
     makeCurrent();
+    m_textRenderer.clear();
     destroyFBOs();
     delete m_snapshotFbo;
     m_snapshotFbo = nullptr;
@@ -289,9 +276,7 @@ void QtGlassFlowScene::setGlassOpacity(float opacity)
 
 void QtGlassFlowScene::setRefreshInterval(int intervalMs)
 {
-    // High-refresh displays need intervals below 16 ms (120 Hz = 8 ms,
-    // 144 Hz = 6-7 ms, 240 Hz = 4 ms). Presentation is still vsync-bound by
-    // the surface format, so extra timer wakes are coalesced by Qt/DWM.
+    // 根据高刷新率显示器缩短间隔，最终呈现由 Qt 和 DWM 合并调度。
     m_refreshInterval = qBound(2, intervalMs, 1000);
     syncTimerCadence();
 }
@@ -338,11 +323,7 @@ void QtGlassFlowScene::syncTimerCadence()
         return;
     const bool interacting = m_externalInteraction || m_dragIndex >= 0
                              || m_continuousRendering;
-    // A static card has no time-varying pixels: all visual changes arrive via
-    // update() from an input/data event. Stop the timer completely in that
-    // state instead of waking the GUI and GPU five times per second. Animated
-    // cards (the clock) keep their low idle cadence, and interaction always
-    // restores the active display's requested cadence immediately.
+    // 静态组件由输入或数据变化触发重绘；动画和交互期间才运行场景定时器。
     if (!isVisible() || m_renderingSuspended || (!interacting && !m_animationEnabled)) {
         m_timer->stop();
         return;
@@ -350,8 +331,7 @@ void QtGlassFlowScene::syncTimerCadence()
 
     const int interval = interacting ? m_refreshInterval
                                      : qMax(m_refreshInterval, 64);
-    // Coarse wakeups are materially cheaper for an idle animation and do not
-    // affect pointer-driven rendering, which remains on a precise timer.
+    // 空闲动画使用粗略定时器节能，指针交互仍使用精确定时器。
     m_timer->setTimerType(interacting ? Qt::PreciseTimer : Qt::CoarseTimer);
     if (m_timer->interval() != interval)
         m_timer->setInterval(interval);
@@ -506,10 +486,7 @@ void QtGlassFlowScene::initializeGL()
                 update();
         });
     }
-    // syncTimerCadence() owns the timer lifecycle. In particular, static
-    // cards deliberately leave it stopped. Starting it unconditionally here
-    // would restart a newly-created QTimer at its default 0 ms interval and
-    // cause a tight repaint loop on every non-animated widget.
+    // 由 syncTimerCadence 统一管理定时器，避免静态组件意外以零间隔循环重绘。
     syncTimerCadence();
     m_clock.start();
     reportGlErrors("initialize");
@@ -548,9 +525,7 @@ void QtGlassFlowScene::resizeGL(int w, int h)
 void QtGlassFlowScene::showEvent(QShowEvent *event)
 {
     QOpenGLWidget::showEvent(event);
-    // A hidden QOpenGLWidget stops its scene timer completely. Re-evaluate the
-    // cadence when it becomes visible so animated cards resume at their normal
-    // rate while static cards remain event-driven and asleep.
+    // 窗口重新显示时恢复所需刷新节奏，静态组件继续按需重绘。
     syncTimerCadence();
 }
 
@@ -603,28 +578,19 @@ void QtGlassFlowScene::loadBackgroundTexture()
         qWarning() << "failed to load background image:" << m_bgPath;
         return;
     }
-    // Handle orientation in the background blit; upload the shared pixels
-    // directly instead of allocating/flipping an image on every update.
-    // DesktopCapture and wallpaperBackdrop are RGB32 images on Windows.
-    // Upload those buffers in their native BGRA layout instead of converting
-    // and copying the entire crop to RGBA on every update.  Keep conversion
-    // only for uncommon image formats that the OpenGL upload cannot consume
-    // directly.
+    // 上传原始共享像素，在背景绘制阶段处理方向；常用 BGRA 格式无需每帧转换或翻转。
     GLenum uploadFormat = GL_RGBA;
     GLenum uploadType = GL_UNSIGNED_BYTE;
     if (image.format() == QImage::Format_RGB32
         || image.format() == QImage::Format_ARGB32
         || image.format() == QImage::Format_ARGB32_Premultiplied) {
         uploadFormat = GL_BGRA;
-        // QImage's 32-bit formats are laid out as B,G,R,A bytes on the
-        // Windows little-endian targets supported here, so no per-pixel
-        // packing conversion is needed.
+        // Windows 小端平台的 QImage 32 位格式采用 BGRA 字节布局，可直接上传。
         uploadType = GL_UNSIGNED_BYTE;
     } else if (image.format() != QImage::Format_RGBA8888) {
         image = image.convertToFormat(QImage::Format_RGBA8888);
     }
-    // External QImages may have an arbitrary byte stride. Desktop OpenGL's
-    // ROW_LENGTH is measured in pixels, so repack only unrepresentable strides.
+    // 外部图像的行跨度可能不规则，仅在 GL 像素行长度无法表达时重新打包。
     if (image.bytesPerLine() % 4)
         image = image.copy();
     PixelTransferScope transfer(this, true, int(image.bytesPerLine() / 4));
@@ -638,8 +604,7 @@ void QtGlassFlowScene::loadBackgroundTexture()
     glBindTexture(GL_TEXTURE_2D, m_bgTexture);
     const bool sameSize = m_bgWidth == image.width() && m_bgHeight == image.height();
     if (sameSize) {
-        // Reuse the existing allocation for live backdrop updates. Reallocating
-        // a full texture on every drag frame causes avoidable driver stalls.
+        // 实时背景更新复用纹理存储，避免每帧分配造成驱动停顿。
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, image.width(), image.height(),
                         uploadFormat, uploadType, image.constBits());
     } else {
@@ -688,10 +653,7 @@ void QtGlassFlowScene::runBlurPass()
         return;
     m_blurShader->bind();
     m_blurShader->setUniformValue("u_resolution", QVector2D(float(m_sceneFbo->width()), float(m_sceneFbo->height())));
-    // Dilating a fixed seven-tap kernel leaves unsampled gaps and produces a
-    // lattice around highlights. High quality covers every texel, combining
-    // adjacent Gaussian taps with hardware linear filtering. Lower qualities
-    // explicitly trade sampling density for speed as well as FBO resolution.
+    // 高画质逐像素覆盖高斯核，并利用线性过滤合并相邻采样；低画质降低密度与 FBO 分辨率。
     const float sigma = qBound(0.01f, m_blurRadius * m_renderScale * 1.95f, 42.0f);
     const int stride = m_renderScale < .7f ? 4 : m_renderScale < .9f ? 3
                      : m_renderScale < 1.2f ? 2 : 1;
@@ -782,10 +744,7 @@ void QtGlassFlowScene::renderGlassObject(int index)
         return;
     const GlassObject &object = m_objects[index];
 
-    // The fragment shader evaluates the SDF, connection union and refraction
-    // for every fragment of its fullscreen quad. Restrict it to the union of
-    // this object and its connected neighbours. The one-pixel expansion keeps
-    // analytic edge coverage identical at the scissor boundary.
+    // 将片元绘制限制在当前对象及相连对象的并集，额外扩展一像素以保留边缘覆盖率。
     QRectF drawBounds(object.position, object.size);
     for (const Connection &connection : std::as_const(m_connections)) {
         if (connection.objA != index && connection.objB != index)
@@ -829,10 +788,7 @@ void QtGlassFlowScene::renderGlassObject(int index)
     m_glassShader->setUniformValue("u_c", m_refractionC);
     m_glassShader->setUniformValue("u_d", m_refractionD);
     m_glassShader->setUniformValue("u_fPower", m_fPower);
-    // Dither is useful at reduced resolution but its deterministic pixel
-    // pattern can itself read as a fine grid. Fade it out with quality and
-    // disable it completely at maximum quality, where the higher precision
-    // sampling makes the trade-off unnecessary.
+    // 降低高画质抖动强度，最高画质关闭抖动，避免确定性像素图案形成细网格。
     const float ditherWeight = qBound(0.0f, (1.5f - m_renderScale) / 0.9f, 1.0f);
     const float dither = qMin(m_noiseAmount, 1.0f / 255.0f) * ditherWeight;
     m_glassShader->setUniformValue("u_noise", dither);
@@ -919,10 +875,7 @@ void QtGlassFlowScene::updateConnections()
 
 void QtGlassFlowScene::paintGL()
 {
-    // Suspension stops scheduling/capture, not paints requested by Qt. With
-    // NoPartialUpdate Qt may discard the FBO before an expose or DWM recompose;
-    // returning here presents undefined pixels (or a blank transparent card).
-    // Always rebuild a requested frame from the cached backdrop and overlay.
+    // 暂停只停止自动调度；Qt 主动请求绘制时仍须完整重建帧，避免呈现失效 FBO 内容。
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_STENCIL_TEST);
     glDisable(GL_CULL_FACE);
@@ -951,8 +904,7 @@ void QtGlassFlowScene::paintGL()
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, defaultFramebufferObject());
-    // The widget's default framebuffer remains native resolution. Only the
-    // cached backdrop and blur passes use the reduced render target above.
+    // 最终帧缓冲始终使用屏幕原生分辨率，仅背景和模糊缓存随画质缩放。
     glViewport(0, 0, nativePixelWidth, nativePixelHeight);
     glDisable(GL_SCISSOR_TEST);
     glClearColor(0, 0, 0, 0);
@@ -964,6 +916,7 @@ void QtGlassFlowScene::paintGL()
     glDisable(GL_BLEND);
     reportGlErrors("glass-paint");
 
+    m_textRenderer.begin(this, QSize(nativePixelWidth, nativePixelHeight));
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::TextAntialiasing,
@@ -984,6 +937,7 @@ void QtGlassFlowScene::paintGL()
     }
     paintOverlay(painter);
     painter.end();
+    m_textRenderer.end();
     reportGlErrors("overlay-paint");
     ++m_frameRevision;
     if (RenderDiagnostics::enabled() && m_diagnosticsClock.elapsed() >= 5000) {
@@ -1008,8 +962,7 @@ QImage QtGlassFlowScene::surfaceSnapshot()
 
     QOpenGLContext* previous = QOpenGLContext::currentContext();
     QSurface* previousSurface = previous ? previous->surface() : nullptr;
-    // QOpenGLWidget::makeCurrent() also binds its default FBO. When already
-    // inside this context, preserve the caller's offscreen target first.
+    // makeCurrent 会绑定默认 FBO；已处于此上下文时先保留调用者的离屏目标。
     if (previous != context())
         makeCurrent();
     if (QOpenGLContext::currentContext() != context())
@@ -1019,10 +972,7 @@ QImage QtGlassFlowScene::surfaceSnapshot()
         return m_surfaceSnapshot;
     }
     const QSize native(qRound(width() * devicePixelRatioF()), qRound(height() * devicePixelRatioF()));
-    // The visible framebuffer is already at native device resolution. Never
-    // enlarge this snapshot: doing so adds no detail and forces overlapping
-    // cards through a needless upsample/downsample cycle. RenderScale > 1 is
-    // applied to the glass/background FBOs before their native resolve.
+    // 快照不放大原生帧缓冲；超采样只用于玻璃与背景处理，避免重叠卡片重复缩放。
     const QSize reduced(qMax(1, qRound(native.width() * qMin(1.0f, m_renderScale))),
                         qMax(1, qRound(native.height() * qMin(1.0f, m_renderScale))));
     QSize readSize = native;

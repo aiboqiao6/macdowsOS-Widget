@@ -25,8 +25,7 @@ public:
         timer.setSingleShot(true);
         connect(&timer, &QTimer::timeout, this, [this]() {
             NativeWindows::invalidate();
-            // Callbacks can create/destroy other windows. Iterate a copy and
-            // guard each receiver, as Qt does for signal delivery.
+            // 回调可能创建或销毁窗口，遍历副本并验证接收对象仍然存活。
             const auto pending = listeners;
             for (const auto& listener : pending)
                 if (listener.first) listener.second();
@@ -91,8 +90,7 @@ NativeWindows::Stack NativeWindows::snapshot()
 {
     Stack stack;
 #ifdef Q_OS_WIN
-    // EnumWindows is safe when other processes reorder/destroy windows.
-    // A GetWindow(GW_HWNDNEXT) walk can revisit an HWND indefinitely.
+    // 使用 EnumWindows 避免并发重排窗口时沿句柄链循环遍历。
     EnumWindows([](HWND window, LPARAM parameter) -> BOOL {
         auto& stack = *reinterpret_cast<Stack*>(parameter);
         using GetAttribute = HRESULT (WINAPI *)(HWND, DWORD, PVOID, DWORD);
@@ -108,10 +106,7 @@ NativeWindows::Stack NativeWindows::snapshot()
             return TRUE;
         wchar_t name[128]{};
         GetClassNameW(window, name, 128);
-        // Windows may create a separate SysShadow HWND behind a popup even
-        // when Qt requests NoDropShadowWindowHint. It is decoration, not an
-        // independent content layer; WGC returns an opaque black rectangle
-        // for it. Including it hides the real backdrop below glass menus.
+        // 系统菜单阴影是装饰窗口，WGC 可能返回黑色矩形，不能把它当作独立内容层。
         if (wcscmp(name, L"SysShadow") == 0)
             return TRUE;
         const bool desktop = window == GetShellWindow() || wcscmp(name, L"Progman") == 0
@@ -119,10 +114,7 @@ NativeWindows::Stack NativeWindows::snapshot()
         const LONG_PTR style = GetWindowLongPtrW(window, GWL_EXSTYLE);
         DWORD affinity = 0;
         GetWindowDisplayAffinity(window, &affinity);
-        // Glass surfaces are kept out of our own desktop sampler through a
-        // process-local registry.  They remain capturable by Snipping Tool,
-        // Game Bar and other system screenshot/recording APIs because their
-        // native display affinity is no longer WDA_EXCLUDEFROMCAPTURE.
+        // 进程内注册表只排除自身背景采样，系统截图和录屏仍可正常捕获玻璃窗口。
         const bool excluded = affinity != 0
                               || NativeWindows::isGlassWindow(reinterpret_cast<WId>(window))
                               || !NativeWindows::isCaptureCandidate(reinterpret_cast<WId>(window));
@@ -189,8 +181,7 @@ bool NativeWindows::isCaptureCandidate(WId id)
     if (!GetClassNameW(window, name, int(std::size(name))))
         return false;
     const QString windowClass = QString::fromWCharArray(name);
-    // WGC can throw internally before returning HRESULT for these transient
-    // HWNDs. In particular, QComboBox creates a separate Qt Popup HWND.
+    // WGC 可能对短暂存在的弹出窗口抛出内部异常，创建捕获项前先排除这些句柄。
     return windowClass != QStringLiteral("SysShadow")
         && windowClass != QStringLiteral("#32768")
         && windowClass != QStringLiteral("ComboLBox")
@@ -279,10 +270,7 @@ NativeWindows::HiddenWindows NativeWindows::hideApplicationWindows(
                 && !(extendedStyle & WS_EX_APPWINDOW)))
             return TRUE;
 
-        // Captioned windows and explicit app windows are the user-facing
-        // top-level windows. Skipping anonymous popup/overlay HWNDs prevents
-        // tooltips, input surfaces and shell implementation windows from
-        // being mistaken for applications.
+        // 只将带标题或显式应用标记的顶层窗口视为用户应用，避免隐藏提示和输入覆盖层。
         if (!(style & WS_CAPTION) && !(extendedStyle & WS_EX_APPWINDOW))
             return TRUE;
 
@@ -310,9 +298,7 @@ NativeWindows::HiddenWindows NativeWindows::hideApplicationWindows(
 void NativeWindows::restoreApplicationWindows(const HiddenWindows& windows)
 {
 #ifdef Q_OS_WIN
-    // Restore bottom-to-top to retain the relative stacking order captured by
-    // EnumWindows. SWP_SHOWWINDOW preserves the window's existing normal or
-    // maximized placement without activating it, unlike ShowWindow(SW_SHOW).
+    // 从底到顶恢复窗口并保留原有普通或最大化状态，不抢夺焦点。
     for (auto it = windows.crbegin(); it != windows.crend(); ++it) {
         const HWND window = reinterpret_cast<HWND>(it->id);
         if (!IsWindow(window))
@@ -349,8 +335,7 @@ bool NativeWindows::isTopmost(WId id)
 WId NativeWindows::desktopInsertAfter(WId id)
 {
 #ifdef Q_OS_WIN
-    // Never insert after a topmost HWND: Windows would promote this window
-    // back into the topmost band, even immediately after HWND_NOTOPMOST.
+    // 不能插入置顶窗口之后，否则 Windows 会将卡片重新提升至置顶层。
     HWND previousNormal = HWND_NOTOPMOST;
     HWND after = HWND_BOTTOM;
     for (const Window& entry : snapshot()) {
@@ -374,8 +359,7 @@ bool NativeWindows::isAtDesktopLayer(WId id, const QSet<WId>& desktopWidgets)
     if (index < 0 || stack.at(index).topmost)
         return false;
     for (int i = 0; i < index; ++i)
-        // A topmost shell overlay cannot be overtaken by a bottom-layer card.
-        // Do not start an endless repair cycle while such an overlay is shown.
+        // 置顶桌面覆盖层存在时跳过无法完成的层级修复，避免无限重试。
         if (stack.at(i).desktop && !stack.at(i).topmost)
             return false;
     for (int i = index + 1; i < stack.size(); ++i) {
@@ -397,8 +381,7 @@ void NativeWindows::placeDesktop(WId id)
 #ifdef Q_OS_WIN
     const HWND window = reinterpret_cast<HWND>(id);
     constexpr UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
-    // Insert directly into the desktop band. An unconditional NOTOPMOST
-    // first moves an already-normal card to the front of all normal apps.
+    // 直接插入桌面层，避免先取消置顶时短暂盖住普通应用。
     const HWND anchor = reinterpret_cast<HWND>(desktopInsertAfter(id));
     if (!SetWindowPos(window, anchor, 0, 0, 0, 0, flags)) {
         const DWORD error = GetLastError();
@@ -408,7 +391,7 @@ void NativeWindows::placeDesktop(WId id)
             QString("operation=desktop error=%1 anchor=0x%2 anchorPid=%3")
                 .arg(error).arg(reinterpret_cast<quintptr>(anchor), 0, 16).arg(anchorProcess), 10000);
     }
-    // An anchor can be promoted concurrently by another process.
+    // 其他进程可能同时提升锚点窗口，需要再次检查。
     if (isTopmost(id))
         SetWindowPos(window, HWND_BOTTOM, 0, 0, 0, 0, flags);
 #else

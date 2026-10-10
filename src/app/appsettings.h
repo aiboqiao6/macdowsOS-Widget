@@ -12,9 +12,7 @@
 #include <QVariant>
 #include <QHash>
 
-// Application preferences live alongside the layout in widgets.json. Each
-// instance reads the latest file, and sync merges only changed keys so a
-// layout save cannot overwrite settings (or vice versa).
+// 偏好设置与组件布局共存于 widgets.json；同步时只合并修改过的键，避免相互覆盖。
 class AppSettings final
 {
 public:
@@ -25,7 +23,7 @@ public:
         if (file.open(QIODevice::ReadOnly))
             m_root = QJsonDocument::fromJson(file.readAll()).object();
         if (!fileExists)
-            return; // A read must not create the first-run marker.
+            return; // 只读操作不能创建首次运行标记。
 
         const QJsonObject saved = m_root.value(QStringLiteral("settings")).toObject();
         m_removeLegacyBlur = saved.value(QStringLiteral("appearance"))
@@ -147,7 +145,7 @@ private:
             {QStringLiteral("appearance/blurStrength"), 50},
             {QStringLiteral("appearance/opacity"), 1.0},
             {QStringLiteral("appearance/liveBackdrop"), true},
-            {QStringLiteral("appearance/fontSmoothing"), 2},
+            {QStringLiteral("appearance/fontSmoothing"), 4},
             {QStringLiteral("interaction/mouseThrough"), false},
             {QStringLiteral("interaction/lowPowerRefresh"), false},
             {QStringLiteral("performance/renderScale"), 0.60},

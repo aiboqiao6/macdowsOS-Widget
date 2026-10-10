@@ -1,5 +1,6 @@
 #include "ui/widgetlibrarydialog.h"
-#include "widgets/batterywidget.h"
+#include "widgets/desktopwidget.h"
+#include "media/systemmediasession.h"
 #include "rendering/responsivelayout.h"
 #include "app/appsettings.h"
 
@@ -10,7 +11,7 @@
 #include <QFrame>
 #include <QGridLayout>
 #include <QGuiApplication>
-#include <QHash>
+#include <QCache>
 #include <QIconEngine>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -43,16 +44,15 @@
 
 namespace {
 
-// Enlarge the gallery surface independently of its controls and previews.
-// The available desktop work area still bounds the final window geometry.
+// 图库表面与内容分别缩放，最终窗口尺寸受桌面工作区限制。
 constexpr int kGalleryWidth = 1320 * 3 / 2;
 constexpr int kGalleryHeight = 800 * 3 / 2;
 constexpr qreal kGalleryContentZoom = 1.5;
 
-void paintNavIcon(QPainter& p, const QRectF& bounds, int category)
+void paintNavIcon(QPainter& painter, const QRectF& bounds, int category)
 {
-    p.save();
-    p.setRenderHint(QPainter::Antialiasing, true);
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
     const qreal inset = qMin(bounds.width(), bounds.height()) * .1;
     const QRectF canvas = bounds.adjusted(inset, inset, -inset, -inset);
     const ResponsiveLayout::Metrics metrics(canvas);
@@ -61,36 +61,42 @@ void paintNavIcon(QPainter& p, const QRectF& bounds, int category)
                       : category == 3 ? QColor(220, 229, 244, 245)
                       : category == 4 ? QColor(229, 157, 245, 245)
                                       : QColor(198, 185, 255, 245);
-    p.setPen(QPen(ink, metrics.stroke(p, .075), Qt::SolidLine,
+    painter.setPen(QPen(ink, metrics.stroke(painter, .075), Qt::SolidLine,
                   Qt::RoundCap, Qt::RoundJoin));
-    p.setBrush(Qt::NoBrush);
+    painter.setBrush(Qt::NoBrush);
     if (category == 1) {
-        p.drawRoundedRect(metrics.rect(.16, .30, .62, .40), metrics.size(.08), metrics.size(.08));
-        p.drawLine(metrics.point(.78, .42), metrics.point(.88, .42));
-        p.drawLine(metrics.point(.78, .58), metrics.point(.88, .58));
+        painter.drawRoundedRect(metrics.rect(.16, .30, .62, .40), metrics.size(.08), metrics.size(.08));
+        painter.drawLine(metrics.point(.78, .42), metrics.point(.88, .42));
+        painter.drawLine(metrics.point(.78, .58), metrics.point(.88, .58));
     } else if (category == 2) {
-        p.drawArc(metrics.rect(.20, .38, .40, .34), 35 * 16, 250 * 16);
-        p.drawArc(metrics.rect(.42, .27, .38, .45), 120 * 16, 220 * 16);
-        p.drawLine(metrics.point(.18, .72), metrics.point(.84, .72));
-        p.drawLine(metrics.point(.28, .82), metrics.point(.72, .82));
+        painter.drawArc(metrics.rect(.20, .38, .40, .34), 35 * 16, 250 * 16);
+        painter.drawArc(metrics.rect(.42, .27, .38, .45), 120 * 16, 220 * 16);
+        painter.drawLine(metrics.point(.18, .72), metrics.point(.84, .72));
+        painter.drawLine(metrics.point(.28, .82), metrics.point(.72, .82));
     } else if (category == 3) {
-        p.drawEllipse(metrics.rect(.15, .15, .70, .70));
-        p.drawLine(metrics.point(.50, .50), metrics.point(.50, .29));
-        p.drawLine(metrics.point(.50, .50), metrics.point(.67, .61));
+        painter.drawEllipse(metrics.rect(.15, .15, .70, .70));
+        painter.drawLine(metrics.point(.50, .50), metrics.point(.50, .29));
+        painter.drawLine(metrics.point(.50, .50), metrics.point(.67, .61));
     } else if (category == 4) {
-        p.drawLine(metrics.point(.17, .27), metrics.point(.50, .43));
-        p.drawLine(metrics.point(.83, .27), metrics.point(.50, .43));
-        p.drawLine(metrics.point(.17, .27), metrics.point(.17, .73));
-        p.drawLine(metrics.point(.83, .27), metrics.point(.83, .73));
-        p.drawLine(metrics.point(.17, .73), metrics.point(.50, .57));
-        p.drawLine(metrics.point(.83, .73), metrics.point(.50, .57));
+        painter.drawLine(metrics.point(.17, .27), metrics.point(.50, .43));
+        painter.drawLine(metrics.point(.83, .27), metrics.point(.50, .43));
+        painter.drawLine(metrics.point(.17, .27), metrics.point(.17, .73));
+        painter.drawLine(metrics.point(.83, .27), metrics.point(.83, .73));
+        painter.drawLine(metrics.point(.17, .73), metrics.point(.50, .57));
+        painter.drawLine(metrics.point(.83, .73), metrics.point(.50, .57));
+    } else if (category == 5) {
+        painter.drawLine(metrics.point(.43, .23), metrics.point(.43, .70));
+        painter.drawLine(metrics.point(.43, .23), metrics.point(.73, .15));
+        painter.drawLine(metrics.point(.73, .15), metrics.point(.73, .61));
+        painter.drawEllipse(metrics.rect(.23, .62, .20, .15));
+        painter.drawEllipse(metrics.rect(.53, .53, .20, .15));
     } else {
-        p.drawRoundedRect(metrics.rect(.16, .16, .28, .28), 2, 2);
-        p.drawRoundedRect(metrics.rect(.56, .16, .28, .28), 2, 2);
-        p.drawRoundedRect(metrics.rect(.16, .56, .28, .28), 2, 2);
-        p.drawRoundedRect(metrics.rect(.56, .56, .28, .28), 2, 2);
+        painter.drawRoundedRect(metrics.rect(.16, .16, .28, .28), 2, 2);
+        painter.drawRoundedRect(metrics.rect(.56, .16, .28, .28), 2, 2);
+        painter.drawRoundedRect(metrics.rect(.16, .56, .28, .28), 2, 2);
+        painter.drawRoundedRect(metrics.rect(.56, .56, .28, .28), 2, 2);
     }
-    p.restore();
+    painter.restore();
 }
 
 class NavIconEngine final : public QIconEngine
@@ -124,9 +130,9 @@ QIcon makeNavIcon(int category)
     return QIcon(new NavIconEngine(category));
 }
 
-QHash<QString, QImage>& previewCache()
+QCache<QString, QImage>& previewCache()
 {
-    static QHash<QString, QImage> cache;
+    static QCache<QString, QImage> cache(32 * 1024);
     return cache;
 }
 
@@ -135,8 +141,8 @@ class DragTile final : public QFrame
 public:
     DragTile(const QString& title, const QString& subtitle, int kind,
              int variant, int category, WidgetLibraryDialog* owner, qreal scale)
-        : QFrame(owner), m_title(title), m_subtitle(subtitle), m_kind(kind),
-          m_variant(variant), m_category(category), m_owner(owner), m_scale(scale)
+        : QFrame(owner), m_title(title), m_subtitle(subtitle), m_cardKind(kind),
+          m_cardVariant(variant), m_category(category), m_owner(owner), m_scale(scale)
     {
         setObjectName(QStringLiteral("widgetTile"));
         setProperty("tileTitle", title);
@@ -144,9 +150,13 @@ public:
         setAttribute(Qt::WA_Hover, true);
         setCursor(Qt::OpenHandCursor);
         m_press = QPoint(-1, -1);
-        // The preview paints the real payload into an image without exposing
-        // an OpenGL window. Cache it at this tile's actual screen density.
+        // 复用真实组件内容绘制预览，按当前屏幕像素密度缓存，不显示 GL 窗口。
         refreshPreview();
+        if (m_cardKind == int(DesktopWidget::CardKind::Music)) {
+            connect(SystemMediaSession::instance(), &SystemMediaSession::changed, this, [this] {
+                if (isVisible()) refreshPreview();
+            });
+        }
     }
 
     void setScale(qreal scale)
@@ -163,12 +173,18 @@ public:
         const QSize previewSize(204, 128);
         const qreal dpr = devicePixelRatioF() * m_scale;
         const QString key = QStringLiteral("%1:%2:%3x%4:%5:%6")
-            .arg(m_kind).arg(m_variant).arg(previewSize.width()).arg(previewSize.height())
-            .arg(dpr, 0, 'g', 12).arg(BatteryWidget::globalFontSmoothing());
-        if (!previewCache().contains(key))
-            previewCache().insert(key, BatteryWidget::renderPreview(
-                static_cast<BatteryWidget::CardKind>(m_kind), m_variant, previewSize, dpr));
-        m_preview = previewCache().value(key);
+            .arg(m_cardKind).arg(m_cardVariant).arg(previewSize.width()).arg(previewSize.height())
+            .arg(dpr, 0, 'g', 12).arg(DesktopWidget::globalFontSmoothing());
+        if (m_cardKind == int(DesktopWidget::CardKind::Music))
+            previewCache().remove(key);
+        if (const auto* cached = previewCache().object(key)) {
+            m_preview = *cached;
+        } else {
+            m_preview = DesktopWidget::renderPreview(
+                static_cast<DesktopWidget::CardKind>(m_cardKind), m_cardVariant, previewSize, dpr);
+            const int cost = qMax(1, int((m_preview.sizeInBytes() + 1023) / 1024));
+            previewCache().insert(key, new QImage(m_preview), cost);
+        }
         update();
     }
 
@@ -183,172 +199,46 @@ protected:
 
     void paintEvent(QPaintEvent*) override
     {
-        QPainter p(this);
-        p.scale(m_scale, m_scale);
-        p.setRenderHint(QPainter::Antialiasing);
-        p.setRenderHint(QPainter::TextAntialiasing,
-                        BatteryWidget::globalFontSmoothing() > 0);
-        p.setRenderHint(QPainter::SmoothPixmapTransform);
-        // The gallery itself owns the single liquid-glass surface. A tile is
-        // intentionally chrome-free so previews float directly on that pane,
-        // matching the reference: no second rounded card or duplicate rim.
+        QPainter painter(this);
+        painter.scale(m_scale, m_scale);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setRenderHint(QPainter::TextAntialiasing,
+                        DesktopWidget::globalFontSmoothing() > 0);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        // 图库共用一个玻璃表面，预览项不叠加额外外框。
         const QRectF preview(8, 2, 204, 128);
-        const ResponsiveLayout::Metrics previewMetrics(preview);
         if (!m_preview.isNull()) {
-            const QTransform device = p.deviceTransform();
+            const QTransform device = painter.deviceTransform();
             const QPointF origin = preview.center()
                 - QPointF(m_preview.deviceIndependentSize().width() * .5,
                           m_preview.deviceIndependentSize().height() * .5);
             const QPoint pixelOrigin = device.map(origin).toPoint();
-            p.save();
-            p.setRenderHint(QPainter::SmoothPixmapTransform, false);
-            p.drawImage(device.inverted().map(QPointF(pixelOrigin)), m_preview);
-            p.restore();
+            painter.save();
+            painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+            painter.drawImage(device.inverted().map(QPointF(pixelOrigin)), m_preview);
+            painter.restore();
         } else {
-        const auto text = [&p](const QRectF& r, const QString& value, int size,
-                               const QColor& color, QFont::Weight weight = QFont::Normal,
-                               Qt::Alignment align = Qt::AlignCenter) {
-            QFont font = qApp->font();
-            font.setPixelSize(size);
-            font.setWeight(weight);
-            BatteryWidget::applyFontSmoothing(font);
-            p.setPen(color); p.setFont(font);
-            ResponsiveLayout::drawSingleLine(p, r, align, value);
-        };
-        const auto ring = [&p](const QPointF& c, qreal radius, int percent) {
-            const QRectF bounds(c.x() - radius, c.y() - radius,
-                                radius * 2.0, radius * 2.0);
-            const ResponsiveLayout::Metrics metrics(bounds);
-            const qreal stroke = metrics.stroke(p, .12);
-            p.setBrush(Qt::NoBrush);
-            p.setPen(QPen(QColor(235,244,255,55), stroke));
-            p.drawEllipse(c, radius, radius);
-            p.setPen(QPen(QColor(255,255,255,235), stroke));
-            p.drawArc(bounds, 90 * 16, -qRound(percent * 3.6) * 16);
-        };
-        const auto clock = [&p](const QPointF& c, qreal radius, bool dark) {
-            const QRectF bounds(c.x() - radius, c.y() - radius,
-                                radius * 2.0, radius * 2.0);
-            const ResponsiveLayout::Metrics metrics(bounds);
-            p.setBrush(dark ? QColor(30,34,42,238) : QColor(248,249,251,242));
-            p.setPen(QPen(dark ? QColor(255,255,255,55) : QColor(205,211,220,220),
-                          metrics.stroke(p, .014)));
-            p.drawEllipse(c,radius,radius);
-            p.setPen(QPen(dark ? QColor(238,243,250,235) : QColor(56,62,72,200),
-                          metrics.stroke(p, .018)));
-            for(int i=0;i<12;++i){ const qreal a=i*M_PI/6-M_PI/2; p.drawLine(c+QPointF(std::cos(a),std::sin(a))*(radius*.70),c+QPointF(std::cos(a),std::sin(a))*(radius*.88)); }
-            p.drawLine(c,c+QPointF(0,-radius*.45)); p.drawLine(c,c+QPointF(radius*.35,radius*.2));
-            p.setBrush(QColor(247,170,119,235)); p.drawEllipse(c,2.5,2.5);
-        };
-        if (m_kind == 0) {
-            if (m_variant == 1) { for(int i=0;i<3;++i) ring(QPointF(preview.left()+40+i*64,preview.center().y()-3),21,95-i*17); text(preview.adjusted(0,82,0,-2),QStringLiteral("已连接设备"),9,QColor(200,215,237,190)); }
-            else if (m_variant == 2) {
-                const QRectF list = preview.adjusted(26, 17, -26, -14);
-                const auto listRow = [&p, &text](const QRectF& area, const QString& name,
-                                                  const QString& value, bool mouse) {
-                    const ResponsiveLayout::Metrics rowMetrics(area);
-                    p.setPen(QPen(QColor(241, 247, 255, 215),
-                                  rowMetrics.stroke(p, .018)));
-                    p.setBrush(Qt::NoBrush);
-                    if (!mouse) {
-                        p.drawRoundedRect(QRectF(area.left(), area.center().y() - 4, 11, 8), 1, 1);
-                        p.drawLine(QPointF(area.left() - 2, area.center().y() + 6),
-                                   QPointF(area.left() + 13, area.center().y() + 6));
-                    } else {
-                        p.drawRoundedRect(QRectF(area.left() + 1, area.center().y() - 6, 8, 13), 3, 3);
-                        p.drawLine(QPointF(area.left() + 5, area.center().y() - 4),
-                                   QPointF(area.left() + 5, area.center().y() - 1));
-                    }
-                    text(QRectF(area.left() + 20, area.top(), area.width() - 76, area.height()), name, 8,
-                         QColor(246, 250, 255, 225), QFont::DemiBold, Qt::AlignLeft | Qt::AlignVCenter);
-                    text(QRectF(area.right() - 45, area.top(), 26, area.height()), value, 8,
-                         QColor(246, 250, 255, 225), QFont::Normal, Qt::AlignRight | Qt::AlignVCenter);
-                    p.setPen(QPen(QColor(255, 255, 255, 235),
-                                  rowMetrics.stroke(p, .018)));
-                    p.drawRoundedRect(QRectF(area.right() - 15, area.center().y() - 2.5, 10, 5), 1.5, 1.5);
-                    p.drawLine(QPointF(area.right() - 4, area.center().y() - 1),
-                               QPointF(area.right() - 2, area.center().y() - 1));
-                };
-                listRow(QRectF(list.left(), list.top(), list.width(), 29), QStringLiteral("本机"), QStringLiteral("—"), false);
-                ResponsiveLayout::drawLine(
-                    p, previewMetrics,
-                    QPointF(list.left(), list.top() + list.height() * .36),
-                    QPointF(list.right(), list.top() + list.height() * .36),
-                    QColor(255,255,255,38), .008, Qt::FlatCap);
-                listRow(QRectF(list.left(), list.top()+42, list.width(), 29), QStringLiteral("已连接设备"), QStringLiteral("—"), true);
-            }
-            else { p.setPen(QPen(QColor(225,235,247,195),2)); p.setBrush(QColor(225,235,247,48)); p.drawRoundedRect(QRectF(preview.left()+22,preview.top()+31,72,36),8,8); text(preview.adjusted(104,22,-8,-27),QStringLiteral("95%"),28,QColor(248,252,255,240),QFont::DemiBold); text(preview.adjusted(104,68,-8,-7),QStringLiteral("电池电量"),10,QColor(174,190,214,205)); }
-        } else if (m_kind == 1) {
-            text(QRectF(preview.left() + 10, preview.top() + 4, 100, 20),
-                 QStringLiteral("实时地区"), 9, QColor(226, 234, 246, 220),
-                 QFont::DemiBold, Qt::AlignLeft | Qt::AlignVCenter);
-            text(QRectF(preview.left() + 10, preview.top() + 25, 92, 46),
-                 QStringLiteral("--°"), 28, QColor(250, 252, 255, 242),
-                 QFont::Normal, Qt::AlignLeft | Qt::AlignVCenter);
-            p.setPen(QPen(QColor(244, 247, 251, 225), 1.4));
-            p.setBrush(QColor(244, 247, 251, 225));
-            p.drawEllipse(QPointF(preview.right() - 39, preview.top() + 36), 7, 7);
-            p.drawRoundedRect(QRectF(preview.right() - 61, preview.top() + 43, 43, 15), 7, 7);
-            if (m_variant == 1) {
-                for (int i = 0; i < 6; ++i) {
-                    const qreal x = preview.left() + 18 + i * 34;
-                    text(QRectF(x - 13, preview.top() + 76, 26, 15),
-                         QStringLiteral("时"), 7, QColor(185, 197, 217, 195));
-                    p.drawEllipse(QPointF(x, preview.top() + 99), 5, 3.5);
-                    text(QRectF(x - 13, preview.top() + 106, 26, 14),
-                         QStringLiteral("--°"), 7, QColor(226, 233, 245, 215));
-                }
-            } else if (m_variant == 2) {
-                ResponsiveLayout::drawLine(
-                    p, previewMetrics,
-                    QPointF(preview.left() + preview.width() * .05,
-                            preview.top() + preview.height() * .55),
-                    QPointF(preview.right() - preview.width() * .05,
-                            preview.top() + preview.height() * .55),
-                    QColor(255, 255, 255, 42), .008, Qt::FlatCap);
-                for (int i = 0; i < 3; ++i) {
-                    text(QRectF(preview.left() + 10, preview.top() + 76 + i * 17, 42, 14),
-                         QStringLiteral("周%1").arg(i + 3), 7,
-                         QColor(207, 216, 231, 205), QFont::DemiBold,
-                         Qt::AlignLeft | Qt::AlignVCenter);
-                    p.setPen(QPen(QColor(235, 240, 248, 150),
-                                  previewMetrics.stroke(p, .017),
-                                  Qt::SolidLine, Qt::RoundCap));
-                    p.drawLine(preview.left() + 75, preview.top() + 83 + i * 17,
-                               preview.right() - 34, preview.top() + 83 + i * 17);
-                }
-            } else {
-                text(QRectF(preview.left() + 10, preview.bottom() - 30,
-                            preview.width() - 20, 18), QStringLiteral("最高 --°   最低 --°"),
-                     8, QColor(190, 202, 222, 200), QFont::Normal,
-                     Qt::AlignLeft | Qt::AlignVCenter);
-            }
-        } else if (m_kind == 2) {
-            if (m_variant == 2 || m_variant == 8) { text(preview.adjusted(18,24,-18,-39),QStringLiteral("05:52"),25,QColor(246,249,255,238),QFont::DemiBold); text(preview.adjusted(18,78,-18,-3),QStringLiteral("数字时钟"),9,QColor(220,229,244,220)); }
-            else if (m_variant==5 || m_variant==6) { const int count=m_variant==5?4:3, cols=m_variant==5?2:3; const qreal r=m_variant==5?20:23; for(int i=0;i<count;++i) clock(QPointF(preview.left()+47+(i%cols)*63,preview.top()+36+(i/cols)*58),r,true); }
-            else { clock(preview.center()+QPointF(0,-3),41,m_variant==1||m_variant==4); if(m_variant==3||m_variant==4) text(QRectF(preview.left(),preview.bottom()-21,preview.width(),18),m_variant==3?QStringLiteral("北京时间"):QStringLiteral("城市 I"),9,QColor(190,205,226,205)); }
-        } else {
-            text(preview.adjusted(16,12,-12,-43),m_variant==1?QStringLiteral("serendipity"):QStringLiteral("wander"),m_variant==1?24:20,QColor(250,252,255,238),QFont::DemiBold,Qt::AlignLeft|Qt::AlignVCenter); text(preview.adjusted(16,69,-12,-9),m_variant==1?QStringLiteral("n. chance discovery"):QStringLiteral("每日单词"),9,QColor(178,195,220,205),QFont::Normal,Qt::AlignLeft|Qt::AlignVCenter); p.setPen(QPen(QColor(116,174,255,210),2)); p.drawLine(preview.left()+16,preview.bottom()-12,preview.left()+88,preview.bottom()-12);
-        }
+            painter.setPen(QColor(220, 225, 235));
+            painter.drawText(preview, Qt::AlignCenter, QStringLiteral("预览暂不可用"));
         }
 
-        p.setPen(QColor(247, 249, 253));
+        painter.setPen(QColor(247, 249, 253));
         QFont footerFont = qApp->font();
         footerFont.setPixelSize(14);
         footerFont.setWeight(QFont::DemiBold);
-        BatteryWidget::applyFontSmoothing(footerFont);
-        p.setFont(footerFont);
-        ResponsiveLayout::drawSingleLine(p, QRectF(10, 134, 200, 20),
+        DesktopWidget::applyFontSmoothing(footerFont);
+        painter.setFont(footerFont);
+        ResponsiveLayout::drawSingleLine(painter, QRectF(10, 134, 200, 20),
                                    Qt::AlignCenter | Qt::AlignVCenter, m_title);
-        p.setPen(QColor(173, 186, 207));
+        painter.setPen(QColor(173, 186, 207));
         QFont subtitleFont = qApp->font();
         subtitleFont.setPixelSize(12);
-        BatteryWidget::applyFontSmoothing(subtitleFont);
-        p.setFont(subtitleFont);
+        DesktopWidget::applyFontSmoothing(subtitleFont);
+        painter.setFont(subtitleFont);
         ResponsiveLayout::drawSingleLine(
-            p, QRectF(10, 154, 200, 17),
+            painter, QRectF(10, 154, 200, 17),
             Qt::AlignCenter | Qt::AlignVCenter,
-            QFontMetrics(p.font()).elidedText(m_subtitle, Qt::ElideRight, 192));
+            QFontMetrics(painter.font()).elidedText(m_subtitle, Qt::ElideRight, 192));
     }
 
     void mousePressEvent(QMouseEvent* event) override
@@ -372,8 +262,8 @@ protected:
         qApp->removeEventFilter(this);
         setCursor(Qt::OpenHandCursor);
         if (wasDragging)
-            m_owner->notifyWidgetDragFinished(m_kind * 100 + m_variant);
-        m_owner->notifyWidgetDragPreview(m_kind * 100 + m_variant, QCursor::pos(), false);
+            m_owner->notifyWidgetDragFinished(m_cardKind * 100 + m_cardVariant);
+        m_owner->notifyWidgetDragPreview(m_cardKind * 100 + m_cardVariant, QCursor::pos(), false);
     }
 
     bool eventFilter(QObject* watched, QEvent* event) override
@@ -396,7 +286,7 @@ protected:
             const QPoint position = event->globalPosition().toPoint();
             cancelDrag();
             if (dropped && !m_owner->geometry().contains(position))
-                m_owner->notifyWidgetDropped(m_kind * 100 + m_variant, position);
+                m_owner->notifyWidgetDropped(m_cardKind * 100 + m_cardVariant, position);
             event->accept();
             return;
         }
@@ -413,18 +303,18 @@ protected:
             return;
         if (!m_dragging) {
             m_dragging = true;
-            m_owner->notifyWidgetDragStarted(m_kind * 100 + m_variant);
+            m_owner->notifyWidgetDragStarted(m_cardKind * 100 + m_cardVariant);
         }
         const QPoint position = event->globalPosition().toPoint();
-        m_owner->notifyWidgetDragPreview(m_kind * 100 + m_variant, position, !m_owner->geometry().contains(position));
+        m_owner->notifyWidgetDragPreview(m_cardKind * 100 + m_cardVariant, position, !m_owner->geometry().contains(position));
         event->accept();
     }
 
 private:
     QString m_title;
     QString m_subtitle;
-    int m_kind = 0;
-    int m_variant = 0;
+    int m_cardKind = 0;
+    int m_cardVariant = 0;
     int m_category = -1;
     QImage m_preview;
     QPoint m_press;
@@ -433,7 +323,7 @@ private:
     qreal m_scale = 1.0;
 };
 
-} // namespace
+}
 
 void WidgetLibraryDialog::refreshFontRendering()
 {
@@ -454,19 +344,17 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     : LiquidGlassWidget(parent)
 {
     setWindowTitle(QStringLiteral("小组件"));
-    // Use the same QtGlassFlow surface as desktop cards, but keep this
-    // interactive gallery above other windows rather than on the desktop
-    // layer. Its backdrop is supplied explicitly by prepareBackdrop().
+    // 图库复用玻璃表面但作为交互面板置于应用上方，背景由 prepareBackdrop 提供。
     setPanelWindow();
     setDesktopLayerEnabled(false);
     setDesktopCaptureEnabled(false);
     const AppSettings settings;
-    m_uiScale = qBound<qreal>(0.40,
+    m_interfaceScale = qBound<qreal>(0.40,
         settings.value(QStringLiteral("appearance/scale"), 1.0).toDouble(), 2.0);
     setLiveBackdropEnabled(
         settings.value(QStringLiteral("appearance/liveBackdrop"), true).toBool());
     setGlassMargins(0);
-    setGlassRadius(26.0 * m_uiScale);
+    setGlassRadius(26.0 * m_interfaceScale);
     setRenderScale(float(qBound<qreal>(0.5,
         settings.value(QStringLiteral("performance/renderScale"), 0.60).toDouble(), 1.5)));
     setMaterialBlurStrength(settings.value(QStringLiteral("appearance/blurStrength"), 50).toInt());
@@ -482,9 +370,7 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     m_renderTimer.setTimerType(Qt::PreciseTimer);
     m_renderTimer.setInterval(16);
     connect(&m_renderTimer, &QTimer::timeout, this, [this]() {
-        // Geometry and glass composition stay at 60 Hz. The cached desktop
-        // canvas is cropped locally on these cheap frames; screen capture is
-        // intentionally handled by the slower timer below.
+        // 动画与内存裁剪在界面线程更新，桌面捕获由独立定时器调度。
         if (isVisible()) {
             updateBackdropFrame();
             update();
@@ -492,8 +378,7 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     });
     m_liveBackdropTimer.setTimerType(Qt::PreciseTimer);
     m_liveBackdropTimer.setSingleShot(false);
-    // Live captures run independently of the short panel animation. The
-    // interval is refreshed for the actual monitor in showEvent().
+    // 实时捕获独立于短暂的面板动画，显示时按实际显示器更新间隔。
     m_liveBackdropTimer.setInterval(qMax(1, activeDisplayInterval() / 2));
     connect(&m_liveBackdropTimer, &QTimer::timeout,
             this, &WidgetLibraryDialog::refreshBackdrop);
@@ -501,8 +386,7 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     setAttribute(Qt::WA_NoSystemBackground, true);
     setAutoFillBackground(false);
     setAttribute(Qt::WA_DeleteOnClose, false);
-    // LiquidGlassWidget uses a compact default size for desktop cards.  The
-    // gallery is a larger surface, so clear that inherited maximum constraint.
+    // 图库比桌面卡片大，清除继承的最大尺寸约束。
     setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
     setMinimumSize(windowScaled(320), windowScaled(240));
     resize(windowScaled(kGalleryWidth), windowScaled(kGalleryHeight));
@@ -540,7 +424,7 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
 
     const QStringList navLabels = { QStringLiteral("所有小组件"), QStringLiteral("电池"),
                                      QStringLiteral("天气"), QStringLiteral("时钟"),
-                                     QStringLiteral("词典") };
+                                     QStringLiteral("词典"), QStringLiteral("音乐") };
     for (int i = 0; i < navLabels.size(); ++i) {
         auto* button = new QPushButton(navLabels.at(i), sidebar);
         button->setObjectName(i == 0 ? QStringLiteral("navSelected") : QStringLiteral("navButton"));
@@ -585,16 +469,16 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     const auto addTile = [this, tileLayout](const QString& title, const QString& subtitle,
                                              int kind, int variant, int category) {
         auto* tile = new DragTile(title, subtitle, kind, variant, category,
-                                  this, m_uiScale * kGalleryContentZoom);
+                                  this, m_interfaceScale * kGalleryContentZoom);
         tile->setProperty("tileKind", kind);
         tile->setProperty("tileVariant", variant);
         tile->setProperty("tileCategory", category);
         tile->setProperty("tileSearch", (title + QStringLiteral(" ") + subtitle).toLower());
         m_tiles.append(tile);
     };
-    addTile(QStringLiteral("状态"), QStringLiteral("查看 Mac 和已连接的蓝牙配件的状态。"), 0, 0, 1);
-    addTile(QStringLiteral("状态"), QStringLiteral("查看 Mac 和已连接的蓝牙配件的状态。"), 0, 1, 1);
-    addTile(QStringLiteral("状态"), QStringLiteral("查看 Mac 和已连接的蓝牙配件的状态。"), 0, 2, 1);
+    addTile(QStringLiteral("状态"), QStringLiteral("查看本机和已连接蓝牙配件的电量。"), 0, 0, 1);
+    addTile(QStringLiteral("状态"), QStringLiteral("查看本机和已连接蓝牙配件的电量。"), 0, 1, 1);
+    addTile(QStringLiteral("状态"), QStringLiteral("查看本机和已连接蓝牙配件的电量。"), 0, 2, 1);
     addTile(QStringLiteral("天气 · 紧凑"), QStringLiteral("温度与天气"), 1, 0, 2);
     addTile(QStringLiteral("天气 · 详细"), QStringLiteral("地点与状态"), 1, 1, 2);
     addTile(QStringLiteral("天气 · 预报"), QStringLiteral("最高与最低温度"), 1, 2, 2);
@@ -604,6 +488,8 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     addTile(QStringLiteral("每日单词"), QStringLiteral("随机单词与释义"), 3, 0, 4);
     addTile(QStringLiteral("词典详情"), QStringLiteral("单词、音标与释义"), 3, 1, 4);
     addTile(QStringLiteral("词典卡片"), QStringLiteral("轻量词汇提醒"), 3, 2, 4);
+    addTile(QStringLiteral("音乐 · 紧凑"), QStringLiteral("系统播放状态与封面"), 4, 0, 5);
+    addTile(QStringLiteral("音乐 · 横向"), QStringLiteral("曲目信息、进度与播放控制"), 4, 1, 5);
     tileLayout->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     scroll->setWidget(scrollHost);
     contentLayout->addWidget(scroll, 1);
@@ -630,7 +516,7 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     root->addWidget(footer);
     connect(done, &QPushButton::clicked, this, &WidgetLibraryDialog::closeGallery);
 
-    setInterfaceScale(m_uiScale);
+    setInterfaceScale(m_interfaceScale);
     randomizeRecommendations();
     applyTileFilter();
 
@@ -638,12 +524,12 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
 
 int WidgetLibraryDialog::scaled(int value) const
 {
-    return qMax(1, qRound(value * m_uiScale * kGalleryContentZoom));
+    return qMax(1, qRound(value * m_interfaceScale * kGalleryContentZoom));
 }
 
 int WidgetLibraryDialog::windowScaled(int value) const
 {
-    return qMax(1, qRound(value * m_uiScale));
+    return qMax(1, qRound(value * m_interfaceScale));
 }
 
 int WidgetLibraryDialog::tileColumnCount() const
@@ -656,17 +542,16 @@ int WidgetLibraryDialog::tileColumnCount() const
 void WidgetLibraryDialog::setInterfaceScale(qreal scale)
 {
     const qreal newScale = qBound<qreal>(0.40, scale, 2.0);
-    if (m_scaleApplied && qFuzzyCompare(m_uiScale, newScale))
+    if (m_scaleApplied && qFuzzyCompare(m_interfaceScale, newScale))
         return;
     if (m_scaleApplied)
         previewCache().clear();
     m_scaleApplied = true;
     if (m_slideAnimation && m_slideAnimation->state() == QAbstractAnimation::Running)
         m_slideAnimation->stop();
-    m_uiScale = newScale;
-    setGlassRadius(26.0 * m_uiScale);
-    // A radius rounded above half of a fractional-scale control height makes
-    // Qt's style-sheet renderer fall back to square corners.
+    m_interfaceScale = newScale;
+    setGlassRadius(26.0 * m_interfaceScale);
+    // 圆角半径不能大于控件高度的一半，避免小数缩放时 QSS 回退为方角。
     const int controlRadius = qMin(scaled(18), scaled(36) / 2);
 
     const QString style = QStringLiteral(
@@ -715,7 +600,7 @@ void WidgetLibraryDialog::setInterfaceScale(qreal scale)
         m_tileLayout->setVerticalSpacing(scaled(14));
     }
     for (QFrame* tile : std::as_const(m_tiles))
-        static_cast<DragTile*>(tile)->setScale(m_uiScale * kGalleryContentZoom);
+        static_cast<DragTile*>(tile)->setScale(m_interfaceScale * kGalleryContentZoom);
     if (m_footer)
         m_footer->setFixedHeight(scaled(70));
     if (m_footerLayout)
@@ -761,7 +646,7 @@ void WidgetLibraryDialog::randomizeRecommendations()
     m_recommendedTiles.clear();
     if (m_tiles.isEmpty())
         return;
-    // Keep the landing page varied while retaining a useful mix of categories.
+    // 随机推荐时保持类型多样性。
     QList<int> candidates;
     for (int i = 0; i < m_tiles.size(); ++i)
         candidates.append(i);
@@ -802,7 +687,8 @@ void WidgetLibraryDialog::selectCategory(int category)
                                               : (category == 1 ? QStringLiteral("电池")
                                                  : category == 2 ? QStringLiteral("天气")
                                                     : category == 3 ? QStringLiteral("时钟")
-                                                                    : QStringLiteral("词典")));
+                                                    : category == 4 ? QStringLiteral("词典")
+                                                                    : QStringLiteral("音乐")));
     if (category == 0)
         randomizeRecommendations();
     applyTileFilter();
@@ -836,7 +722,7 @@ void WidgetLibraryDialog::applyTileFilter()
 
 void WidgetLibraryDialog::mousePressEvent(QMouseEvent* event)
 {
-    // Child tiles handle mouse capture; the gallery background stays fixed.
+    // 预览项处理鼠标捕获，图库背景保持固定。
     event->accept();
 }
 
@@ -852,9 +738,7 @@ void WidgetLibraryDialog::mouseReleaseEvent(QMouseEvent* event)
 
 bool WidgetLibraryDialog::event(QEvent* event)
 {
-    // The gallery is a transient chooser. Clicking another application (or
-    // another top-level window) deactivates it; close immediately instead of
-    // leaving a topmost panel stranded on screen.
+    // 图库失去激活时立即关闭，避免临时置顶面板滞留在屏幕上。
     if (event->type() == QEvent::WindowDeactivate && !m_closing) {
         closeGallery();
         return true;
@@ -880,16 +764,12 @@ void WidgetLibraryDialog::prepareBackdrop()
     const int targetX = area.left() + (area.width() - targetWidth) / 2;
     const int targetY = area.bottom() - targetHeight - 8;
     m_backdropRect = QRect(targetX, targetY, targetWidth, targetHeight);
-    // Capture one fixed strip covering every visible position of the panel.
-    // During the slide, changing geometry is serviced by a memory crop rather
-    // than another full QScreen::grabWindow call on every rendered frame.
+    // 预先捕获覆盖整个动画路径的背景条带，滑动期间只裁剪内存画布。
     m_backdropCaptureRect = QRect(targetX, targetY, targetWidth,
                                   qMax(1, area.bottom() - targetY + 1));
     setGeometry(m_backdropRect);
 
-    // The gallery is hidden at this point. Capture the already-composited
-    // desktop, including application windows and every visible desktop card;
-    // only the gallery itself is excluded when it is already native-visible.
+    // 图库隐藏时捕获完整合成桌面；若原生窗口已显示，则只排除图库自身。
     QImage backdrop = captureDesktopComposite(screen, m_backdropCaptureRect, this, renderScale());
     if (!backdrop.isNull()) {
         m_backdropCanvas = std::move(backdrop);
@@ -897,10 +777,7 @@ void WidgetLibraryDialog::prepareBackdrop()
         updateBackdropFrame();
     }
 
-    // The native HWND must be mapped for the first time while it is already
-    // below the work area. Moving it from the final on-screen rectangle in
-    // showEvent() allows Windows to present one full-size frame before the
-    // slide animation starts, which is perceived as a bright flash.
+    // 首次映射窗口时先放在工作区之外，避免动画开始前闪现完整面板。
     setGeometry(QRect(targetX, area.bottom() + 2,
                       targetWidth, targetHeight));
 }
@@ -958,10 +835,7 @@ void WidgetLibraryDialog::updateBackdropFrame()
                                 source.width(), source.height());
         painter.drawImage(destination, m_backdropCanvas, source);
 
-        // A DPI rounding difference or a screen capture clipped at an edge
-        // must never expose the transparent clear color as a black strip.
-        // Extend only the missing edge pixels from the nearest captured row or
-        // column; the correctly aligned interior is left untouched.
+        // DPI 舍入或屏幕边缘导致捕获缺列时，只延展最近边缘像素，避免露出黑色条带。
         const QRect full = frame.rect();
         if (destination.left() > full.left()) {
             painter.drawImage(QRect(full.left(), destination.top(),
@@ -1000,11 +874,7 @@ void WidgetLibraryDialog::refreshBackdrop()
     if (!liveBackdropEnabled() || desktopDragActive() || !isVisible() || m_backdropCaptureRect.isNull()
         || m_liveCapturesInFlight >= 2)
         return;
-    // The prepared strip is needed while the gallery slides in, but once the
-    // panel is settled it needlessly captures a much taller desktop region on
-    // every live update. Sample only the visible panel; the next animation is
-    // preceded by prepareBackdrop()/setInterfaceScale(), which rebuilds the
-    // strip cache when the geometry changes.
+    // 动画结束后仅采样可见面板，下一次动画之前再重建路径条带。
     const QRect area = geometry();
     const quint64 generation = m_backdropGeneration;
     ++m_liveCapturesInFlight;
@@ -1022,8 +892,7 @@ void WidgetLibraryDialog::refreshBackdrop()
             m_lastBackdropGeometry = QRect();
             updateBackdropFrame();
         }
-        // Refill the two-frame pipeline immediately. Waiting for the next GUI
-        // timer tick here lets queued paints leave the capture worker idle.
+        // 完成回调立即补充双请求流水线，避免等待下一次界面定时器造成捕获空闲。
         if (liveBackdropEnabled())
             refreshBackdrop();
     });
@@ -1044,15 +913,11 @@ void WidgetLibraryDialog::showEvent(QShowEvent* event)
     LiquidGlassWidget::showEvent(event);
     m_closing = false;
     ++m_backdropGeneration;
-    // QPropertyAnimation already schedules geometry repaints. A second 60 Hz
-    // timer here duplicated updateBackdropFrame()/update() work and caused
-    // animation frames to queue behind texture uploads.
+    // 属性动画已调度几何更新，无需额外定时器重复裁剪和上传纹理。
     m_renderTimer.stop();
-    // Reuse the prepared backdrop canvas during the slide; grabWindow is a
-    // blocking desktop capture and causes visible animation stalls.
+    // 滑动期间复用预备画布，避免同步桌面捕获导致动画停顿。
     m_liveBackdropTimer.stop();
-    // The reusable base places desktop cards at the bottom of the z-order.
-    // The gallery is an interactive tool window and must be above the cards.
+    // 图库是交互工具窗口，需要位于桌面卡片上方。
     raise();
     QScreen* screen = QGuiApplication::screenAt(QCursor::pos());
     if (!screen)
@@ -1080,15 +945,11 @@ void WidgetLibraryDialog::showEvent(QShowEvent* event)
                 m_liveBackdropTimer.stop();
                 hide();
             } else {
-                // Stop animation wakeups once settled. The worker keeps the
-                // real backdrop live and only changed pixels trigger paint.
+                // 动画结束即停止动画定时器，实时捕获仅在像素变化时请求重绘。
                 m_renderTimer.stop();
                 if (liveBackdropEnabled()) {
                     m_liveBackdropTimer.setTimerType(Qt::PreciseTimer);
-                    // Poll between presentation boundaries so a delayed Qt
-                    // timer wake-up does not skip the following DWM frame.
-                    // WGC still supplies at most one new frame per display
-                    // refresh and unchanged frames are not uploaded.
+                    // 在呈现边界之间轮询，降低定时器延迟造成的丢帧；未变化帧不会重复上传。
                     m_liveBackdropTimer.setInterval(qMax(1, activeDisplayInterval() / 2));
                     m_liveBackdropTimer.start();
                     refreshBackdrop();
@@ -1099,9 +960,7 @@ void WidgetLibraryDialog::showEvent(QShowEvent* event)
         });
         connect(m_slideAnimation, &QPropertyAnimation::valueChanged,
                 this, [this](const QVariant&) {
-            // QPropertyAnimation advances geometry before the next timer
-            // wake-up. Crop and schedule the new frame immediately to remove
-            // one 16 ms presentation cycle of input-to-glass latency.
+            // 几何变化后立即裁剪并调度下一帧，减少一个呈现周期的延迟。
             if (isVisible()) {
                 updateBackdropFrame();
                 update();
@@ -1121,11 +980,9 @@ void WidgetLibraryDialog::paintOverlay(QPainter& painter)
 {
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, true);
-    // Child frames paint after the GL surface and can leak rectangular
-    // backgrounds beyond its alpha silhouette. Paint their tint here with
-    // the same rounded outline; their controls remain ordinary widgets.
+    // 子框架可能超出 GL 圆角轮廓，因此由覆盖层按同一圆角绘制底色。
     QPainterPath silhouette;
-    silhouette.addRoundedRect(QRectF(rect()), 26.0 * m_uiScale, 26.0 * m_uiScale);
+    silhouette.addRoundedRect(QRectF(rect()), 26.0 * m_interfaceScale, 26.0 * m_interfaceScale);
     const auto panelTint = [&](QWidget* panel, const QColor& color) {
         if (!panel || !panel->isVisible()) return QRectF();
         const QRectF area(panel->mapTo(this, QPoint()), panel->size());
@@ -1144,7 +1001,7 @@ void WidgetLibraryDialog::paintOverlay(QPainter& painter)
         painter.setPen(QColor(255, 255, 255, 76));
         painter.drawLine(footer.topLeft(), footer.topRight());
     }
-    const qreal edge = qMax<qreal>(0.5, 0.7 * m_uiScale);
+    const qreal edge = qMax<qreal>(0.5, 0.7 * m_interfaceScale);
     const QRectF bounds = QRectF(rect()).adjusted(edge, edge, -edge, -edge);
     QLinearGradient rim(bounds.topLeft(), bounds.bottomRight());
     rim.setColorAt(0.0, QColor(255, 255, 255, 172));
@@ -1152,11 +1009,11 @@ void WidgetLibraryDialog::paintOverlay(QPainter& painter)
     rim.setColorAt(.62, QColor(200, 220, 242, 38));
     rim.setColorAt(1.0, QColor(255, 255, 255, 130));
     painter.setBrush(Qt::NoBrush);
-    painter.setPen(QPen(QBrush(rim), 1.2 * m_uiScale));
+    painter.setPen(QPen(QBrush(rim), 1.2 * m_interfaceScale));
     painter.drawRoundedRect(bounds, windowScaled(26), windowScaled(26));
-    painter.setPen(QPen(QColor(255, 255, 255, 55), m_uiScale));
-    painter.drawLine(QPointF(windowScaled(28), 1.4 * m_uiScale),
-                     QPointF(width() - windowScaled(28), 1.4 * m_uiScale));
+    painter.setPen(QPen(QColor(255, 255, 255, 55), m_interfaceScale));
+    painter.drawLine(QPointF(windowScaled(28), 1.4 * m_interfaceScale),
+                     QPointF(width() - windowScaled(28), 1.4 * m_interfaceScale));
     painter.restore();
 }
 
@@ -1189,11 +1046,9 @@ void WidgetLibraryDialog::closeGallery()
     }
 
     m_closing = true;
-    // The animation's valueChanged handler updates the crop and schedules the
-    // repaint. Avoid a duplicate timer while the panel slides away.
+    // 关闭动画也由属性变化回调裁剪，无需重复定时器。
     m_renderTimer.stop();
-    // Reuse the prepared backdrop canvas during the slide; grabWindow is a
-    // blocking desktop capture and causes visible animation stalls.
+    // 滑动期间复用预备画布，避免同步桌面捕获导致动画停顿。
     m_liveBackdropTimer.stop();
     m_slideAnimation->setStartValue(current);
     m_slideAnimation->setEndValue(endRect);

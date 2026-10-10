@@ -1,16 +1,14 @@
 #version 120
-// Modified for macdowsOS Widget on 2026-09-13.
-// Changes include opacity controls, native-pixel edge treatment, and
-// widget-aligned liquid-glass composition. See ../../LICENSE (GPL v3.0).
+// 基于 QtGlassFlow 修改，增加透明度、原生像素边缘和组件合成。采用 GPL v3，见项目根目录 LICENSE。
 
 varying vec2 v_texcoord;
 
 // === 背景与几何 ===
 uniform sampler2D u_blurredTex;
 uniform vec2 u_resolution;
-uniform vec2 u_objCenter;     // NDC [-1,1]
-uniform vec2 u_objHalfSize;   // NDC half-size
-uniform vec2 u_objHalfSizePx; // native-pixel half-size
+uniform vec2 u_objCenter;     // 标准化设备坐标，范围为负一到一。
+uniform vec2 u_objHalfSize;   // 标准化设备坐标下的半尺寸。
+uniform vec2 u_objHalfSizePx; // 原生像素半尺寸。
 uniform float u_cornerRadiusPx;
 uniform float u_powerFactor;
 
@@ -24,7 +22,7 @@ uniform float u_fPower;
 // === 材质参数 ===
 uniform float u_noise;        // 默认极低（0.01），仅用于消除色带
 uniform float u_time;
-uniform float u_edgeAaScale;  // quality-dependent analytic edge coverage
+uniform float u_edgeAaScale;  // 随画质变化的解析边缘覆盖率。
 
 // === Smooth-union 桥接 ===
 uniform int u_numConnections;
@@ -37,10 +35,10 @@ uniform float u_connStrength[8];
 uniform vec3 u_tintColor;
 uniform float u_tintStrength;
 uniform float u_opacity;
-uniform float u_rippleTime;      // -1 = no ripple
-uniform vec2 u_rippleCenter;     // local coords [0,1]
-uniform float u_flowSpeed;       // 0 = no flow
-uniform float u_deformAmount;    // 0 = no deform
+uniform float u_rippleTime;      // 负一表示无波纹。
+uniform vec2 u_rippleCenter;     // 局部坐标，范围为零到一。
+uniform float u_flowSpeed;       // 零表示无流动。
+uniform float u_deformAmount;    // 零表示无形变。
 
 const float M_E = 2.718281828459045;
 
@@ -54,8 +52,7 @@ float sdSuperellipse(vec2 p, float n, float r) {
     return numerator / denominator;
 }
 
-// Pixel-accurate rounded rectangle.  Unlike a superellipse, its corner radius
-// stays identical on a wide card and can exactly match QPainter/window masks.
+// 使用像素精确的圆角矩形，保持宽卡片的圆角与 QPainter 裁剪一致。
 float sdRoundedBox(vec2 p, vec2 halfSize, float radius) {
     float r = clamp(radius, 0.0, min(halfSize.x, halfSize.y));
     vec2 q = abs(p) - halfSize + vec2(r);
@@ -67,8 +64,7 @@ float refractionF(float x) {
     return 1.0 - u_b * pow(u_c * M_E, -u_d * x - u_a);
 }
 
-// Interleaved-gradient dither. The previous low-frequency sine hash sampled
-// coordinates at 0.001 scale and formed a visible square/moire lattice.
+// 交错梯度抖动避免低频正弦哈希产生可见的方格或摩尔纹。
 float rand(vec2 co) {
     vec2 pixel = floor(co);
     return fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
@@ -95,10 +91,7 @@ void main() {
         d = sdSuperellipse(localP, u_powerFactor, 1.0);
     }
 
-    // === Smooth-union 桥接（多形状融合）===
-    // Most cards have no connections. Keep the whole loop out of that path;
-    // this avoids several superellipse/pow evaluations per fragment while
-    // producing the same distance when u_numConnections is zero.
+    // 没有连接时跳过平滑并集循环，避免逐片元计算不必要的超椭圆与幂函数。
     float combinedD = d;
     if (u_numConnections > 0) {
         for (int i = 0; i < 8; i++) {
@@ -110,14 +103,12 @@ void main() {
         }
     }
 
-    // Keep a one-pixel transition outside the mathematical edge. Discarding
-    // exactly at zero turns the native framebuffer back into a binary mask
-    // and is visibly jagged at 125%/150% Windows scaling.
+    // 数学边缘外保留一像素过渡，避免小数 DPI 下二值裁剪导致锯齿。
     float edgeWidth = max(fwidth(combinedD) * u_edgeAaScale, 0.0003);
     if (combinedD > edgeWidth)
         discard;
 
-    // Voronoi ownership: only render pixels "owned" by this object
+    // 仅绘制归属于当前对象的像素。
     if (u_numConnections > 0) {
         for (int i = 0; i < 8; i++) {
             if (i >= u_numConnections) break;
@@ -150,9 +141,7 @@ void main() {
         dist += flow;
     }
 
-    // === 折射 UV 计算 ===
-    // Blur-only mode sets u_fPower to zero. Avoid the transcendental pow in
-    // that mode; the mathematical result is exactly localP.
+    // 仅模糊模式的折射强度为零，直接复用局部坐标，跳过幂函数。
     vec2 sampleP = u_fPower == 0.0
                  ? localP
                  : localP * pow(refractionF(dist), u_fPower);
@@ -178,13 +167,10 @@ void main() {
 
     // 4. 极细白色边框线（约 0.5–1 px 边缘反光）
     float fw = max(edgeWidth, 0.0003);
-    // Edge coverage scales with quality, but the optical rim must stay close
-    // to one native pixel instead of becoming thicker at maximum quality.
+    // 边缘覆盖率随画质调整，但光学描边维持约一个原生像素。
     float borderFw = clamp(fwidth(combinedD), 0.0003, 0.003);
     float borderLine = smoothstep(borderFw * 2.5, borderFw * 0.5, dist);
-    // The shared QPainter surface adds the directional rim. Keep only a very
-    // soft optical lift here so the two passes do not form a bright double
-    // outline at the lower and right edges.
+    // 方向性高光由共享覆盖层提供，此处仅保留柔和提亮，避免形成重复亮边。
     color.rgb += vec3(1.0) * borderLine * 0.12;
 
     // 5. 干净锐利的 alpha 抗锯齿

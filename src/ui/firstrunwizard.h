@@ -11,6 +11,7 @@ class QLabel;
 class QParallelAnimationGroup;
 class QShowEvent;
 class QSlider;
+class ScaleSelector;
 class QWidget;
 
 class FirstRunWizard final : public LiquidGlassWidget
@@ -32,9 +33,6 @@ protected:
 private:
     void finish();
     void showPage(int index);
-    void updateScaleValue(int percent);
-    void rememberInterfaceMetrics();
-    void applyInterfaceScale();
 
     QWidget* m_pageHost = nullptr;
     QWidget* m_pages[3] = {nullptr, nullptr, nullptr};
@@ -42,10 +40,9 @@ private:
     int m_currentPage = 0;
     bool m_introPlayed = false;
     QSlider* m_scaleSlider = nullptr;
-    QLabel* m_scaleValue = nullptr;
+    ScaleSelector* m_scaleSelector = nullptr;
     QComboBox* m_qualityBox = nullptr;
     QCheckBox* m_liveBackdrop = nullptr;
     QEventLoop* m_loop = nullptr;
     bool m_completed = false;
-    qreal m_interfaceScale = 1.0;
 };

@@ -8,8 +8,7 @@
 
 class QObject;
 
-// Native topology is shared by capture, occlusion and placement. Coordinates
-// are physical desktop pixels; snapshots are immutable and safe on a worker.
+// 捕获、遮挡和放置共用原生窗口拓扑；坐标为物理像素，不可变快照可安全交给工作线程。
 namespace NativeWindows {
 struct Window {
     WId id = 0;
@@ -26,24 +25,18 @@ struct HiddenWindow {
 };
 using HiddenWindows = QVector<HiddenWindow>;
 Stack snapshot();
-const Stack& cachedStack(); // GUI thread only, at most one enumeration per frame
+const Stack& cachedStack(); // 仅界面线程调用，每帧最多枚举一次。
 void invalidate();
 int indexOf(const Stack& stack, WId id);
-// Register the app's glass surfaces for internal desktop composition.  This
-// is deliberately separate from SetWindowDisplayAffinity: the latter hides a
-// window from every system screenshot, while the registry only prevents our
-// own backdrop sampler from feeding a glass surface back into itself.
+// 注册玻璃窗口用于内部合成，与影响系统截图的 SetWindowDisplayAffinity 无关。
 void registerGlassWindow(WId id);
 void unregisterGlassWindow(WId id);
 bool isGlassWindow(WId id);
-// Cheap native preflight for WGC sources. Reject transient popup/tooltip and
-// protected HWNDs before GraphicsCapture.dll is asked to create a capture item.
+// 创建 WGC 捕获项前检查句柄，排除临时弹窗、提示框和受保护窗口。
 bool isCaptureCandidate(WId id);
-// True while a Windows screenshot/clipping surface owns the foreground.
-// This allows cards to become capturable for that short interval only.
+// 检测前台系统截图覆盖层，用于临时暂停内部采样；不改变组件的系统截图可见性。
 bool isSystemCaptureActive();
-// Temporarily hide visible, non-minimized application windows while keeping
-// the supplied widget HWNDs and Windows shell infrastructure untouched.
+// 临时隐藏可见且未最小化的应用窗口，保留指定组件和系统桌面宿主。
 HiddenWindows hideApplicationWindows(const QSet<WId>& preservedWindows);
 void restoreApplicationWindows(const HiddenWindows& windows);
 void placeDesktop(WId id);

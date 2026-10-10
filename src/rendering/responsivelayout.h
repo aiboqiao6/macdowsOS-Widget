@@ -10,16 +10,16 @@
 #include <QString>
 #include <QtMath>
 #include <memory>
+#include "rendering/cleartypetext.h"
 
 namespace ResponsiveLayout {
 
-// Rasterize at the final device size with the font's hinting intact. Outlining
-// at 4x and shrinking discards stem fitting, softening small CJK/menu text.
-// A native-size coverage image also bypasses the GL painter's scaled atlas.
-// Backdrop quality never changes this text cache's resolution.
+// 按最终设备像素栅格化文字并保留字形微调，字体缓存分辨率独立于背景画质。
 inline bool drawHighQualityText(QPainter& painter, const QPointF& baseline,
                                 const QString& value)
 {
+    if (ClearTypeText::draw(painter, baseline, value))
+        return true;
     const QFont font = painter.font();
     if (font.hintingPreference() != QFont::PreferFullHinting
         || !(font.styleStrategy() & QFont::PreferQuality))
@@ -33,8 +33,7 @@ inline bool drawHighQualityText(QPainter& painter, const QPointF& baseline,
         : font.pointSizeF() * painter.device()->logicalDpiY() / 72.0;
     QFont rasterFont(font);
     rasterFont.setPixelSize(qMax(1, qRound(logicalPixels * transform.m11())));
-    // Coverage is composited over translucent glass: RGB subpixel masks would
-    // leave colored fringes. Keep grayscale AA and the selected full hinting.
+    // 透明图像使用灰阶覆盖率；真正的 RGB 子像素混合由 ClearType GL 路径处理。
     rasterFont.setStyleStrategy(static_cast<QFont::StyleStrategy>(
         rasterFont.styleStrategy() | QFont::NoSubpixelAntialias));
     if (font.letterSpacingType() == QFont::AbsoluteSpacing)
@@ -119,9 +118,7 @@ private:
     qreal m_unit;
 };
 
-// Scale- and DPI-independent single-line text placement. QRect-based
-// QPainter::drawText clips glyphs to the rectangle's nominal line box; point
-// drawing from a measured baseline preserves the full ascent/descent instead.
+// 根据字形度量定位基线，避免矩形文字绘制裁掉上下伸出的笔画。
 inline QRectF drawSingleLine(QPainter& painter, const QRectF& area,
                              Qt::Alignment alignment, const QString& value)
 {
@@ -196,9 +193,7 @@ inline void drawLine(QPainter& painter, const Metrics& metrics,
     painter.drawLine(from, to);
 }
 
-// Draw a shared-scale interval on a rounded horizontal track. Callers pass
-// normalized values so the same primitive can represent temperature, charge,
-// progress, or any other range without pixel-specific offsets.
+// 用归一化数值绘制圆角区间条，可用于温度、电量和播放进度。
 inline void drawRangeBar(QPainter& painter, const Metrics& metrics,
                          const QRectF& area, qreal fromRatio, qreal toRatio,
                          const QColor& trackColor, const QColor& rangeColor,
@@ -226,4 +221,4 @@ inline void drawRangeBar(QPainter& painter, const Metrics& metrics,
              rangeColor, widthRatio);
 }
 
-} // namespace ResponsiveLayout
+}

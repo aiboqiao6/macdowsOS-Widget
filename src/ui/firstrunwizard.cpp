@@ -1,6 +1,7 @@
 #include "ui/firstrunwizard.h"
-#include "widgets/batterywidget.h"
+#include "widgets/desktopwidget.h"
 #include "app/appsettings.h"
+#include "ui/scaleselector.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -18,7 +19,6 @@
 #include <QPainter>
 #include <QParallelAnimationGroup>
 #include <QPropertyAnimation>
-#include <QRegularExpression>
 #include <QPushButton>
 #include <QScreen>
 #include <QShowEvent>
@@ -32,11 +32,9 @@ FirstRunWizard::FirstRunWizard(QWidget* parent)
     setWindowTitle(QStringLiteral("欢迎使用 macdowsOS Widget"));
     setPanelWindow();
     setDesktopLayerEnabled(false);
-    // Read the same initial preferences as the desktop widgets without
-    // creating widgets.json before the wizard is completed.
+    // 读取桌面组件相同的初始设置，向导完成之前不创建配置文件。
     const AppSettings initialSettings;
-    // Keep the fixed wizard surface current without committing a preference
-    // until the user completes the final page.
+    // 向导中的画质与实时背景只预览，完成后才保存。
     setLiveBackdropEnabled(initialSettings.value(
         QStringLiteral("appearance/liveBackdrop")).toBool(), false);
     setGlassMargins(0);
@@ -63,10 +61,8 @@ FirstRunWizard::FirstRunWizard(QWidget* parent)
     setFixedSize(780, 540);
 
     QFont clearFont = qApp->font();
-    clearFont.setFamily(BatteryWidget::pingFangFontFamily());
-    clearFont.setStyleStrategy(static_cast<QFont::StyleStrategy>(
-        QFont::PreferAntialias | QFont::PreferQuality | QFont::NoSubpixelAntialias));
-    clearFont.setHintingPreference(QFont::PreferFullHinting);
+    clearFont.setFamily(DesktopWidget::pingFangFontFamily());
+    DesktopWidget::applyFontSmoothing(clearFont);
     setFont(clearFont);
 
     setStyleSheet(QStringLiteral(
@@ -113,7 +109,7 @@ FirstRunWizard::FirstRunWizard(QWidget* parent)
         return result;
     };
 
-    // Page 1: one clear welcome message and a single way forward.
+
     auto* welcome = newPage(0);
     auto* welcomeLayout = new QVBoxLayout(welcome);
     welcomeLayout->setContentsMargins(55, 35, 55, 35);
@@ -130,7 +126,7 @@ FirstRunWizard::FirstRunWizard(QWidget* parent)
     welcomeLayout->addStretch(3);
     connect(welcomeNext, &QPushButton::clicked, this, [this]() { showPage(1); });
 
-    // Page 2: choose the desktop widget scale directly.
+
     auto* scalePage = newPage(1);
     auto* scaleLayout = new QVBoxLayout(scalePage);
     scaleLayout->setContentsMargins(48, 28, 48, 28);
@@ -143,34 +139,10 @@ FirstRunWizard::FirstRunWizard(QWidget* parent)
 
     scaleLayout->addStretch(2);
 
-    auto* scaleRow = new QHBoxLayout;
-    auto* scaleLabel = new QLabel(QStringLiteral("缩放比例"), scalePage);
-    scaleLabel->setStyleSheet(QStringLiteral("font-size:16px; font-weight:600;"));
-    scaleRow->addWidget(scaleLabel);
-    scaleRow->addStretch();
-    m_scaleValue = new QLabel(scalePage);
-    m_scaleValue->setObjectName(QStringLiteral("scaleValue"));
-    m_scaleValue->setStyleSheet(QStringLiteral("font-size:20px; font-weight:600; color:#a9dcff;"));
-    scaleRow->addWidget(m_scaleValue);
-    scaleLayout->addLayout(scaleRow);
-    m_scaleSlider = new QSlider(Qt::Horizontal, scalePage);
-    m_scaleSlider->setFixedHeight(38);
-    m_scaleSlider->setRange(40, 200);
-    m_scaleSlider->setSingleStep(5);
-    m_scaleSlider->setPageStep(10);
-    m_scaleSlider->setTickInterval(10);
-    m_scaleSlider->setValue(qBound(40, qRound(initialSettings.value(
-        QStringLiteral("appearance/scale")).toDouble() * 100), 200));
-    scaleLayout->addWidget(m_scaleSlider);
-    auto* scaleEnds = new QHBoxLayout;
-    auto* small = new QLabel(QStringLiteral("更精巧"), scalePage);
-    auto* large = new QLabel(QStringLiteral("更醒目"), scalePage);
-    small->setStyleSheet(QStringLiteral("font-size:13px; color:#c8d9e8;"));
-    large->setStyleSheet(QStringLiteral("font-size:13px; color:#c8d9e8;"));
-    scaleEnds->addWidget(small);
-    scaleEnds->addStretch();
-    scaleEnds->addWidget(large);
-    scaleLayout->addLayout(scaleEnds);
+    m_scaleSelector = new ScaleSelector(qRound(initialSettings.value(
+        QStringLiteral("appearance/scale")).toDouble() * 100), scalePage);
+    m_scaleSlider = m_scaleSelector->slider();
+    scaleLayout->addWidget(m_scaleSelector);
     scaleLayout->addStretch(3);
     auto* scaleFooter = new QHBoxLayout;
     auto* scaleBack = button(QStringLiteral("返回"), QStringLiteral("backButton"), scalePage);
@@ -181,9 +153,8 @@ FirstRunWizard::FirstRunWizard(QWidget* parent)
     scaleLayout->addLayout(scaleFooter);
     connect(scaleBack, &QPushButton::clicked, this, [this]() { showPage(0); });
     connect(scaleNext, &QPushButton::clicked, this, [this]() { showPage(2); });
-    connect(m_scaleSlider, &QSlider::valueChanged, this, &FirstRunWizard::updateScaleValue);
 
-    // Page 3: choose quality and live backdrop behavior.
+
     auto* qualityPage = newPage(2);
     auto* qualityLayout = new QVBoxLayout(qualityPage);
     qualityLayout->setContentsMargins(48, 28, 48, 28);
@@ -242,8 +213,8 @@ FirstRunWizard::FirstRunWizard(QWidget* parent)
 
     m_pages[1]->hide();
     m_pages[2]->hide();
-    rememberInterfaceMetrics();
-    updateScaleValue(m_scaleSlider->value());
+    if (QScreen* display = screen())
+        setFixedSize(QSize(780, 540).boundedTo(display->availableGeometry().size() - QSize(32, 32)));
 }
 
 bool FirstRunWizard::eventFilter(QObject* watched, QEvent* event)
@@ -279,6 +250,7 @@ void FirstRunWizard::showPage(int index)
 {
     if (m_transition || index < 0 || index >= 3 || index == m_currentPage)
         return;
+    m_scaleSelector->setPreviewEnabled(false);
     QWidget* previous = m_pages[m_currentPage];
     QWidget* next = m_pages[index];
     const int direction = index > m_currentPage ? 1 : -1;
@@ -308,7 +280,9 @@ void FirstRunWizard::showPage(int index)
         m_currentPage = index;
         m_transition = nullptr;
         transition->deleteLater();
-        applyInterfaceScale();
+        for (QWidget* page : m_pages)
+            page->setGeometry(m_pageHost->rect());
+        m_scaleSelector->setPreviewEnabled(index == 1);
     });
     transition->start();
 }
@@ -319,9 +293,7 @@ bool FirstRunWizard::run()
     if (screen) {
         const QRect area = screen->availableGeometry();
         move(area.center() - QPoint(width() / 2, height() / 2));
-        // Supplying this hidden host also enables the wallpaper fallback when
-        // the first desktop capture is unavailable. A solid fallback would
-        // leave the glass with nothing to blur on its first visible frame.
+        // 首次捕获不可用时，隐藏宿主仍可提供壁纸回退，避免初始玻璃缺少背景细节。
         QImage backdrop = captureDesktopComposite(screen, geometry(), this, renderScale());
         if (backdrop.isNull()) {
             backdrop = QImage(size(), QImage::Format_RGB32);
@@ -342,8 +314,7 @@ bool FirstRunWizard::run()
 
 void FirstRunWizard::finish()
 {
-    // The final slide can reach its last pixel just before the animation's
-    // finished callback. A visible Start button must already be actionable.
+    // 最后一页已经可见时允许立即完成，不必等待动画结束回调。
     if (!m_pages[2]->isVisible())
         return;
     AppSettings settings;
@@ -354,105 +325,6 @@ void FirstRunWizard::finish()
     settings.sync();
     m_completed = true;
     close();
-}
-
-void FirstRunWizard::updateScaleValue(int percent)
-{
-    m_scaleValue->setText(QStringLiteral("%1%").arg(percent));
-    m_interfaceScale = percent / 100.0;
-    if (!m_transition)
-        applyInterfaceScale();
-}
-
-void FirstRunWizard::rememberInterfaceMetrics()
-{
-    auto widgets = findChildren<QWidget*>();
-    widgets.prepend(this);
-    for (QWidget* widget : widgets) {
-        widget->setProperty("wizardBaseStyle", widget->styleSheet());
-        if (widget != this) {
-            widget->setProperty("wizardBaseMinimum", widget->minimumSize());
-            widget->setProperty("wizardBaseMaximum", widget->maximumSize());
-        }
-    }
-    for (QLayout* item : findChildren<QLayout*>()) {
-        const QMargins margins = item->contentsMargins();
-        item->setProperty("wizardBaseMargins", QVariantList{
-            margins.left(), margins.top(), margins.right(), margins.bottom()});
-        item->setProperty("wizardBaseSpacing", item->spacing());
-    }
-}
-
-void FirstRunWizard::applyInterfaceScale()
-{
-    // Scale native controls and layout metrics from their original values;
-    // repeated slider moves never compound the previous scale or blur text.
-    const auto scaled = [this](int value) { return qRound(value * m_interfaceScale); };
-    static const QRegularExpression pixels(QStringLiteral("(-?\\d+(?:\\.\\d+)?)px"));
-    auto widgets = findChildren<QWidget*>();
-    widgets.prepend(this);
-    for (QWidget* widget : widgets) {
-        if (!widget->property("wizardBaseStyle").isValid()) continue;
-        QString style = widget->property("wizardBaseStyle").toString();
-        auto matches = pixels.globalMatch(style);
-        QString result;
-        qsizetype previous = 0;
-        while (matches.hasNext()) {
-            const auto match = matches.next();
-            result += style.mid(previous, match.capturedStart() - previous);
-            result += QString::number(qRound(match.captured(1).toDouble() * m_interfaceScale))
-                      + QStringLiteral("px");
-            previous = match.capturedEnd();
-        }
-        result += style.mid(previous);
-        widget->setStyleSheet(result);
-        if (widget == this) continue;
-        const QSize minimum = widget->property("wizardBaseMinimum").toSize();
-        const QSize maximum = widget->property("wizardBaseMaximum").toSize();
-        widget->setMinimumSize(scaled(minimum.width()), scaled(minimum.height()));
-        widget->setMaximumSize(maximum.width() == QWIDGETSIZE_MAX ? QWIDGETSIZE_MAX : scaled(maximum.width()),
-                               maximum.height() == QWIDGETSIZE_MAX ? QWIDGETSIZE_MAX : scaled(maximum.height()));
-    }
-    for (QLayout* item : findChildren<QLayout*>()) {
-        const QVariantList margins = item->property("wizardBaseMargins").toList();
-        if (margins.size() != 4) continue;
-        item->setContentsMargins(scaled(margins[0].toInt()), scaled(margins[1].toInt()),
-                                 scaled(margins[2].toInt()), scaled(margins[3].toInt()));
-        const int spacing = item->property("wizardBaseSpacing").toInt();
-        item->setSpacing(spacing < 0 ? spacing : scaled(spacing));
-    }
-    // QSS rejects a corner radius larger than half the handle's actual
-    // extent. Round the radius first, then derive an even diameter and the
-    // groove margins together; independent rounding produced square thumbs.
-    const int handleRadius = qMax(1, scaled(11));
-    const int grooveRadius = qMax(1, scaled(3));
-    const int handleMargin = handleRadius - grooveRadius;
-    m_scaleSlider->setStyleSheet(QStringLiteral(
-        "QSlider::groove:horizontal { height:%1px; border:0; border-radius:%2px; background:#8294a6; }"
-        "QSlider::sub-page:horizontal { border:0; border-radius:%2px; background:#78c8ff; }"
-        "QSlider::handle:horizontal { width:%3px; margin:-%4px 0; border:0; border-radius:%5px; background:#ffffff; }")
-        .arg(2 * grooveRadius).arg(grooveRadius).arg(2 * handleRadius)
-        .arg(handleMargin).arg(handleRadius));
-
-    QScreen* display = screen();
-    const QRect area = display ? display->availableGeometry() : QRect();
-    QSize extent(scaled(780), scaled(540));
-    if (area.isValid()) extent = extent.boundedTo(area.size() - QSize(32, 32));
-    const QPoint center = geometry().center();
-    setFixedSize(extent);
-    setGlassRadius(28 * m_interfaceScale);
-    if (layout()) layout()->activate();
-    for (QWidget* page : m_pages) {
-        page->setGeometry(m_pageHost->rect());
-        if (page->layout()) page->layout()->activate();
-    }
-    if (isVisible() && area.isValid()) {
-        QPoint origin = center - QPoint(width() / 2, height() / 2);
-        origin.setX(qBound(area.left(), origin.x(), area.right() - width() + 1));
-        origin.setY(qBound(area.top(), origin.y(), area.bottom() - height() + 1));
-        move(origin);
-    }
-    update();
 }
 
 void FirstRunWizard::closeEvent(QCloseEvent* event)
@@ -488,13 +360,13 @@ void FirstRunWizard::paintOverlay(QPainter& painter)
     veil.setColorAt(0.55, QColor(10, 24, 41, 100));
     veil.setColorAt(1.0, QColor(8, 18, 33, 86));
     painter.setBrush(veil);
-    painter.drawRoundedRect(bounds, 28 * m_interfaceScale, 28 * m_interfaceScale);
+    painter.drawRoundedRect(bounds, 28, 28);
     QLinearGradient rim(bounds.topLeft(), bounds.bottomRight());
     rim.setColorAt(0.0, QColor(255, 255, 255, 190));
     rim.setColorAt(0.5, QColor(210, 231, 250, 58));
     rim.setColorAt(1.0, QColor(255, 255, 255, 125));
     painter.setBrush(Qt::NoBrush);
     painter.setPen(QPen(QBrush(rim), 1.2));
-    painter.drawRoundedRect(bounds, 28 * m_interfaceScale, 28 * m_interfaceScale);
+    painter.drawRoundedRect(bounds, 28, 28);
     painter.restore();
 }

@@ -6,15 +6,13 @@ uniform vec2 u_direction;
 uniform vec2 u_resolution;
 uniform float u_centerWeight;
 uniform int u_sampleCount;
-// Positive-side bilinear sample offset in pixels and its combined weight.
+// 正向线性采样偏移及其合并权重。
 uniform vec2 u_samples[64];
 
 void main() {
     vec2 uv = v_texcoord;
     vec4 color = texture2D(u_texture, uv) * u_centerWeight;
-    // Economy quality normally needs only three pairs. Keep that common
-    // path unrolled so older GL drivers don't dynamically index a 64-element
-    // uniform array for a seven-fetch filter on a large live gallery.
+    // 低画质常用三对采样，展开循环以减少旧驱动动态索引大数组的开销。
     if (u_sampleCount == 3) {
         vec2 stepUV = u_direction / u_resolution;
         color += (texture2D(u_texture, uv + stepUV * u_samples[0].x)

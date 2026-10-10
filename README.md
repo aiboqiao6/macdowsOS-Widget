@@ -17,6 +17,51 @@
 
 基于Qt的仿macOS样式的第三方桌面小组件
 
+支持电量、天气、时钟、词典和音乐组件。在托盘或组件右键菜单中打开小组件库，拖动卡片到桌面添加。
+
+音乐组件直接读取 Windows 系统媒体会话，可显示曲目、艺术家、封面、播放状态与进度，并提供上一首、播放/暂停、下一首按钮。播放器必须向 Windows 发布媒体会话；未提供的封面、进度或控制能力会按实际情况显示。支持 Windows 10 1809 及以上版本。
+
+启动向导和设置共用 40%–200% 连续缩放滑块。屏幕左下角的浮动卡片使用与桌面相同的逻辑尺寸；拖动时平滑预览，停止后按最终设备像素重新绘制。向导的操作区域保持固定大小，避免拖动时重建整个玻璃窗口。
+
+字体支持 ClearType RGB 子像素渲染，新配置默认启用。已有配置保留原选项，可在设置中的“字体抗锯齿”切换。玻璃背景画质与字体分辨率独立，降低背景渲染比例不会降低字体像素密度；透明预览图像使用原生像素灰阶渲染。
+
+# 代码结构
+
+| 目录或文件 | 职责 |
+| --- | --- |
+| `src/app` | 启动、单实例管理、配置迁移与合并写入 |
+| `src/widgets/desktopwidget.cpp` | 独立卡片生命周期、托盘、桌面放置、保存与恢复 |
+| `src/widgets/desktopwidget_paint.cpp` | 电量、天气、时钟、词典的内容绘制 |
+| `src/widgets/desktopwidget_data.cpp` | 天气、词典请求、回复解析和地区搜索 |
+| `src/widgets/desktopwidget_settings.cpp` | 全局设置、自启动和关于窗口 |
+| `src/widgets/cardmetrics.h` | 共用参考尺寸与布局比例 |
+| `src/widgets/musiccard.*` | 音乐卡片布局、绘制和按钮命中区域 |
+| `src/media/systemmediasession.*` | 共享系统媒体快照、后台轮询与播放控制 |
+| `src/ui` | 启动向导、共用缩放选择器、图库与菜单 |
+| `src/rendering` | 玻璃管线、背景捕获、窗口层级、字体覆盖率与诊断 |
+| `tests` | 功能、渲染、DPI、生命周期与中文注释审查 |
+
+原 `BatteryWidget` 已改名为 `DesktopWidget`，反映多种独立卡片的实际职责。配置中的类型名与已有布局保持兼容，新增音乐类型保存为 `music`。
+
+媒体会话操作在串行工作线程中执行，不阻塞界面。结果通过 Qt 回调交付；图库和桌面共用一个媒体服务，状态未变化时不触发重绘。GL 字体纹理随所属上下文释放，图像缓存有内存上限。
+
+```mermaid
+flowchart LR
+    App[应用启动与配置] --> Desktop[独立桌面卡片]
+    Wizard[启动向导] --> Scale[共用缩放选择器]
+    Settings[设置] --> Scale
+    Scale --> Metrics[共用尺寸计算]
+    Desktop --> Metrics
+    Desktop --> Paint[卡片内容绘制]
+    Media[系统媒体后台服务] --> Music[音乐绘制与控制]
+    Music --> Paint
+    Desktop --> Glass[玻璃窗口与背景合成]
+    Glass --> Capture[系统窗口捕获]
+    Glass --> Text[原生像素字体与 ClearType]
+```
+
+构建使用 Visual Studio 2022、Qt 6 MSVC 64 位和 Windows SDK。打开解决方案构建 `Release|x64`，输出为 `x64/Release/macdowsOSWidget.exe`。回归运行方法见 [tests/README.md](tests/README.md)。
+
 
 # 鸣谢
 

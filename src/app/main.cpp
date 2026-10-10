@@ -1,4 +1,4 @@
-#include "widgets/batterywidget.h"
+#include "widgets/desktopwidget.h"
 #include "ui/firstrunwizard.h"
 #include "app/appsettings.h"
 #include "config.h"
@@ -7,7 +7,6 @@
 #include <QApplication>
 #include <QDir>
 #include <QFileInfo>
-#include <QFontDatabase>
 #include <QStandardPaths>
 #include <QScreen>
 #include <QTimer>
@@ -22,13 +21,7 @@
 int main(int argc, char* argv[])
 {
 #ifdef Q_OS_WIN
-    // One process owns the tray, configuration and desktop grid. A second
-    // process would otherwise create duplicate widgets in the same cells and
-    // race while writing widgets.json.
-    // Use the global namespace so launches from different Windows sessions
-    // (or from an elevated shortcut and a normal shortcut) still share one
-    // process guard. Failing closed is important: if the guard cannot be
-    // created, starting anyway would violate the single-instance contract.
+    // 全局互斥量保证托盘与配置只有一个进程管理；创建失败时退出，避免重复组件及并发写入。
     SetLastError(ERROR_SUCCESS);
     HANDLE instanceMutex = CreateMutexW(nullptr, TRUE,
         L"Global\\macdowsOS.Widget.Singleton.1");
@@ -39,9 +32,7 @@ int main(int argc, char* argv[])
         return 0;
     }
 #endif
-    // This policy must be selected before QApplication creates the platform
-    // integration; otherwise Qt ignores it and high-DPI framebuffer rounding
-    // can differ from the desktop capture size.
+    // 必须在创建 QApplication 前启用小数缩放，保持 Qt 帧缓冲与桌面捕获的像素尺寸一致。
     QGuiApplication::setHighDpiScaleFactorRoundingPolicy(
         Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
 
@@ -69,13 +60,12 @@ int main(int argc, char* argv[])
                  QString::fromWCharArray(adapter.DeviceID)).arg(adapter.StateFlags, 0, 16));
     }
 #endif
-    // All widget artwork and Qt controls use the bundled PingFang face. The
-    // registration happens before any windows are restored so text metrics
-    // cannot differ between the gallery and live cards.
-    const QString pingFangFamily = BatteryWidget::pingFangFontFamily();
+    // 恢复窗口前注册内置苹方字体，确保控件、图库和桌面组件使用一致的字形度量。
+    const QString pingFangFamily = DesktopWidget::pingFangFontFamily();
     QFont applicationFont(pingFangFamily);
+    DesktopWidget::applyFontSmoothing(applicationFont);
     app.setFont(applicationFont);
-    // The tray icon owns the app lifetime when the floating card is hidden.
+    // 组件隐藏后由托盘维持应用生命周期。
     app.setQuitOnLastWindowClosed(false);
 
     const QString configPath = QDir(QStandardPaths::writableLocation(
@@ -84,7 +74,7 @@ int main(int argc, char* argv[])
     if (firstRun) {
         FirstRunWizard wizard;
         if (!wizard.run()) {
-            BatteryWidget::shutdown();
+            DesktopWidget::shutdown();
             RenderDiagnostics::write("session.exit", "reason=first-run-cancelled exitCode=0");
             RenderDiagnostics::shutdown();
 #ifdef Q_OS_WIN
@@ -104,29 +94,27 @@ int main(int argc, char* argv[])
             .arg(saved.value("appearance/opacity").toDouble())
             .arg(saved.value("appearance/blurStrength").toInt())
             .arg(saved.value("appearance/fontSmoothing").toInt()));
-        BatteryWidget::setGlobalFontSmoothing(qBound(0,
-            saved.value(QStringLiteral("appearance/fontSmoothing"), 2).toInt(), 3));
+        DesktopWidget::setGlobalFontSmoothing(qBound(0,
+            saved.value(QStringLiteral("appearance/fontSmoothing"), 4).toInt(), 4));
     }
 
-    // Restore user-created independent cards from widgets.json. On first run
-    // seed the reference layout with four cards; every card owns its window,
-    // position and glass surface independently.
-    QList<BatteryWidget*> widgets = BatteryWidget::restoreWidgets();
+    // 恢复独立组件；没有配置时创建四种默认卡片，每个窗口独立保存位置。
+    QList<DesktopWidget*> widgets = DesktopWidget::restoreWidgets();
     if (widgets.isEmpty()) {
-        widgets.append(new BatteryWidget(nullptr, BatteryWidget::CardKind::Battery, true));
-        widgets.append(new BatteryWidget(nullptr, BatteryWidget::CardKind::Weather, false));
-        widgets.append(new BatteryWidget(nullptr, BatteryWidget::CardKind::Clock, false));
-        widgets.append(new BatteryWidget(nullptr, BatteryWidget::CardKind::Dictionary, false));
-        for (BatteryWidget* widget : widgets)
+        widgets.append(new DesktopWidget(nullptr, DesktopWidget::CardKind::Battery, true));
+        widgets.append(new DesktopWidget(nullptr, DesktopWidget::CardKind::Weather, false));
+        widgets.append(new DesktopWidget(nullptr, DesktopWidget::CardKind::Clock, false));
+        widgets.append(new DesktopWidget(nullptr, DesktopWidget::CardKind::Dictionary, false));
+        for (DesktopWidget* widget : widgets)
             widget->show();
         widgets.first()->saveConfiguration();
     }
     if (firstRun) {
-        BatteryWidget* owner = widgets.first();
-        QTimer::singleShot(0, owner, &BatteryWidget::showSettingsDialog);
+        DesktopWidget* owner = widgets.first();
+        QTimer::singleShot(0, owner, &DesktopWidget::showSettingsDialog);
     }
     const int result = app.exec();
-    BatteryWidget::shutdown();
+    DesktopWidget::shutdown();
     RenderDiagnostics::write("session.exit", QString("exitCode=%1").arg(result));
     RenderDiagnostics::shutdown();
 #ifdef Q_OS_WIN

@@ -12,27 +12,24 @@ class QObject;
 namespace DesktopCapture {
 struct Frame {
     QImage image;
-    QRegion valid; // pixel coordinates; never includes a window above target
+    QRegion valid; // 物理像素坐标；不包含目标上方的窗口。
     QRect area;
-    quint64 scene = 0; // identity/order/geometry of lower external windows
+    quint64 scene = 0; // 下层外部窗口的身份、次序与几何位置。
     WId target = 0;
     qreal scale = 1;
-    QRect targetBounds; // physical coordinates at the instant of capture
-    bool validated = false; // checked on the GUI thread immediately before delivery
-    quint64 topology = 0; // WGC source identities/order, independent of their positions
+    QRect targetBounds; // 捕获时的物理坐标。
+    bool validated = false; // 交付前已在界面线程验证。
+    quint64 topology = 0; // WGC 捕获源身份与次序，不包含位置。
 };
-// All geometry is in Qt desktop coordinates. Capture is performed on a single
-// worker pool; callbacks run on the GUI thread only while their context is alive.
+// 接口几何使用 Qt 桌面逻辑坐标；捕获在单线程池执行，仅向仍存活的界面对象回调。
 void request(const QRect& area, qreal pixelScale, WId target, QObject* context,
              std::function<void(Frame)> completed, int priority = 0);
 Frame grab(const QRect& area, qreal pixelScale, WId target = 0);
 bool validate(Frame& frame);
-// Release persistent WGC sessions after the last glass surface is destroyed.
-// This is also useful for deterministic teardown between independent hosts.
+// 最后一个玻璃窗口销毁后释放持续捕获会话，也供独立测试清理使用。
 void resetWorkerStreams();
 
-// Holds only verified external pixels. Glass surfaces are composed afterwards
-// and must never be written back to this cache (which would cause feedback).
+// 只缓存验证过的外部像素；玻璃合成结果不得写回此缓存，以免产生反馈。
 class Cache {
 public:
     QImage merge(Frame frame, const std::function<QImage()>& fallback);

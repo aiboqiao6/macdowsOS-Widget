@@ -6,8 +6,7 @@
 
 class LiquidGlassMenuSurface;
 
-// QMenu still owns input, accessibility, action layout and popup dismissal.
-// Its transparent child draws the same glass pipeline as desktop cards.
+// QMenu 管理输入、无障碍、布局和关闭；透明子窗口复用桌面玻璃渲染。
 class LiquidGlassMenu final : public QMenu
 {
 public:

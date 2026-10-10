@@ -25,39 +25,38 @@ class QMoveEvent;
 class QContextMenuEvent;
 class WidgetLibraryDialog;
 
-class BatteryWidget final : public LiquidGlassWidget
+// 独立桌面卡片：本类协调生命周期、放置和持久化，绘制、数据与设置分文件实现。
+class DesktopWidget final : public LiquidGlassWidget
 {
 public:
-    enum class CardKind { Battery, Weather, Clock, Dictionary };
+    // 图库拖动编码使用枚举值，新增类型必须追加，避免改变已有编码。
+    enum class CardKind { Battery, Weather, Clock, Dictionary, Music };
 
-    explicit BatteryWidget(QWidget* parent = nullptr,
+    explicit DesktopWidget(QWidget* parent = nullptr,
                            CardKind kind = CardKind::Battery,
-                           bool primary = true,
+                           bool ownsTray = true,
                            const QString& instanceId = QString(),
-                           int variant = -1);
-    ~BatteryWidget() override;
+                           int variant = -1, bool previewOnly = false);
+    ~DesktopWidget() override;
 
     QString instanceId() const { return m_instanceId; }
-    CardKind cardKind() const { return m_kind; }
-    int cardVariant() const { return m_variant; }
+    CardKind cardKind() const { return m_cardKind; }
+    int cardVariant() const { return m_cardVariant; }
     bool placeAtDesktopPoint(const QPoint& point);
     void saveConfiguration() const;
     void showSettingsDialog();
 
-    static QList<BatteryWidget*> restoreWidgets();
-    static BatteryWidget* addWidget(CardKind kind, const QPoint& desktopPoint,
+    static QList<DesktopWidget*> restoreWidgets();
+    static DesktopWidget* addWidget(CardKind kind, const QPoint& desktopPoint,
                                     int variant = -1);
-    // Render the same card payload used on the desktop for the widget gallery.
-    // Size is logical; pixels are generated at the target screen's density.
+    // 图库复用桌面内容绘制；尺寸为逻辑像素，图像按目标屏幕密度生成。
     static QImage renderPreview(CardKind kind, int variant, const QSize& size,
                                 qreal devicePixelRatio = 1.0);
-    // Registers the bundled PingFang face and returns its Qt family name.
-    // Keeping this on the widget core lets the app, tests and preview gallery
-    // share exactly the same font registration path.
+    // 向导、设置和桌面共用尺寸计算，返回逻辑像素，屏幕 DPR 由 Qt 处理。
+    static QSize cardSize(CardKind kind, int variant, qreal scale, const QRect& workArea);
+    // 统一注册内置苹方字体，应用、测试与图库共用同一字体族。
     static QString pingFangFontFamily();
-    // Applies one of the global font rasterization profiles to both Qt
-    // controls and custom-painted widget text. Levels are 0=off, 1=standard,
-    // 2=clear (default), 3=native-pixel grayscale with full hinting.
+    // 统一字体模式：0 关闭，1 标准灰阶，2 清晰灰阶，3 原生像素灰阶，4 ClearType（默认）。
     static void setGlobalFontSmoothing(int level);
     static int globalFontSmoothing();
     static void applyFontSmoothing(QFont& font);
@@ -81,8 +80,8 @@ private:
     friend class WidgetRegression;
     struct ConnectedDevice {
         QString name;
-        int level = -1;       // -1 means Windows exposes no battery value.
-        int iconKind = 4;     // 1 mouse, 2 keyboard, 3 audio, 4 generic.
+        int level = -1;       // 负一表示系统未提供电量。
+        int iconKind = 4;     // 图标类型：1 鼠标，2 键盘，3 音频，4 通用设备。
     };
     struct WeatherHour {
         QString time;
@@ -110,10 +109,10 @@ private:
                          qreal strokeMultiplier = 1.0) const;
     void setupTrayIcon();
     void toggleWidgetVisibility();
-    void toggleLayout();
+    void rearrangeWidgets();
     void applyScale(qreal scale);
     void updateTrayVisibilityLabel();
-    void updateLayoutLabel();
+    void updateRearrangeLabel();
     void setStartupEnabled(bool enabled);
     bool isStartupEnabled() const;
     void showAboutDialog();
@@ -123,7 +122,7 @@ private:
     void refreshDictionary();
     void handleDictionaryReply(QNetworkReply* reply);
     void searchWeatherCity();
-    void updateDashboardObjects();
+    void updateCardGeometry();
     void drawAnalogClock(QPainter& painter, const QRectF& rect, int hourOffset = 0) const;
     void drawClockFace(QPainter& painter, const QRectF& rect, int style,
                        const QString& city = QString(), int hourOffset = 0) const;
@@ -132,7 +131,6 @@ private:
                           bool transparentFace = false) const;
     QRectF drawWeatherIcon(QPainter& painter, const QRectF& rect, bool night,
                            int weatherCode = -1) const;
-    void drawDashboardInfo(QPainter& painter, const QRectF& card) const;
     void arrangeGroup();
     void syncGroupSettings(qreal scale, int blurStrength,
                            qreal opacity, bool mouseThrough, bool lowPower,
@@ -141,12 +139,12 @@ private:
     void showWidgetLibrary();
     static QRect nearestGridRect(CardKind kind, int variant,
                                  const QPoint& requestedTopLeft, qreal scale,
-                                 const BatteryWidget* ignored = nullptr);
+                                 const DesktopWidget* ignored = nullptr);
     static QRect nearbyWidgetRect(CardKind kind, int variant,
                                   const QPoint& requestedTopLeft, qreal scale,
-                                  const BatteryWidget* ignored = nullptr);
+                                  const DesktopWidget* ignored = nullptr);
     static bool overlapsVisibleWidget(const QRect& rect,
-                                      const BatteryWidget* ignored = nullptr);
+                                      const DesktopWidget* ignored = nullptr);
     static void showGridPreview(CardKind kind, int variant, const QPoint& desktopPoint);
     static void showGridPreviewRect(const QRect& rect);
     static void hideGridPreview();
@@ -155,21 +153,17 @@ private:
     static QString configurationPath();
     static void saveAllConfigurations();
 
-    QTimer m_refreshTimer;
+    QTimer m_batteryTimer;
     QTimer m_weatherTimer;
     QTimer m_settingsTimer;
     QTimer m_trayClickTimer;
-    int m_level = -1;          // Unknown until the first system power poll.
+    int m_batteryLevel = -1;          // 首次系统电量读取前为未知状态。
     bool m_charging = false;
     bool m_hasBattery = false;
-    // Legacy composite branches stay disabled; every live instance is one
-    // independent card selected by m_kind.
-    bool m_overview = false;
-    bool m_dashboardMode = false;
-    CardKind m_kind = CardKind::Battery;
-    int m_variant = 0;
+    CardKind m_cardKind = CardKind::Battery;
+    int m_cardVariant = 0;
     QString m_hostDeviceName;
-    bool m_primary = true;
+    bool m_ownsTray = true;
     QString m_instanceId;
     bool m_restoringPosition = false;
     bool m_hasSavedPosition = false;
@@ -177,13 +171,13 @@ private:
     NativeWindows::HiddenWindows m_dragHiddenWindows;
     NativeWindows::HiddenWindows m_libraryDragHiddenWindows;
     bool m_clickPending = false;
-    qreal m_uiScale = 1.0;
-    int m_deviceRefreshTick = 0;
+    qreal m_widgetScale = 1.0;
+    int m_devicePollCount = 0;
     QVector<ConnectedDevice> m_connectedDevices;
     QFutureWatcher<QVector<ConnectedDevice>> m_deviceWatcher;
     QSystemTrayIcon* m_trayIcon = nullptr;
     QAction* m_visibilityAction = nullptr;
-    QAction* m_layoutAction = nullptr;
+    QAction* m_rearrangeAction = nullptr;
     QAction* m_startupAction = nullptr;
     WidgetLibraryDialog* m_library = nullptr;
     QNetworkAccessManager* m_weatherNetwork = nullptr;
@@ -209,5 +203,5 @@ private:
     QString m_dictionaryPartOfSpeech;
     QString m_dictionaryDefinition;
     int m_dictionaryReplySerial = 0;
-    static QList<BatteryWidget*> s_instances;
+    static QList<DesktopWidget*> s_instances;
 };

@@ -8,9 +8,23 @@
     <Filter Include="src\rendering\shaders" />
     <Filter Include="src\ui" />
     <Filter Include="src\widgets" />
+    <Filter Include="src\media" />
     <Filter Include="resources" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src/ui/scaleselector.cpp"><Filter>src\ui</Filter></ClCompile>
+    <ClCompile Include="src/media/systemmediasession.cpp"><Filter>src\media</Filter></ClCompile>
+    <ClCompile Include="src/widgets/musiccard.cpp"><Filter>src\widgets</Filter></ClCompile>
+    <ClCompile Include="src/rendering/cleartypetext.cpp"><Filter>src\rendering</Filter></ClCompile>
+    <ClInclude Include="src/ui/scaleselector.h"><Filter>src\ui</Filter></ClInclude>
+    <ClInclude Include="src/widgets/musiccard.h"><Filter>src\widgets</Filter></ClInclude>
+    <ClInclude Include="src/rendering/cleartypetext.h"><Filter>src\rendering</Filter></ClInclude>
+    <QtMoc Include="src/media/systemmediasession.h"><Filter>src\media</Filter></QtMoc>
+    <ClCompile Include="src/widgets/desktopwidget_paint.cpp"><Filter>src\widgets</Filter></ClCompile>
+    <ClCompile Include="src/widgets/desktopwidget_data.cpp"><Filter>src\widgets</Filter></ClCompile>
+    <ClCompile Include="src/widgets/desktopwidget_settings.cpp"><Filter>src\widgets</Filter></ClCompile>
+    <ClInclude Include="src/widgets/cardmetrics.h"><Filter>src\widgets</Filter></ClInclude>
+    <ClInclude Include="src/widgets/weatherformat.h"><Filter>src\widgets</Filter></ClInclude>
     <ClInclude Include="src/config.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -23,10 +37,10 @@
     <ClCompile Include="src/ui/firstrunwizard.cpp">
       <Filter>src\ui</Filter>
     </ClCompile>
-    <ClCompile Include="src/widgets/batterywidget.cpp">
+    <ClCompile Include="src/widgets/desktopwidget.cpp">
       <Filter>src\widgets</Filter>
     </ClCompile>
-    <ClInclude Include="src/widgets/batterywidget.h">
+    <ClInclude Include="src/widgets/desktopwidget.h">
       <Filter>src\widgets</Filter>
     </ClInclude>
     <ClInclude Include="src/ui/firstrunwizard.h">

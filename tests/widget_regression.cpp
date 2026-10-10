@@ -5,9 +5,13 @@
 #include "rendering/renderdiagnostics.h"
 #include "ui/widgetlibrarydialog.h"
 #include "ui/firstrunwizard.h"
+#include "ui/scaleselector.h"
+#include "widgets/musiccard.h"
+#include "media/systemmediasession.h"
+#include "rendering/cleartypetext.h"
 #include "app/appsettings.h"
 #include "ui/liquidglassmenu.h"
-#include "widgets/batterywidget.h"
+#include "widgets/desktopwidget.h"
 
 #include <QApplication>
 #include <QAbstractItemView>
@@ -52,6 +56,9 @@
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <psapi.h>
+#include <systemmediatransportcontrolsinterop.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Media.h>
 static std::atomic<int> captureFirstChanceExceptions{0};
 static quintptr captureModuleStart = 0;
 static quintptr captureModuleEnd = 0;
@@ -75,10 +82,12 @@ class ColorWindow : public QWidget {
 public:
     QColor color{210, 35, 25};
     QColor centerStripe;
+    int paintedFrames = 0;
     ColorWindow() {
         setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
     }
     void paintEvent(QPaintEvent*) override {
+        ++paintedFrames;
         QPainter painter(this);
         painter.fillRect(rect(), color);
         if (centerStripe.isValid())
@@ -169,8 +178,8 @@ public:
     int quality = 0;
     void paintOverlay(QPainter& painter) override {
         painter.scale(.85, .85);
-        QFont font(BatteryWidget::pingFangFontFamily(), 52, QFont::Normal);
-        BatteryWidget::applyFontSmoothing(font);
+        QFont font(DesktopWidget::pingFangFontFamily(), 52, QFont::Normal);
+        DesktopWidget::applyFontSmoothing(font);
         painter.setFont(font);
         painter.setPen(Qt::white);
         painter.setRenderHint(QPainter::TextAntialiasing, quality > 0);
@@ -180,6 +189,21 @@ public:
         painter.setFont(font);
         ResponsiveLayout::drawSingleLine(painter, QRectF(12, 110, 530, 45),
             Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("11时  14时  17时  32°"));
+    }
+};
+
+class ClearTypeGlass : public TestGlass {
+public:
+    void paintOverlay(QPainter& painter) override {
+        painter.fillRect(rect(), QColor(32, 32, 32));
+        QFont font(DesktopWidget::pingFangFontFamily());
+        font.setPixelSize(25);
+        DesktopWidget::applyFontSmoothing(font);
+        painter.setFont(font);
+        painter.setPen(Qt::white);
+        ResponsiveLayout::drawSingleLine(painter, QRectF(10, 20, 180, 40),
+            Qt::AlignCenter, QStringLiteral("音乐 Aa 123"));
+        painter.fillRect(QRectF(50, 95, 80, 12), Qt::red);
     }
 };
 
@@ -252,17 +276,246 @@ private slots:
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
         QStandardPaths::setTestModeEnabled(true);
-        QVERIFY(!BatteryWidget::pingFangFontFamily().isEmpty());
-        // Regression tests never contact the live weather/dictionary services.
+        QVERIFY(!DesktopWidget::pingFangFontFamily().isEmpty());
+        // 回归测试不访问真实的天气或词典服务。
         QNetworkProxy::setApplicationProxy(QNetworkProxy(QNetworkProxy::HttpProxy, "127.0.0.1", 9));
         QDir().mkpath("artifacts");
     }
 
     void init() {
-        // Each test changes persisted appearance/interaction settings. Avoid
-        // leaking click-through or live mode into the next independent case.
+        // 每个测试独立清理显示与交互设置，避免鼠标穿透或实时模式影响后续用例。
         QSettings().clear();
         QFile::remove(AppSettings::filePath());
+        DesktopWidget::setGlobalFontSmoothing(4);
+        QFile::remove(AppSettings::filePath());
+    }
+
+    void clearTypeUsesRgbCoverageAndRestoresGlPainter() {
+        DesktopWidget::setGlobalFontSmoothing(4);
+        for (qreal scale : {1.0, 1.25, 1.5, 1.75, 2.0}) {
+            QFont font(DesktopWidget::pingFangFontFamily());
+            font.setPixelSize(qRound(19 * scale));
+            DesktopWidget::applyFontSmoothing(font);
+            const QImage mask = ClearTypeText::coverage(font, QStringLiteral("清晰 Aa 123"));
+            QVERIFY(!mask.isNull());
+            int coloredPixels = 0;
+            for (int y = 0; y < mask.height(); ++y)
+                for (int x = 0; x < mask.width(); ++x) {
+                    const QColor pixel = mask.pixelColor(x, y);
+                    if (pixel.red() != pixel.green() || pixel.green() != pixel.blue())
+                        ++coloredPixels;
+                }
+            QVERIFY2(coloredPixels > 20, "ClearType mask unexpectedly contains only grayscale coverage");
+        }
+        ClearTypeGlass glass;
+        glass.setGlassRenderingEnabled(false);
+        glass.setDesktopCaptureEnabled(false);
+        glass.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&glass));
+        const QImage clear = glass.grabFramebuffer();
+        const qreal dpr = glass.devicePixelRatioF();
+        QCOMPARE(clear.pixelColor(qRound(60*dpr), qRound(100*dpr)), QColor(Qt::red));
+        int coloredPixels = 0;
+        for (int y = qRound(20*dpr); y < qRound(60*dpr); ++y)
+            for (int x = 0; x < clear.width(); ++x) {
+                const QColor pixel = clear.pixelColor(x,y);
+                if (pixel.red() != pixel.green() || pixel.green() != pixel.blue())
+                    ++coloredPixels;
+            }
+        QVERIFY(coloredPixels > 20);
+        DesktopWidget::setGlobalFontSmoothing(3);
+        const QImage gray = glass.grabFramebuffer();
+        QVERIFY(clear != gray);
+        QVERIFY(clear.save("artifacts/cleartype-native.png"));
+        QVERIFY(gray.save("artifacts/grayscale-native.png"));
+    }
+
+    void previewDoesNotStartServicesOrCreateConfiguration() {
+        for (auto kind : {DesktopWidget::CardKind::Battery, DesktopWidget::CardKind::Weather,
+                          DesktopWidget::CardKind::Clock, DesktopWidget::CardKind::Dictionary}) {
+            const QImage image = DesktopWidget::renderPreview(kind, 0, QSize(328,328), 1.5);
+            QVERIFY(!image.isNull());
+            QVERIFY(!QFile::exists(AppSettings::filePath()));
+        }
+    }
+
+    void scalePreviewAnimatesWithoutBlockingControls() {
+        FirstRunWizard wizard;
+        wizard.setDesktopCaptureEnabled(false);
+        wizard.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&wizard));
+        QTest::qWait(450);
+        wizard.findChild<QPushButton*>("continueButton")->click();
+        auto* actual = wizard.findChild<QWidget*>("actualSizePreview");
+        auto* slider = wizard.findChild<QSlider*>("scaleSlider");
+        QVERIFY(actual && slider);
+        QTRY_VERIFY(actual->isVisible());
+        slider->setValue(40);
+        QTRY_COMPARE(actual->width(), 131);
+        slider->setValue(200);
+        QTest::qWait(35);
+        QVERIFY(actual->width() > 131 && actual->width() < 656);
+        QTRY_COMPARE_WITH_TIMEOUT(actual->width(), 656, 1000);
+        const QRect controls = wizard.frameGeometry().translated(-actual->pos());
+        QVERIFY(!actual->mask().intersects(controls));
+        const QSize stableSurface = wizard.size();
+        QVector<qint64> intervals;
+        QElapsedTimer clock;
+        clock.start();
+        QTimer driver;
+        driver.setTimerType(Qt::PreciseTimer);
+        driver.setInterval(16);
+        int step = 0;
+        connect(&driver, &QTimer::timeout, &wizard, [&] {
+            intervals.append(clock.restart());
+            slider->setValue(40 + (step++ * 7) % 161);
+        });
+        driver.start();
+        QTest::qWait(1200);
+        driver.stop();
+        QCOMPARE(wizard.size(), stableSurface);
+        QVERIFY(intervals.size() > 30);
+        std::sort(intervals.begin(), intervals.end());
+        const qint64 p95 = intervals.at(intervals.size() * 95 / 100);
+        qInfo() << "连续缩放界面定时器 P95 间隔:" << p95 << "ms，DPR:" << wizard.devicePixelRatioF();
+        QVERIFY2(p95 < 50, "Continuous scaling blocks the UI event loop");
+        QVERIFY(!QFile::exists(AppSettings::filePath()));
+    }
+
+    void settingsAndWizardShareScaleSelector() {
+        DesktopWidget widget(nullptr, DesktopWidget::CardKind::Clock, false);
+        bool checked = false;
+        QTimer::singleShot(0, &widget, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            auto* slider = dialog->findChild<QSlider*>("scaleSlider");
+            auto* selector = slider ? dynamic_cast<ScaleSelector*>(slider->parentWidget()) : nullptr;
+            if (selector) {
+                slider->setValue(125);
+                checked = selector->previewSize() == DesktopWidget::cardSize(
+                    DesktopWidget::CardKind::Battery, 0, 1.25, dialog->screen()->availableGeometry());
+                dialog->accept();
+            } else dialog->reject();
+        });
+        widget.showSettingsDialog();
+        QVERIFY(checked);
+        QCOMPARE(widget.m_widgetScale, 1.25);
+        QCOMPARE(AppSettings().value("appearance/scale").toDouble(), 1.25);
+    }
+
+    void musicCardsRenderStatesAndRestoreConfiguration() {
+        MediaSnapshot media;
+        media.available = true;
+        media.playing = true;
+        media.canNext = media.canPrevious = media.canToggle = true;
+        media.title = QStringLiteral("从系统读取的曲目 · 测试很长的曲名不会溢出");
+        media.artist = QStringLiteral("艺术家");
+        media.durationMs = 240000;
+        media.positionMs = 75000;
+        for (const QSize size : {QSize(328,328), QSize(672,328)}) {
+            const auto regions = MusicCard::layout(QRectF(QPointF(), QSizeF(size)));
+            QVERIFY(!regions.toggle.intersects(regions.previous));
+            QVERIFY(!regions.toggle.intersects(regions.next));
+            for (bool playing : {true, false}) {
+                media.playing = playing;
+                QImage image(size * 2, QImage::Format_ARGB32_Premultiplied);
+                image.setDevicePixelRatio(2);
+                image.fill(QColor(32,40,55));
+                QPainter painter(&image);
+                MusicCard::paint(painter, QRectF(QPointF(), QSizeF(size)), media);
+                painter.end();
+                QVERIFY(image.save(QStringLiteral("artifacts/music-%1-%2.png").arg(size.width()).arg(playing)));
+            }
+        }
+        {
+            DesktopWidget music(nullptr, DesktopWidget::CardKind::Music, false,
+                QStringLiteral("music-restore"), 1);
+            QCOMPARE(music.cardVariant(), 1);
+            music.saveConfiguration();
+        }
+        auto restored = DesktopWidget::restoreWidgets();
+        QCOMPARE(restored.size(), 1);
+        QCOMPARE(restored.first()->cardKind(), DesktopWidget::CardKind::Music);
+        QCOMPARE(restored.first()->instanceId(), QStringLiteral("music-restore"));
+        QCOMPARE(restored.first()->cardVariant(), 1);
+        qDeleteAll(restored);
+    }
+
+    void systemMediaReadsAndControlsOwnSession() {
+#ifdef Q_OS_WIN
+        using namespace winrt::Windows::Media;
+        QWidget host;
+        host.setWindowTitle(QStringLiteral("系统音乐回归测试"));
+        host.resize(160,80);
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        SystemMediaTransportControls controls{nullptr};
+        try {
+            auto interop = winrt::get_activation_factory<SystemMediaTransportControls, ISystemMediaTransportControlsInterop>();
+            winrt::check_hresult(interop->GetForWindow(reinterpret_cast<HWND>(host.winId()),
+                winrt::guid_of<SystemMediaTransportControls>(), winrt::put_abi(controls)));
+            controls.IsEnabled(true);
+            controls.IsPlayEnabled(true);
+            controls.IsPauseEnabled(true);
+            controls.IsPreviousEnabled(true);
+            controls.IsNextEnabled(true);
+            auto updater = controls.DisplayUpdater();
+            updater.Type(MediaPlaybackType::Music);
+            updater.MusicProperties().Title(L"macdowsOS 媒体会话回归测试");
+            updater.MusicProperties().Artist(L"系统会话测试源");
+            updater.Update();
+            SystemMediaTransportControlsTimelineProperties timeline;
+            timeline.StartTime(std::chrono::milliseconds(0));
+            timeline.EndTime(std::chrono::milliseconds(240000));
+            timeline.Position(std::chrono::milliseconds(75000));
+            timeline.MinSeekTime(std::chrono::milliseconds(0));
+            timeline.MaxSeekTime(std::chrono::milliseconds(240000));
+            controls.UpdateTimelineProperties(timeline);
+            controls.PlaybackStatus(MediaPlaybackStatus::Playing);
+        } catch (const winrt::hresult_error&) {
+            QSKIP("Windows session does not provide desktop SMTC");
+        }
+        const auto cleanup = qScopeGuard([&] { controls.IsEnabled(false); });
+        auto* service = SystemMediaSession::instance();
+        QElapsedTimer timeout;
+        timeout.start();
+        while (service->snapshot().title != QStringLiteral("macdowsOS 媒体会话回归测试") && timeout.elapsed() < 6000)
+            QTest::qWait(100);
+        if (service->snapshot().title != QStringLiteral("macdowsOS 媒体会话回归测试"))
+            QSKIP("Another system media session is selected, or the shell did not publish the fixture");
+        QVERIFY(service->snapshot().available);
+        QVERIFY(service->snapshot().playing);
+        QCOMPARE(service->snapshot().artist, QStringLiteral("系统会话测试源"));
+        QCOMPARE(service->snapshot().durationMs, 240000);
+        QVERIFY(service->snapshot().positionMs >= 75000 && service->snapshot().positionMs < 90000);
+        // 只控制本测试创建的会话，避免影响用户已有的播放器。
+        std::atomic<int> buttons{0};
+        const auto token = controls.ButtonPressed([&](const auto&, const SystemMediaTransportControlsButtonPressedEventArgs& args) {
+            if (args.Button() == SystemMediaTransportControlsButton::Pause) {
+                ++buttons;
+                controls.PlaybackStatus(MediaPlaybackStatus::Paused);
+            } else if (args.Button() == SystemMediaTransportControlsButton::Next) {
+                ++buttons;
+                controls.DisplayUpdater().MusicProperties().Title(L"下一首测试曲目");
+                controls.DisplayUpdater().Update();
+            } else if (args.Button() == SystemMediaTransportControlsButton::Previous) {
+                ++buttons;
+                controls.DisplayUpdater().MusicProperties().Title(L"上一首测试曲目");
+                controls.DisplayUpdater().Update();
+            }
+        });
+        const auto revoke = qScopeGuard([&] { controls.ButtonPressed(token); });
+        service->sendCommand(SystemMediaSession::Command::TogglePlayback);
+        QTRY_VERIFY_WITH_TIMEOUT(buttons.load() > 0, 4000);
+        QTRY_VERIFY_WITH_TIMEOUT(!service->snapshot().playing, 4000);
+        QVERIFY(service->snapshot().canNext && service->snapshot().canPrevious);
+        service->sendCommand(SystemMediaSession::Command::Next);
+        QTRY_COMPARE_WITH_TIMEOUT(service->snapshot().title, QStringLiteral("下一首测试曲目"), 4000);
+        service->sendCommand(SystemMediaSession::Command::Previous);
+        QTRY_COMPARE_WITH_TIMEOUT(service->snapshot().title, QStringLiteral("上一首测试曲目"), 4000);
+#else
+        QSKIP("Requires Windows system media sessions");
+#endif
     }
 
     void settingsJsonMigratesAndPreservesLayout() {
@@ -312,7 +565,7 @@ private slots:
                      .value("location").toString(), QStringLiteral("长沙"));
         QVERIFY(root.value("settings").toObject().contains("interaction"));
 
-        BatteryWidget::saveAllConfigurations();
+        DesktopWidget::saveAllConfigurations();
         QFile layoutSaved(AppSettings::filePath());
         QVERIFY(layoutSaved.open(QIODevice::ReadOnly));
         root = QJsonDocument::fromJson(layoutSaved.readAll()).object();
@@ -324,14 +577,12 @@ private slots:
         QImage image(QSize(480, 220), QImage::Format_ARGB32_Premultiplied);
         image.fill(Qt::transparent);
         QPainter painter(&image);
-        QFont font(BatteryWidget::pingFangFontFamily());
+        QFont font(DesktopWidget::pingFangFontFamily());
         font.setPointSize(72);
         painter.setFont(font);
         painter.setPen(Qt::white);
 
-        // Deliberately make the alignment box much shorter than the font's
-        // line height. The shared point/baseline renderer must preserve the
-        // complete glyph instead of clipping it to this rectangle.
+        // 刻意使用小于字体行高的对齐区域，验证基线绘制能保留完整字形。
         const QRectF shortBox(30, 95, 400, 18);
         ResponsiveLayout::drawSingleLine(
             painter, shortBox, Qt::AlignLeft | Qt::AlignVCenter,
@@ -412,12 +663,12 @@ private slots:
     }
 
     void cardsPreserveOriginalSizeAndTransparentCorners() {
-        for (auto kind : {BatteryWidget::CardKind::Battery, BatteryWidget::CardKind::Weather,
-                          BatteryWidget::CardKind::Clock, BatteryWidget::CardKind::Dictionary}) {
+        for (auto kind : {DesktopWidget::CardKind::Battery, DesktopWidget::CardKind::Weather,
+                          DesktopWidget::CardKind::Clock, DesktopWidget::CardKind::Dictionary}) {
             AppSettings().setValue("appearance/scale", 1.0);
-            BatteryWidget widget(nullptr, kind, false, QStringLiteral("corner-probe"), 0);
+            DesktopWidget widget(nullptr, kind, false, QStringLiteral("corner-probe"), 0);
             QCOMPARE(widget.size(), QSize(328, 328));
-            QCOMPARE(widget.m_uiScale, 1.0);
+            QCOMPARE(widget.m_widgetScale, 1.0);
             QCOMPARE(AppSettings().value("appearance/scale").toDouble(), 1.0);
             widget.setDesktopLayerEnabled(false);
             widget.setDesktopCaptureEnabled(false);
@@ -445,18 +696,18 @@ private slots:
     void batteryVariantsKeepGridShapeAndRender() {
         AppSettings().setValue("appearance/scale", 0.4);
 
-        BatteryWidget compact(nullptr, BatteryWidget::CardKind::Battery, false,
+        DesktopWidget compact(nullptr, DesktopWidget::CardKind::Battery, false,
                               QStringLiteral("battery-1x1"), 0);
-        BatteryWidget wide(nullptr, BatteryWidget::CardKind::Battery, false,
+        DesktopWidget wide(nullptr, DesktopWidget::CardKind::Battery, false,
                            QStringLiteral("battery-1x2"), 1);
-        BatteryWidget list(nullptr, BatteryWidget::CardKind::Battery, false,
+        DesktopWidget list(nullptr, DesktopWidget::CardKind::Battery, false,
                            QStringLiteral("battery-2x2"), 2);
         QCOMPARE(compact.width(), compact.height());
         QCOMPARE(wide.height(), compact.height());
         QCOMPARE(list.width(), wide.width());
         QCOMPARE(list.width(), list.height());
 
-        for (BatteryWidget* widget : {&compact, &wide, &list}) {
+        for (DesktopWidget* widget : {&compact, &wide, &list}) {
             widget->setDesktopLayerEnabled(false);
             widget->setDesktopCaptureEnabled(false);
             widget->setAnimationEnabled(false);
@@ -464,7 +715,7 @@ private slots:
             background.fill(QColor(53, 67, 84));
             widget->setBackgroundImage(background);
             widget->m_hasBattery = true;
-            widget->m_level = 95;
+            widget->m_batteryLevel = 95;
             widget->m_connectedDevices = {
                 {QStringLiteral("Mouse @LOFREE"), 39, 1}
             };
@@ -488,11 +739,11 @@ private slots:
     void weatherVariantsUseReferenceShapesAndChinaWeatherPayload() {
         AppSettings().setValue("appearance/scale", 0.4);
 
-        BatteryWidget compact(nullptr, BatteryWidget::CardKind::Weather, false,
+        DesktopWidget compact(nullptr, DesktopWidget::CardKind::Weather, false,
                               QStringLiteral("weather-1x1"), 0);
-        BatteryWidget hourly(nullptr, BatteryWidget::CardKind::Weather, false,
+        DesktopWidget hourly(nullptr, DesktopWidget::CardKind::Weather, false,
                              QStringLiteral("weather-1x2"), 1);
-        BatteryWidget forecast(nullptr, BatteryWidget::CardKind::Weather, false,
+        DesktopWidget forecast(nullptr, DesktopWidget::CardKind::Weather, false,
                                QStringLiteral("weather-2x2"), 2);
         QCOMPARE(compact.width(), compact.height());
         QCOMPARE(hourly.height(), compact.height());
@@ -519,7 +770,7 @@ private slots:
         QCOMPARE(forecast.m_weatherDays.at(1).code, 7);
         QCOMPARE(forecast.m_weatherDays.at(1).label, QStringLiteral("周三"));
 
-        const QVector<BatteryWidget::WeatherHour> hours = {
+        const QVector<DesktopWidget::WeatherHour> hours = {
             {QStringLiteral("11时"), QStringLiteral("30"), QStringLiteral("多云"), 1},
             {QStringLiteral("12时"), QStringLiteral("30"), QStringLiteral("多云"), 1},
             {QStringLiteral("13时"), QStringLiteral("31"), QStringLiteral("多云"), 1},
@@ -527,7 +778,7 @@ private slots:
             {QStringLiteral("15时"), QStringLiteral("31"), QStringLiteral("多云"), 1},
             {QStringLiteral("16时"), QStringLiteral("31"), QStringLiteral("多云"), 1}
         };
-        const QVector<BatteryWidget::WeatherDay> days = {
+        const QVector<DesktopWidget::WeatherDay> days = {
             {QStringLiteral("今天"), QStringLiteral("32"), QStringLiteral("21"), QStringLiteral("多云"), 1},
             {QStringLiteral("周三"), QStringLiteral("31"), QStringLiteral("23"), QStringLiteral("小雨"), 7},
             {QStringLiteral("周四"), QStringLiteral("29"), QStringLiteral("20"), QStringLiteral("小雨"), 7},
@@ -535,7 +786,7 @@ private slots:
             {QStringLiteral("周六"), QStringLiteral("30"), QStringLiteral("22"), QStringLiteral("晴"), 0},
             {QStringLiteral("周日"), QStringLiteral("29"), QStringLiteral("21"), QStringLiteral("多云"), 1}
         };
-        for (BatteryWidget* widget : {&compact, &hourly, &forecast}) {
+        for (DesktopWidget* widget : {&compact, &hourly, &forecast}) {
             widget->setDesktopLayerEnabled(false);
             widget->setDesktopCaptureEnabled(false);
             widget->setAnimationEnabled(false);
@@ -583,7 +834,7 @@ private slots:
             {"missing-data", QStringLiteral("定位中"), QString(), QString(),
              QString(), QString(), -1, false, false}
         };
-        const auto renderState = [&](BatteryWidget& widget,
+        const auto renderState = [&](DesktopWidget& widget,
                                      const WeatherState& state,
                                      const char* variant) {
             widget.m_weatherLocation = state.location;
@@ -594,12 +845,12 @@ private slots:
             widget.m_weatherCode = state.code;
             widget.m_weatherNight = state.night;
             widget.m_weatherHours = state.hasForecast ? hours
-                                                       : QVector<BatteryWidget::WeatherHour>{
+                                                       : QVector<DesktopWidget::WeatherHour>{
                                                            {QString(), QString(), QString(), -1},
                                                            {QStringLiteral("稍后"), QString(), QString(), -1}
                                                        };
             widget.m_weatherDays = state.hasForecast ? days
-                                                      : QVector<BatteryWidget::WeatherDay>{
+                                                      : QVector<DesktopWidget::WeatherDay>{
                                                            {QStringLiteral("今天"), QString(), QString(), QString(), -1},
                                                            {QStringLiteral("周三"), QString(), QString(), QString(), -1}
                                                        };
@@ -622,26 +873,26 @@ private slots:
     void clockAndDictionaryUseResponsiveTextLayout() {
         AppSettings().setValue("appearance/scale", 0.4);
 
-        BatteryWidget analog(nullptr, BatteryWidget::CardKind::Clock, false,
+        DesktopWidget analog(nullptr, DesktopWidget::CardKind::Clock, false,
                              QStringLiteral("clock-responsive-analog"), 0);
-        BatteryWidget digital(nullptr, BatteryWidget::CardKind::Clock, false,
+        DesktopWidget digital(nullptr, DesktopWidget::CardKind::Clock, false,
                               QStringLiteral("clock-responsive-digital"), 2);
-        BatteryWidget dark(nullptr, BatteryWidget::CardKind::Clock, false,
+        DesktopWidget dark(nullptr, DesktopWidget::CardKind::Clock, false,
                            QStringLiteral("clock-responsive-dark"), 1);
-        BatteryWidget city(nullptr, BatteryWidget::CardKind::Clock, false,
+        DesktopWidget city(nullptr, DesktopWidget::CardKind::Clock, false,
                            QStringLiteral("clock-responsive-city"), 4);
-        BatteryWidget wideDigital(nullptr, BatteryWidget::CardKind::Clock, false,
+        DesktopWidget wideDigital(nullptr, DesktopWidget::CardKind::Clock, false,
                                   QStringLiteral("clock-responsive-wide"), 8);
         QVERIFY2(wideDigital.width() > wideDigital.height(),
                  "The 2x1 digital clock must be horizontal");
-        BatteryWidget dictionary(nullptr, BatteryWidget::CardKind::Dictionary, false,
+        DesktopWidget dictionary(nullptr, DesktopWidget::CardKind::Dictionary, false,
                                  QStringLiteral("dictionary-responsive-wide"), 1);
         dictionary.m_dictionaryWord = QStringLiteral("serendipity");
         dictionary.m_dictionaryPhonetic = QStringLiteral("/ˌserənˈdipədē/");
         dictionary.m_dictionaryPartOfSpeech = QStringLiteral("noun");
         dictionary.m_dictionaryDefinition = QStringLiteral("the chance occurrence of a happy discovery");
 
-        for (BatteryWidget* widget : {&analog, &digital, &dark, &city,
+        for (DesktopWidget* widget : {&analog, &digital, &dark, &city,
                                       &wideDigital, &dictionary}) {
             widget->setDesktopLayerEnabled(false);
             widget->setDesktopCaptureEnabled(false);
@@ -669,16 +920,16 @@ private slots:
         QVERIFY(screen);
         const QRect area = screen->availableGeometry();
         const qreal scale = 0.4;
-        const QRect first = BatteryWidget::nearestGridRect(
-            BatteryWidget::CardKind::Battery, 0, area.topLeft(), scale);
+        const QRect first = DesktopWidget::nearestGridRect(
+            DesktopWidget::CardKind::Battery, 0, area.topLeft(), scale);
         QVERIFY(first.isValid());
 
-        BatteryWidget hidden(nullptr, BatteryWidget::CardKind::Battery, false,
+        DesktopWidget hidden(nullptr, DesktopWidget::CardKind::Battery, false,
                              QStringLiteral("hidden-grid-card"), 0);
         hidden.setGeometry(first);
         hidden.hide();
-        const QRect target = BatteryWidget::nearestGridRect(
-            BatteryWidget::CardKind::Battery, 0, first.topLeft(), scale);
+        const QRect target = DesktopWidget::nearestGridRect(
+            DesktopWidget::CardKind::Battery, 0, first.topLeft(), scale);
         QCOMPARE(target, first);
     }
 
@@ -688,44 +939,44 @@ private slots:
         QVERIFY(screen);
         const QRect area = screen->availableGeometry();
         const QPoint freePosition = area.topLeft() + QPoint(85, 95);
-        BatteryWidget card(nullptr, BatteryWidget::CardKind::Clock, false,
+        DesktopWidget card(nullptr, DesktopWidget::CardKind::Clock, false,
                            QStringLiteral("free-placement"), 0);
         QVERIFY(card.placeAtDesktopPoint(freePosition + QPoint(card.width() / 2,
                                                                card.height() / 2)));
         QCOMPARE(card.pos(), freePosition);
-        QVERIFY(!BatteryWidget::nearbyWidgetRect(BatteryWidget::CardKind::Clock, 0,
+        QVERIFY(!DesktopWidget::nearbyWidgetRect(DesktopWidget::CardKind::Clock, 0,
                                                   freePosition + QPoint(45, 37), 0.4).isValid());
 
         card.show();
         QVERIFY(QTest::qWaitForWindowExposed(&card));
         const QPoint beside(card.geometry().right() + 9, card.y());
-        const QRect snapped = BatteryWidget::nearbyWidgetRect(
-            BatteryWidget::CardKind::Clock, 0, beside, 0.4);
+        const QRect snapped = DesktopWidget::nearbyWidgetRect(
+            DesktopWidget::CardKind::Clock, 0, beside, 0.4);
         QVERIFY(snapped.isValid());
         QCOMPARE(snapped.top(), card.y());
         QVERIFY(snapped.left() > card.geometry().right());
         const QPoint alongEdge(beside.x(), card.y() + 30);
-        const QRect edgeSnap = BatteryWidget::nearbyWidgetRect(
-            BatteryWidget::CardKind::Clock, 0, alongEdge, 0.4);
+        const QRect edgeSnap = DesktopWidget::nearbyWidgetRect(
+            DesktopWidget::CardKind::Clock, 0, alongEdge, 0.4);
         QVERIFY(edgeSnap.isValid());
         QCOMPARE(edgeSnap, snapped);
-        QCOMPARE(BatteryWidget::nearbyWidgetRect(BatteryWidget::CardKind::Clock, 0,
+        QCOMPARE(DesktopWidget::nearbyWidgetRect(DesktopWidget::CardKind::Clock, 0,
                      QPoint(beside.x(), card.y() + 55), 0.4), snapped);
-        QCOMPARE(BatteryWidget::nearbyWidgetRect(BatteryWidget::CardKind::Clock, 0,
+        QCOMPARE(DesktopWidget::nearbyWidgetRect(DesktopWidget::CardKind::Clock, 0,
                      beside + QPoint(40, 0), 0.4), snapped);
-        QCOMPARE(BatteryWidget::nearbyWidgetRect(BatteryWidget::CardKind::Clock, 0,
+        QCOMPARE(DesktopWidget::nearbyWidgetRect(DesktopWidget::CardKind::Clock, 0,
                      beside + QPoint(60, 0), 0.4), snapped);
-        QVERIFY(!BatteryWidget::nearbyWidgetRect(BatteryWidget::CardKind::Clock, 0,
+        QVERIFY(!DesktopWidget::nearbyWidgetRect(DesktopWidget::CardKind::Clock, 0,
                      beside + QPoint(130, 0), 0.4).isValid());
-        QVERIFY(!BatteryWidget::nearbyWidgetRect(BatteryWidget::CardKind::Clock, 0,
+        QVERIFY(!DesktopWidget::nearbyWidgetRect(DesktopWidget::CardKind::Clock, 0,
                   area.center(), 0.4).isValid());
 
-        BatteryWidget added(nullptr, BatteryWidget::CardKind::Clock, false,
+        DesktopWidget added(nullptr, DesktopWidget::CardKind::Clock, false,
                             QStringLiteral("overlap-drop"), 0);
         QVERIFY(added.placeAtDesktopPoint(card.geometry().center()));
         QVERIFY(!added.geometry().intersects(card.geometry()));
 
-        BatteryWidget dragged(nullptr, BatteryWidget::CardKind::Clock, false,
+        DesktopWidget dragged(nullptr, DesktopWidget::CardKind::Clock, false,
                               QStringLiteral("overlap-drag"), 0);
         dragged.move(area.center());
         dragged.show();
@@ -735,7 +986,7 @@ private slots:
         dragged.windowDragFinished();
         QVERIFY(!dragged.geometry().intersects(card.geometry()));
 
-        BatteryWidget restored(nullptr, BatteryWidget::CardKind::Clock, false,
+        DesktopWidget restored(nullptr, DesktopWidget::CardKind::Clock, false,
                                QStringLiteral("overlap-show"), 0);
         restored.move(card.pos());
         restored.show();
@@ -748,7 +999,7 @@ private slots:
         AppSettings().setValue("appearance/scale", 0.4);
         QScreen* screen = QGuiApplication::primaryScreen();
         QVERIFY(screen);
-        BatteryWidget anchor(nullptr, BatteryWidget::CardKind::Clock, false,
+        DesktopWidget anchor(nullptr, DesktopWidget::CardKind::Clock, false,
                              QStringLiteral("corner-anchor"), 0);
         anchor.move(screen->availableGeometry().center()
                     - QPoint(anchor.width() / 2, anchor.height() / 2));
@@ -764,11 +1015,11 @@ private slots:
         };
         const QPoint farther[] = {{-25, -25}, {25, -25}, {-25, 25}, {25, 25}};
         for (int index = 0; index < 4; ++index) {
-            const QRect slot = BatteryWidget::nearbyWidgetRect(
-                BatteryWidget::CardKind::Clock, 0, probes[index], 0.4);
+            const QRect slot = DesktopWidget::nearbyWidgetRect(
+                DesktopWidget::CardKind::Clock, 0, probes[index], 0.4);
             QVERIFY2(slot.isValid(), "Every corner needs a placement slot");
             QVERIFY(!slot.intersects(bounds));
-            QCOMPARE(BatteryWidget::nearbyWidgetRect(BatteryWidget::CardKind::Clock, 0,
+            QCOMPARE(DesktopWidget::nearbyWidgetRect(DesktopWidget::CardKind::Clock, 0,
                          probes[index] + farther[index], 0.4), slot);
             if (index % 2 == 0)
                 QVERIFY(slot.right() < bounds.left());
@@ -829,7 +1080,7 @@ private slots:
         QVERIFY(QFile::exists(AppSettings::filePath()));
     }
 
-    void firstRunWizardPagesScaleLive() {
+    void firstRunWizardShowsActualSizeWithoutResizingSurface() {
         FirstRunWizard wizard;
         wizard.show();
         QVERIFY(QTest::qWaitForWindowExposed(&wizard));
@@ -849,27 +1100,35 @@ private slots:
         QVERIFY(slider && scaleValue);
         QVERIFY(!wizard.findChild<QFrame*>(QStringLiteral("previewPanel")));
         QVERIFY(!wizard.findChild<QFrame*>(QStringLiteral("previewCard")));
+        auto* selector = dynamic_cast<ScaleSelector*>(slider->parentWidget());
+        QVERIFY(selector);
+        const QSize wizardSize = wizard.size();
         for (int percent : {40, 85, 100, 150, 200, 100}) {
             slider->setValue(percent);
             QApplication::processEvents();
             QCOMPARE(scaleValue->text(), QStringLiteral("%1%").arg(percent));
-            const QSize available = wizard.screen()->availableGeometry().size() - QSize(32, 32);
-            QCOMPARE(wizard.size(), QSize(qRound(780 * percent / 100.0),
-                                          qRound(540 * percent / 100.0)).boundedTo(available));
-            QCOMPARE(scaleNext->height(), qRound(48 * percent / 100.0));
-            QVERIFY(scaleValue->styleSheet().contains(
-                QStringLiteral("font-size:%1px").arg(qRound(20 * percent / 100.0))));
-            QVERIFY(!QFile::exists(AppSettings::filePath()));
+            QCOMPARE(wizard.size(), wizardSize);
+            QCOMPARE(scaleNext->height(), 48);
+            const QSize expected = DesktopWidget::cardSize(DesktopWidget::CardKind::Battery,
+                0, percent / 100.0, wizard.screen()->availableGeometry());
+            QCOMPARE(selector->previewSize(), expected);
+            auto* actual = wizard.findChild<QWidget*>(QStringLiteral("actualSizePreview"));
+            QVERIFY(actual && actual->isVisible());
+            QTRY_COMPARE_WITH_TIMEOUT(actual->size(), expected, 1000);
+            DesktopWidget reference(nullptr, DesktopWidget::CardKind::Battery, false,
+                QStringLiteral("size-reference"), 0, true);
+            reference.applyScale(percent / 100.0);
+            QCOMPARE(actual->size(), reference.size());
+            QFile::remove(AppSettings::filePath());
             wizard.grab().save(QStringLiteral("artifacts/wizard-scale-%1.png").arg(percent));
         }
-        wizard.grab().save("artifacts/wizard-scale-no-preview.png");
         scaleNext->click();
         QTest::qWait(90);
         QVERIFY(pages.at(2)->x() > 0 && pages.at(2)->x() < wizard.width());
         QTest::qWait(320);
         QCOMPARE(pages.at(2)->x(), 0);
         QCOMPARE(wizard.renderScale(), 0.6f);
-        QCOMPARE(wizard.font().family(), BatteryWidget::pingFangFontFamily());
+        QCOMPARE(wizard.font().family(), DesktopWidget::pingFangFontFamily());
         wizard.hide();
     }
 
@@ -1004,7 +1263,7 @@ private slots:
         QCOMPARE(saved.value("appearance/liveBackdrop").toBool(), true);
         QCOMPARE(saved.value("appearance/blurStrength").toInt(), 50);
         QCOMPARE(saved.value("appearance/opacity").toDouble(), 1.0);
-        QCOMPARE(saved.value("appearance/fontSmoothing").toInt(), 2);
+        QCOMPARE(saved.value("appearance/fontSmoothing").toInt(), 4);
         QCOMPARE(saved.value("interaction/mouseThrough").toBool(), false);
         QCOMPARE(saved.value("interaction/lowPowerRefresh").toBool(), false);
         QCOMPARE(saved.value("weather/location").toString(), QStringLiteral("北京"));
@@ -1181,11 +1440,11 @@ private slots:
     void draggingCardHidesApplicationWindowsButKeepsWidgets() {
         AppSettings().setValue("appearance/scale", 0.4);
 
-        BatteryWidget dragged(nullptr, BatteryWidget::CardKind::Weather, false,
+        DesktopWidget dragged(nullptr, DesktopWidget::CardKind::Weather, false,
                               QStringLiteral("drag-isolation-active"), 0);
-        BatteryWidget visiblePeer(nullptr, BatteryWidget::CardKind::Clock, false,
+        DesktopWidget visiblePeer(nullptr, DesktopWidget::CardKind::Clock, false,
                                   QStringLiteral("drag-isolation-visible"), 0);
-        BatteryWidget hiddenPeer(nullptr, BatteryWidget::CardKind::Dictionary, false,
+        DesktopWidget hiddenPeer(nullptr, DesktopWidget::CardKind::Dictionary, false,
                                  QStringLiteral("drag-isolation-hidden"), 0);
         const QPoint origin = QGuiApplication::primaryScreen()
                                   ->availableGeometry().topLeft() + QPoint(80, 80);
@@ -1227,7 +1486,7 @@ private slots:
             1000);
 #endif
 
-        // Cancellation and focus-loss paths use the same restoration hook.
+        // 取消和失去焦点应使用相同的窗口恢复路径。
         const QPoint secondOrigin = dragged.pos();
         mouse(dragged, QEvent::MouseButtonPress, {30, 30},
               secondOrigin + QPoint(30, 30), Qt::LeftButton, Qt::LeftButton);
@@ -1279,9 +1538,7 @@ private slots:
                  qPrintable(QStringLiteral("initial backdrop rgba(%1,%2,%3,%4)")
                                 .arg(initialBackdrop.red()).arg(initialBackdrop.green())
                                 .arg(initialBackdrop.blue()).arg(initialBackdrop.alpha())));
-        // The old self-removal code stretched the two horizontal edge pixels
-        // across the card, destroying this vertical feature into scan-line
-        // bands. The internal exclusion path must reveal its real 2-D detail.
+        // 验证内部排除路径保留背景二维细节，不通过拉伸边缘像素填补组件区域。
         background.centerStripe = QColor(20, 210, 45);
         background.repaint();
         QColor observed;
@@ -1317,7 +1574,7 @@ private slots:
         QVERIFY(glass.dragging());
         mouse(glass, QEvent::MouseButtonRelease, {50, 50}, glass.pos() + QPoint(50, 50), Qt::LeftButton, Qt::NoButton);
         QVERIFY(!glass.dragging());
-        // A hidden scene must not keep a timer repainting it.
+        // 隐藏场景不能继续定时重绘。
         glass.hide();
         QTest::qWait(100);
         const quint64 revision = glass.frameRevision();
@@ -1327,8 +1584,7 @@ private slots:
 
     void draggingKeepsInteractiveRenderCadence() {
         TestGlass glass;
-        // Isolate the scene scheduler from desktop-capture completions: a
-        // moving static card must repaint at interaction cadence on its own.
+        // 隔离场景调度与捕获回调，验证静态卡片拖动时能独立按交互频率绘制。
         glass.setDesktopCaptureEnabled(false);
         glass.move(QGuiApplication::primaryScreen()->availableGeometry().center()
                    - QPoint(glass.width() / 2, glass.height() / 2));
@@ -1382,8 +1638,7 @@ private slots:
             QTest::qWait(150);
             QCOMPARE(lower.m_backdropTimer->interval(), 10000);
             QCOMPARE(moving.m_backdropTimer->interval(), moving.activeDisplayInterval());
-            // A WGC request queued immediately before pointer-down may still
-            // be starting. It must complete and never be replenished in drag.
+            // 按下鼠标前已排队的 WGC 请求允许完成，拖动期间不能继续补充。
             QTRY_VERIFY_WITH_TIMEOUT(!moving.m_capturesInFlight && !lower.m_capturesInFlight, 2000);
             const quint64 lowerRevision = lower.frameRevision();
             const quint64 movingRevision = moving.frameRevision();
@@ -1456,8 +1711,7 @@ private slots:
                  "system screenshot omitted the glass card");
         QVERIFY(screenshot.save("artifacts/system-screenshot-visible.png"));
 
-        // The live sampler is frozen while affinity is off, so a changing
-        // lower window cannot feed this card back into its own material.
+        // 系统截图期间暂停实时采样，避免变化的下层窗口把卡片反馈到自身材质。
         background.color = QColor(20, 60, 215);
         background.update();
         QTest::qWait(300);
@@ -1540,28 +1794,28 @@ private slots:
 
     void globalFontSmoothingProfiles() {
         for (int level = 0; level <= 3; ++level) {
-            BatteryWidget::setGlobalFontSmoothing(level);
-            QCOMPARE(BatteryWidget::globalFontSmoothing(), level);
+            DesktopWidget::setGlobalFontSmoothing(level);
+            QCOMPARE(DesktopWidget::globalFontSmoothing(), level);
             QCOMPARE(AppSettings().value("appearance/fontSmoothing").toInt(), level);
-            QFont font(BatteryWidget::pingFangFontFamily());
-            BatteryWidget::applyFontSmoothing(font);
+            QFont font(DesktopWidget::pingFangFontFamily());
+            DesktopWidget::applyFontSmoothing(font);
             if (level == 0)
                 QVERIFY(int(font.styleStrategy()) & int(QFont::NoAntialias));
             else
                 QVERIFY(int(font.styleStrategy()) & int(QFont::PreferAntialias));
         }
-        BatteryWidget::setGlobalFontSmoothing(2);
+        DesktopWidget::setGlobalFontSmoothing(2);
     }
 
     void fontSmoothingChangesRenderedCoverage() {
         const auto renderText = [](int level) {
-            BatteryWidget::setGlobalFontSmoothing(level);
+            DesktopWidget::setGlobalFontSmoothing(level);
             QImage image(260, 100, QImage::Format_ARGB32_Premultiplied);
             image.fill(Qt::transparent);
             QPainter painter(&image);
             painter.setRenderHint(QPainter::TextAntialiasing, level > 0);
-            QFont font(BatteryWidget::pingFangFontFamily(), 48, QFont::DemiBold);
-            BatteryWidget::applyFontSmoothing(font);
+            QFont font(DesktopWidget::pingFangFontFamily(), 48, QFont::DemiBold);
+            DesktopWidget::applyFontSmoothing(font);
             painter.setFont(font);
             painter.setPen(Qt::white);
             painter.drawText(image.rect(), Qt::AlignCenter, QStringLiteral("Aa 26"));
@@ -1584,11 +1838,11 @@ private slots:
         QVERIFY2(smoothedPartial > aliasedPartial,
                  qPrintable(QStringLiteral("partial alpha pixels: off=%1 on=%2")
                                 .arg(aliasedPartial).arg(smoothedPartial)));
-        BatteryWidget::setGlobalFontSmoothing(2);
+        DesktopWidget::setGlobalFontSmoothing(2);
     }
 
     void fontSmoothingRefreshesOpenGalleryPreviews() {
-        BatteryWidget::setGlobalFontSmoothing(0);
+        DesktopWidget::setGlobalFontSmoothing(0);
         WidgetLibraryDialog library;
         QFrame* tile = nullptr;
         for (QFrame* candidate : library.findChildren<QFrame*>(QStringLiteral("widgetTile"))) {
@@ -1600,29 +1854,28 @@ private slots:
         }
         QVERIFY(tile);
         const QImage aliased = tile->grab().toImage();
-        BatteryWidget::setGlobalFontSmoothing(3);
+        DesktopWidget::setGlobalFontSmoothing(3);
         const QImage smoothed = tile->grab().toImage();
         QVERIFY(!aliased.isNull());
         QVERIFY2(aliased != smoothed,
                  "The open gallery kept the preview rendered with the previous font setting");
-        BatteryWidget::setGlobalFontSmoothing(2);
+        DesktopWidget::setGlobalFontSmoothing(2);
     }
 
     void clearTextMatchesNativeRasterAtFractionalScale() {
-        // A partial-alpha count alone rewards blur. Compare actual glyph
-        // pixels with Qt's native-size rasterization, including small CJK.
+        // 半透明像素计数不能区分清晰与模糊，直接对照原生字号栅格化结果。
         const QString text = QStringLiteral("添加小组件 时钟 28.4 Aa");
         for (int level : {2, 3}) {
-            BatteryWidget::setGlobalFontSmoothing(level);
+            DesktopWidget::setGlobalFontSmoothing(level);
             for (qreal dpr : {1.0, 1.25, 1.5, 2.0}) {
                 for (qreal uiScale : {.7, 1.0}) {
                     for (int size : {12, 16, 28}) {
                         QImage actual(1100, 160, QImage::Format_ARGB32_Premultiplied);
                         actual.setDevicePixelRatio(dpr);
                         actual.fill(Qt::transparent);
-                        QFont font(BatteryWidget::pingFangFontFamily());
+                        QFont font(DesktopWidget::pingFangFontFamily());
                         font.setPixelSize(size);
-                        BatteryWidget::applyFontSmoothing(font);
+                        DesktopWidget::applyFontSmoothing(font);
                         const QPointF baseline(16.25, 60.25);
                         QPainter painter(&actual);
                         painter.scale(uiScale, uiScale);
@@ -1649,29 +1902,29 @@ private slots:
                 }
             }
         }
-        BatteryWidget::setGlobalFontSmoothing(2);
+        DesktopWidget::setGlobalFontSmoothing(2);
     }
 
     void galleryPreviewsUseNativePixels() {
-        BatteryWidget::setGlobalFontSmoothing(3);
+        DesktopWidget::setGlobalFontSmoothing(3);
         const QSize box(204, 128);
         for (qreal dpr : {1.0, 1.25, 1.5, 2.0}) {
-            const QImage image = BatteryWidget::renderPreview(
-                BatteryWidget::CardKind::Dictionary, 0, box, dpr);
+            const QImage image = DesktopWidget::renderPreview(
+                DesktopWidget::CardKind::Dictionary, 0, box, dpr);
             QVERIFY(!image.isNull());
             QCOMPARE(image.devicePixelRatio(), dpr);
             QCOMPARE(image.size(), QSize(qRound(128 * dpr), qRound(128 * dpr)));
         }
         WidgetLibraryDialog library;
         library.selectCategory(1);
-        // Layout/stacking changes can reorder QObject's child list.
+        // 布局和层级变化可能调整 QObject 子对象次序。
         auto* tile = library.m_tiles.first();
         QVERIFY(tile);
         const qreal dpr = tile->devicePixelRatioF();
         const qreal galleryScale = tile->width() / 220.0;
         const qreal previewDpr = dpr * galleryScale;
-        const QImage reference = BatteryWidget::renderPreview(
-            BatteryWidget::CardKind::Battery, 0, box, previewDpr);
+        const QImage reference = DesktopWidget::renderPreview(
+            DesktopWidget::CardKind::Battery, 0, box, previewDpr);
         QImage rendered(tile->size() * dpr, reference.format());
         rendered.setDevicePixelRatio(dpr);
         rendered.fill(Qt::transparent);
@@ -1685,8 +1938,7 @@ private slots:
         qInfo() << "Preview native DPI" << dpr << "origin" << origin;
         crop.save(QStringLiteral("artifacts/preview-native-tile.png"));
         reference.save(QStringLiteral("artifacts/preview-native-reference.png"));
-        // The battery payload can update between two captures. Compare the
-        // static antialiased rim to detect any filtering of the preview image.
+        // 电量数据可能在两次捕获之间变化，使用静态抗锯齿边缘检查预览是否被过滤。
         const QRect rim(0, 0, reference.width(), qRound(3 * dpr));
         QCOMPARE(crop.copy(rim), reference.copy(rim));
         for (auto* nav : library.m_navButtons) {
@@ -1694,11 +1946,11 @@ private slots:
             QCOMPARE(icon.size(), QSize(54, 54));
             QCOMPARE(icon.devicePixelRatio(), 2.0);
         }
-        BatteryWidget::setGlobalFontSmoothing(2);
+        DesktopWidget::setGlobalFontSmoothing(2);
     }
 
     void galleryDictionaryTextAppearance() {
-        BatteryWidget::setGlobalFontSmoothing(3);
+        DesktopWidget::setGlobalFontSmoothing(3);
         WidgetLibraryDialog library;
         library.prepareBackdrop();
         library.selectCategory(4);
@@ -1706,26 +1958,26 @@ private slots:
         QVERIFY(QTest::qWaitForWindowExposed(&library));
         QTest::qWait(400);
         QVERIFY(library.grab().save(QStringLiteral("artifacts/gallery-dictionary-native.png")));
-        QCOMPARE(qApp->font().family(), BatteryWidget::pingFangFontFamily());
+        QCOMPARE(qApp->font().family(), DesktopWidget::pingFangFontFamily());
         for (QWidget* control : library.findChildren<QWidget*>())
-            QCOMPARE(control->font().family(), BatteryWidget::pingFangFontFamily());
+            QCOMPARE(control->font().family(), DesktopWidget::pingFangFontFamily());
         library.hide();
-        BatteryWidget::setGlobalFontSmoothing(2);
+        DesktopWidget::setGlobalFontSmoothing(2);
     }
 
     void fontSmoothingReachesGalleryControls() {
-        BatteryWidget::setGlobalFontSmoothing(0);
+        DesktopWidget::setGlobalFontSmoothing(0);
         WidgetLibraryDialog library;
-        QFont menuFont(BatteryWidget::pingFangFontFamily());
+        QFont menuFont(DesktopWidget::pingFangFontFamily());
         menuFont.setPixelSize(16);
-        BatteryWidget::applyFontSmoothing(menuFont);
+        DesktopWidget::applyFontSmoothing(menuFont);
         LiquidGlassMenu menu(menuFont);
         auto* nav = library.findChild<QPushButton*>(QStringLiteral("navSelected"));
         auto* search = library.findChild<QLineEdit*>();
         QVERIFY(nav);
         QVERIFY(search);
         for (int level = 0; level <= 3; ++level) {
-            BatteryWidget::setGlobalFontSmoothing(level);
+            DesktopWidget::setGlobalFontSmoothing(level);
             for (QWidget* control : {static_cast<QWidget*>(nav),
                                      static_cast<QWidget*>(search),
                                      static_cast<QWidget*>(&menu)}) {
@@ -1748,7 +2000,7 @@ private slots:
             QVERIFY(int(strategy) & int(QFont::PreferAntialias));
             QVERIFY(int(strategy) & int(QFont::NoSubpixelAntialias));
         }
-        BatteryWidget::setGlobalFontSmoothing(2);
+        DesktopWidget::setGlobalFontSmoothing(2);
     }
 
     void enablingLiveBackdropRefreshesStationaryCard() {
@@ -1779,8 +2031,7 @@ private slots:
         background.repaint();
         QTRY_VERIFY_WITH_TIMEOUT((observed = centerPixel(glass),
                                   observed.green() > 155 && observed.red() < 120), 3000);
-        // A legitimate solid frame must not be replaced with the previous
-        // coloured frame by a capture-hole heuristic.
+        // 合法的纯色帧不能被捕获空洞检测误判为失败并替换成旧帧。
         for (const QColor color : {QColor(Qt::black), QColor(Qt::white), QColor(20, 40, 210)}) {
             background.color = color;
             background.repaint();
@@ -1828,8 +2079,7 @@ private slots:
 #ifndef Q_OS_WIN
         QSKIP("Requires a native Windows wallpaper host");
 #else
-        // Model a wallpaper application's WorkerW host, not an ordinary
-        // foreground window. This previously took the static-file fallback.
+        // 模拟动态壁纸的桌面宿主，验证不会直接回退到静态壁纸文件。
         WNDCLASSW type{};
         type.hInstance = GetModuleHandleW(nullptr);
         type.lpszClassName = L"WorkerW";
@@ -1866,9 +2116,9 @@ private slots:
         ShowWindow(host, SW_SHOWNOACTIVATE);
         SetWindowPos(host, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         AppSettings().setValue("appearance/scale", 0.4);
-        BatteryWidget widget(nullptr, BatteryWidget::CardKind::Battery, false,
+        DesktopWidget widget(nullptr, DesktopWidget::CardKind::Battery, false,
                              QStringLiteral("live-wallpaper-probe"), 0);
-        // Isolate this capture from the user's already-open desktop cards.
+        // 隔离用户已经打开的桌面卡片。
         widget.setDesktopLayerEnabled(false);
         widget.setWindowFlag(Qt::WindowStaysOnTopHint);
         widget.move(center - QPoint(widget.width() / 2, widget.height() / 2));
@@ -1928,11 +2178,15 @@ private slots:
             }
         });
         animation.start();
+        const int firstPaintedFrame = background.paintedFrames;
         QTest::qWait(2000);
         animation.stop();
+        // 排空最后两次在途捕获，再比较已经实际绘制的源帧，而非定时器请求次数。
+        QTest::qWait(glass.activeDisplayInterval() * 2);
+        const int actualSourceFrames = background.paintedFrames - firstPaintedFrame;
         qInfo() << "Stationary backdrop:" << changedFrames << "changes /"
-                << sourceFrames << "source frames in 2 seconds";
-        QVERIFY(changedFrames >= qMax(20, sourceFrames / 2));
+                << actualSourceFrames << "painted source frames;" << sourceFrames << "requested frames";
+        QVERIFY(changedFrames >= qMax(20, actualSourceFrames / 2));
         glass.setLiveBackdropEnabled(false);
     }
 
@@ -1964,7 +2218,7 @@ private slots:
                 glass->setRenderScale(toggle % 2 ? 1.0f : .5f);
                 glass->setLiveBackdropEnabled(true);
             }
-            // Keep a request alive while its UI receiver is destroyed.
+            // 保持请求在接收窗口销毁时仍然运行，验证回调生命周期。
             DesktopCapture::request(glass->frameGeometry(), 1, glass->winId(), glass.get(),
                                     [](DesktopCapture::Frame) {});
             glass.reset();
@@ -1998,7 +2252,7 @@ private slots:
                 background.resize(sourceFrames % 120 ? QSize(620, 440) : QSize(680, 500));
         });
         animation.start();
-        QTest::qWait(3000); // Warm driver, shaders and the capture pool.
+        QTest::qWait(3000); // 预热驱动、着色器和捕获池。
         PROCESS_MEMORY_COUNTERS_EX initial{};
         initial.cb = sizeof(initial);
         QVERIFY(GetProcessMemoryInfo(GetCurrentProcess(),
@@ -2141,9 +2395,9 @@ private slots:
                                      - QPoint(250, 170), QSize(500, 340)));
         background.show();
         QVERIFY(QTest::qWaitForWindowExposed(&background));
-        BatteryWidget lower(nullptr, static_cast<BatteryWidget::CardKind>(lowerKind), false);
-        BatteryWidget upper(nullptr, static_cast<BatteryWidget::CardKind>(upperKind), false);
-        for (BatteryWidget* widget : {&lower, &upper}) {
+        DesktopWidget lower(nullptr, static_cast<DesktopWidget::CardKind>(lowerKind), false);
+        DesktopWidget upper(nullptr, static_cast<DesktopWidget::CardKind>(upperKind), false);
+        for (DesktopWidget* widget : {&lower, &upper}) {
             widget->setDesktopLayerEnabled(false);
             widget->setDesktopCaptureEnabled(false);
             widget->setWindowFlag(Qt::WindowStaysOnTopHint);
@@ -2159,8 +2413,7 @@ private slots:
         QTest::qWait(70);
         const QImage snapshot = lower.surfaceSnapshot();
         QVERIFY(!snapshot.isNull());
-        // Verify actual painted battery/weather/clock/dictionary content,
-        // including cards that have not repainted since their first frame.
+        // 验证真实电量、天气、时钟与词典内容，包含首帧后未再次重绘的卡片。
         for (int frame = 0; frame < 6; ++frame) {
             const QImage actual = LiquidGlassWidget::captureDesktopComposite(lower.screen(), lower.geometry(), &upper);
             QVERIFY(!actual.isNull());
@@ -2198,7 +2451,7 @@ private slots:
         lower.raise();
         QVERIFY(QTest::qWaitForWindowExposed(&lower));
         TestGlass upper;
-        upper.setLowPowerRefreshEnabled(true); // 250 ms external capture cadence
+        upper.setLowPowerRefreshEnabled(true); // 外部捕获间隔为 250 毫秒。
         upper.move(lower.pos());
         upper.show();
         upper.raise();
@@ -2240,9 +2493,7 @@ private slots:
                                      - QPoint(300, 220), QSize(600, 440)));
         background.show();
         QVERIFY(QTest::qWaitForWindowExposed(&background));
-        // Showing a non-topmost tool window does not guarantee that Windows
-        // raises it above the app which launched this test process. Establish
-        // the fixture order explicitly before placing the glass above it.
+        // 显式建立背景与玻璃的原生层级，不依赖普通工具窗口显示后的默认位置。
         background.raise();
         TestGlass glass;
         glass.setWindowFlag(Qt::WindowStaysOnTopHint, topmost);
@@ -2265,8 +2516,7 @@ private slots:
             QTest::qWait(25);
             const auto image = LiquidGlassWidget::captureDesktopComposite(glass.screen(), glass.geometry(), &glass);
             QVERIFY(!image.isNull());
-            // Inspect the entire shader input, including the covered half:
-            // refraction can bring those pixels back into the exposed edge.
+            // 验证包括遮挡半边在内的整个着色器输入，折射可能将这些像素带到可见边缘。
             for (int y = 8; y < image.height() - 8; y += 10)
                 for (int x = 8; x < image.width() - 8; x += 10) {
                     const auto pixel = image.pixelColor(x, y);
@@ -2323,10 +2573,7 @@ private slots:
         foreground.show(); foreground.raise();
         QVERIFY(QTest::qWaitForWindowExposed(&foreground));
         QTest::qWait(60);
-        // System screenshots remain allowed to include the card. The
-        // composited capture helper therefore scrubs the target rectangle
-        // from the internal backdrop frame while preserving the blue desktop
-        // visible on the uncovered side and rejecting the red foreground.
+        // 系统截图允许包含组件，但内部背景必须排除目标卡片与前景，保留未遮挡桌面。
         const QImage image = LiquidGlassWidget::captureDesktopComposite(
             glass.screen(), glass.geometry(), &glass);
         QVERIFY(!image.isNull());
@@ -2361,7 +2608,7 @@ private slots:
     void libraryOwnsNoDesktopWindowAndCancelsDrags() {
 #ifdef Q_OS_WIN
         AppSettings().setValue("appearance/scale", 0.4);
-        BatteryWidget owner(nullptr, BatteryWidget::CardKind::Clock, false);
+        DesktopWidget owner(nullptr, DesktopWidget::CardKind::Clock, false);
         owner.move(QGuiApplication::primaryScreen()->availableGeometry().center() - QPoint(150, 100));
         owner.show();
         QVERIFY(QTest::qWaitForWindowExposed(&owner));
@@ -2374,12 +2621,12 @@ private slots:
             QVERIFY(QTest::qWaitForWindowExposed(owner.m_library));
             QVERIFY(!NativeWindows::isTopmost(owner.winId()));
             QCOMPARE(GetWindow(reinterpret_cast<HWND>(owner.m_library->winId()), GW_OWNER), HWND(nullptr));
-            BatteryWidget added(nullptr, BatteryWidget::CardKind::Weather, false);
+            DesktopWidget added(nullptr, DesktopWidget::CardKind::Weather, false);
             added.move(owner.pos() + QPoint(200, 0));
             added.show();
             QVERIFY(QTest::qWaitForWindowExposed(&added));
             QVERIFY(!NativeWindows::isTopmost(added.winId()));
-            // Dragging while the gallery is open must also remain below it.
+            // 图库打开时，拖动卡片仍需位于图库下方。
             const QPoint second = owner.pos();
             mouse(owner, QEvent::MouseButtonPress, {30, 30}, second + QPoint(30, 30), Qt::LeftButton, Qt::LeftButton);
             mouse(owner, QEvent::MouseMove, {60, 30}, second + QPoint(60, 30), Qt::NoButton, Qt::LeftButton);
@@ -2466,9 +2713,7 @@ private slots:
         const qint64 sampleMs = sampleClock.elapsed();
         const int changedFrames = int(library.m_liveBackdropFrames - initialFrames);
         const int capturedSamples = int(library.m_liveBackdropSamples - initialSamples);
-        // The producer timer is the observable workload here. A GUI test
-        // process may not receive every nominal display tick, so compare
-        // capture cadence with the source frames it actually emitted.
+        // 以源窗口实际产生的帧为基准比较捕获速度，不假定测试进程收到所有显示器节拍。
         const int expectedSourceSamples = qMax(1, sourceFrames);
         qInfo() << "Library animated backdrop frames:" << changedFrames
                 << "changed," << capturedSamples << "samples /" << sourceFrames
@@ -2477,9 +2722,7 @@ private slots:
         QVERIFY2(capturedSamples >= expectedSourceSamples * 4 / 5,
                  qPrintable(QStringLiteral("library sampled only %1/%2 emitted source frames")
                                 .arg(capturedSamples).arg(expectedSourceSamples)));
-        // DWM/WGC may coalesce adjacent compositor frames while the source
-        // window is animating. Require a sustained stream of visibly changed
-        // captures without assuming one unique readback for every source tick.
+        // 允许 DWM 和 WGC 合并相邻帧，要求持续获取变化画面，而非每个节拍独立回读。
         QVERIFY2(changedFrames >= qMax(10, sourceFrames / 3),
                  qPrintable(QStringLiteral("library received only %1/%2 animated source frames")
                                 .arg(changedFrames).arg(sourceFrames)));
@@ -2532,14 +2775,12 @@ private slots:
         constexpr UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
         for (HWND after : {HWND_TOP, HWND_TOPMOST}) {
             QVERIFY(SetWindowPos(window, after, 0, 0, 0, 0, flags));
-            // No event-loop grace period: the proposed raise is redirected
-            // before Windows can display even one foreground frame.
+            // 原生提升必须在呈现前重定向，不能依靠下一轮事件循环修复。
             QVERIFY(belowApp());
         }
         first.raise();
         QVERIFY(belowApp());
-        // Some native callers bypass WINDOWPOSCHANGING. The topology watcher
-        // must still repair those changes with desktop capture disabled.
+        // 即使禁用捕获，拓扑监听也必须修复绕过窗口位置消息的层级变更。
         QVERIFY(SetWindowPos(window, HWND_TOP, 0, 0, 0, 0, flags | SWP_NOSENDCHANGING));
         QTRY_VERIFY_WITH_TIMEOUT(belowApp(), 1500);
         QVERIFY(SetWindowPos(window, HWND_TOPMOST, 0, 0, 0, 0, flags | SWP_NOSENDCHANGING));
@@ -2567,10 +2808,10 @@ private slots:
     void glassMenuAppearanceAndInput() {
         AppSettings().setValue("appearance/liveBackdrop", false);
         AppSettings().setValue("performance/renderScale", 1.5);
-        BatteryWidget::setGlobalFontSmoothing(3);
-        QFont font(BatteryWidget::pingFangFontFamily());
+        DesktopWidget::setGlobalFontSmoothing(3);
+        QFont font(DesktopWidget::pingFangFontFamily());
         font.setPixelSize(16);
-        BatteryWidget::applyFontSmoothing(font);
+        DesktopWidget::applyFontSmoothing(font);
         ColorWindow backdrop;
         backdrop.color = QColor(36, 75, 125);
         backdrop.centerStripe = QColor(210, 143, 66);
@@ -2651,7 +2892,7 @@ private slots:
 
     void glassMenuLiveBackdropAndLifetime() {
         AppSettings().setValue("performance/renderScale", 1.5);
-        QFont font(BatteryWidget::pingFangFontFamily());
+        QFont font(DesktopWidget::pingFangFontFamily());
         font.setPixelSize(14);
         ColorWindow backdrop;
         const QPoint origin = QGuiApplication::primaryScreen()->availableGeometry().center() - QPoint(200, 150);
@@ -2689,8 +2930,7 @@ private slots:
             menu.close();
             QVERIFY(!NativeWindows::isGlassWindow(menu.winId()));
         }
-        // Destroy while a worker may still be sampling. Its QObject context
-        // and generation must keep callbacks away from a closed/reused menu.
+        // 工作线程仍在采样时销毁菜单，验证对象上下文和请求代次保护失效接收者。
         for (int i = 0; i < 4; ++i) {
             auto* menu = new LiquidGlassMenu(font, &backdrop);
             menu->addGlassAction(QStringLiteral("添加小组件…"), LiquidGlassMenu::Icon::Add);
@@ -2705,8 +2945,8 @@ private slots:
 
     void contextMenuAddsWidgetsAndCancellationDoesNotOpenDialogs() {
         AppSettings().setValue("appearance/scale", .4);
-        for (auto kind : {BatteryWidget::CardKind::Clock, BatteryWidget::CardKind::Weather}) {
-            BatteryWidget card(nullptr, kind, false, QStringLiteral("context-menu-test"), 0);
+        for (auto kind : {DesktopWidget::CardKind::Clock, DesktopWidget::CardKind::Weather}) {
+            DesktopWidget card(nullptr, kind, false, QStringLiteral("context-menu-test"), 0);
             card.setDesktopCaptureEnabled(false);
             card.show();
             QVERIFY(QTest::qWaitForWindowExposed(&card));
@@ -2754,11 +2994,11 @@ private slots:
             }
             card.m_library->hide();
         }
-        BatteryWidget host(nullptr, BatteryWidget::CardKind::Clock, false,
+        DesktopWidget host(nullptr, DesktopWidget::CardKind::Clock, false,
                            QStringLiteral("menu-library-host"), 0);
-        BatteryWidget guest(nullptr, BatteryWidget::CardKind::Weather, false,
+        DesktopWidget guest(nullptr, DesktopWidget::CardKind::Weather, false,
                             QStringLiteral("menu-library-guest"), 0);
-        host.m_primary = true;
+        host.m_ownsTray = true;
         guest.showWidgetLibrary();
         QVERIFY(host.m_library && host.m_library->isVisible());
         QVERIFY(!guest.m_library);
@@ -2769,16 +3009,14 @@ private slots:
     }
 
     void libraryCancelDoesNotDrop() {
-        BatteryWidget::setGlobalFontSmoothing(3);
+        DesktopWidget::setGlobalFontSmoothing(3);
         WidgetLibraryDialog library;
         library.prepareBackdrop();
         QScreen* libraryScreen = QGuiApplication::screenAt(QCursor::pos());
         if (!libraryScreen)
             libraryScreen = QGuiApplication::primaryScreen();
         QVERIFY(libraryScreen);
-        // The first native show must happen below the work area. Showing at
-        // the destination and moving off-screen from showEvent causes a
-        // one-frame full-panel flash before the opening animation.
+        // 首次显示必须位于工作区之外，避免打开动画前闪现完整面板。
         QVERIFY(library.geometry().top()
                 > libraryScreen->availableGeometry().bottom());
         library.show();
@@ -2809,7 +3047,7 @@ private slots:
         const quint64 revision = library.frameRevision();
         QTest::qWait(120);
         QCOMPARE(library.frameRevision(), revision);
-        BatteryWidget::setGlobalFontSmoothing(2);
+        DesktopWidget::setGlobalFontSmoothing(2);
     }
 
     void libraryFollowsAppearanceScale() {
@@ -2850,23 +3088,23 @@ private slots:
         QCOMPARE(tile->size(), QSize(495, 396));
         QCOMPARE(search->height(), 81);
         QCOMPARE(footer->height(), 158);
-        QCOMPARE(library.m_uiScale, 1.5);
+        QCOMPARE(library.m_interfaceScale, 1.5);
         library.setInterfaceScale(0.4);
         QCOMPARE(tile->size(), QSize(132, 106));
         QCOMPARE(search->height(), 22);
         QCOMPARE(footer->height(), 42);
         QVERIFY(search->styleSheet().contains("border-radius:11px"));
 
-        BatteryWidget owner(nullptr, BatteryWidget::CardKind::Clock, false,
+        DesktopWidget owner(nullptr, DesktopWidget::CardKind::Clock, false,
                             QStringLiteral("scale-library-owner"), 0);
-        owner.m_primary = true;
+        owner.m_ownsTray = true;
         owner.showWidgetLibrary();
         QVERIFY(owner.m_library);
         auto* shared = owner.m_library;
-        QCOMPARE(shared->m_uiScale, 0.7);
+        QCOMPARE(shared->m_interfaceScale, 0.7);
         owner.applyScale(1.25);
         QCOMPARE(owner.m_library, shared);
-        QCOMPARE(shared->m_uiScale, 1.25);
+        QCOMPARE(shared->m_interfaceScale, 1.25);
         owner.syncGroupSettings(1.25, 72, 0.80, false, false, false,
                                 1.25, 2);
         QCOMPARE(shared->materialBlurStrength(), 72);
@@ -2889,13 +3127,13 @@ private slots:
     void hiddenConfigurationRoundTrip() {
         AppSettings().setValue("appearance/scale", 0.4);
         const QPoint point = QGuiApplication::primaryScreen()->availableGeometry().center();
-        auto* widget = BatteryWidget::addWidget(BatteryWidget::CardKind::Clock, point);
+        auto* widget = DesktopWidget::addWidget(DesktopWidget::CardKind::Clock, point);
         QVERIFY(widget);
         const QPoint saved = widget->pos();
         widget->hide();
         widget->saveConfiguration();
         delete widget;
-        const auto restored = BatteryWidget::restoreWidgets();
+        const auto restored = DesktopWidget::restoreWidgets();
         QCOMPARE(restored.size(), 1);
         QCOMPARE(restored.first()->pos(), saved);
         QVERIFY(!restored.first()->isVisible());
@@ -2926,7 +3164,7 @@ private slots:
         file.write(QJsonDocument(root).toJson());
         file.close();
 
-        const auto restored = BatteryWidget::restoreWidgets();
+        const auto restored = DesktopWidget::restoreWidgets();
         QCOMPARE(restored.size(), 1);
         QVERIFY(area.contains(restored.first()->geometry()));
         QVERIFY(!restored.first()->isVisible());
@@ -2955,7 +3193,7 @@ private slots:
         QTest::qWait(50);
         QVERIFY(qAbs(centerPixel(glass).alpha() - 128) <= 3);
         glass.setGlassOpacity(1.0);
-        // Reparenting to another native window can destroy the GL context.
+        // 重新指定原生父窗口可能销毁 GL 上下文。
         QWidget parent;
         parent.resize(300, 220);
         parent.show();
@@ -2965,7 +3203,7 @@ private slots:
         QTest::qWait(100);
         QVERIFY(glass.isValid());
         QVERIFY(centerPixel(glass).red() > 130);
-        glass.setParent(nullptr); // stack child must outlive its temporary parent
+        glass.setParent(nullptr); // 栈上子对象必须比临时父窗口存活更久。
     }
 
     void gpuRoundedEdgeHasAnalyticAntialiasing() {
@@ -3009,7 +3247,7 @@ private slots:
             int index = 0;
             for (int strength : {0, 50, 100}) {
                 glass.setMaterialBlurStrength(strength);
-                glass.setRefractionPower(0); // Measure blur independently of lens distortion.
+                glass.setRefractionPower(0); // 单独测量模糊，排除镜头折射干扰。
                 QTest::qWait(60);
                 const QImage frame = glass.grabFramebuffer();
                 QVERIFY(frame.save(QStringLiteral("artifacts/material-blur-%1-%2.png")
@@ -3089,7 +3327,7 @@ private slots:
     void actualWeatherHighestQuality() {
         AppSettings().setValue("appearance/scale", .7);
         AppSettings().setValue("performance/renderScale", 1.5);
-        BatteryWidget card(nullptr, BatteryWidget::CardKind::Weather, false,
+        DesktopWidget card(nullptr, DesktopWidget::CardKind::Weather, false,
                            QStringLiteral("weather-quality"), 1);
         card.setDesktopLayerEnabled(false);
         card.setDesktopCaptureEnabled(false);
@@ -3116,15 +3354,13 @@ private slots:
         int edgePixels[2] = {};
         for (int index = 0; index < 2; ++index) {
             const int level = index ? 3 : 0;
-            BatteryWidget::setGlobalFontSmoothing(level);
+            DesktopWidget::setGlobalFontSmoothing(level);
             card.update();
             QTest::qWait(70);
             const QImage frame = card.grabFramebuffer();
             QVERIFY(frame.save(QStringLiteral("artifacts/actual-weather-aa-%1.png")
                                .arg(level)));
-            // The temperature occupies this normalized region of the actual
-            // wide card. The backdrop is dark here; intermediate red values
-            // measure coverage at digit edges, not the bright glyph interior.
+            // 按横向天气卡片的归一化温度区域测量数字边缘覆盖，排除高亮字形内部。
             for (int y = qRound(frame.height() * .24); y < qRound(frame.height() * .45); ++y)
                 for (int x = qRound(frame.width() * .035); x < qRound(frame.width() * .37); ++x) {
                     const int red = qRed(frame.pixel(x, y));
@@ -3137,7 +3373,7 @@ private slots:
                  "Highest AA did not smooth the actual 28.4 temperature");
         qInfo() << "Weather device scale" << card.devicePixelRatioF()
                 << "quality" << card.renderScale();
-        BatteryWidget::setGlobalFontSmoothing(2);
+        DesktopWidget::setGlobalFontSmoothing(2);
     }
 
     void highestTextAntialiasingWorksInOpenGL() {
@@ -3151,7 +3387,7 @@ private slots:
         for (int index = 0; index < 2; ++index) {
             const int level = index ? 3 : 0;
             glass.quality = level;
-            BatteryWidget::setGlobalFontSmoothing(level);
+            DesktopWidget::setGlobalFontSmoothing(level);
             glass.update();
             QTest::qWait(70);
             const QImage frame = glass.grabFramebuffer();
@@ -3164,12 +3400,12 @@ private slots:
         }
         qInfo() << "Native GL text partial coverage:" << partial[0] << partial[1];
         QVERIFY(partial[1] > partial[0] + 100);
-        // Backdrop quality must not change the text's final device coverage.
+        // 背景画质不能改变文字最终像素覆盖率。
         const QImage nativeText = glass.grabFramebuffer();
         glass.setRenderScale(.5f);
         QTest::qWait(60);
         QCOMPARE(glass.grabFramebuffer(), nativeText);
-        BatteryWidget::setGlobalFontSmoothing(2);
+        DesktopWidget::setGlobalFontSmoothing(2);
     }
 
     void backgroundReusePreservesOrientation() {
@@ -3256,7 +3492,7 @@ private slots:
             QVERIFY(info.size() <= 2 * 1024 * 1024);
         }
         QVERIFY(!QFile::exists(logs.filePath("render.log.4")));
-        // Initialization failure must not replace QtTest's message handler.
+        // 日志初始化失败不能替换 QtTest 消息处理器。
         QFile blocked(logs.filePath("not-a-directory"));
         QVERIFY(blocked.open(QIODevice::WriteOnly));
         blocked.close();
@@ -3322,8 +3558,7 @@ private slots:
         gl->glPixelStorei(GL_UNPACK_ROW_LENGTH, 104);
         gl->glPixelStorei(GL_UNPACK_SKIP_PIXELS, 1);
         gl->glPixelStorei(GL_UNPACK_SKIP_ROWS, 1);
-        // Exercise the upload directly so Qt cannot reset the foreign state
-        // first. The padded allocation keeps the old, incorrect read in bounds.
+        // 直接测试纹理上传，防止 Qt 提前重置外部状态；填充内存保证错误读取也不会越界。
         glass.m_bgDirty = true;
         glass.loadBackgroundTexture();
         GLint value = 0;
@@ -3423,8 +3658,7 @@ private slots:
             for (int i = 0; i < 2; ++i) {
                 TestGlass* glass = i ? &right : &left;
                 glass->setRenderingSuspended(true);
-                // Poison the discarded FBO while the popup changes DWM
-                // topology; both paused cards still owe Qt a complete paint.
+                // 故意污染废弃 FBO，验证菜单改变 DWM 层级时暂停卡片仍完整重绘。
                 glass->makeCurrent();
                 auto* gl = glass->context()->functions();
                 gl->glClearColor(1, 0, 1, 1);
@@ -3451,8 +3685,7 @@ private slots:
         QVERIFY(QTest::qWaitForWindowExposed(&glass));
         const QImage expected = glass.grabFramebuffer();
         glass.setRenderingSuspended(true);
-        // Qt invalidates a NoPartialUpdate FBO before an expose/recompose.
-        // Deterministically poison it instead of depending on driver contents.
+        // 模拟显示或重组前 FBO 内容失效，不依赖特定驱动的残留数据。
         glass.makeCurrent();
         auto* gl = glass.context()->functions();
         gl->glClearColor(1, 0, 1, 1);
@@ -3473,8 +3706,7 @@ private slots:
         cover.show();
         cover.raise();
         QVERIFY(QTest::qWaitForWindowExposed(&cover));
-        // Let any capture queued just before the cover reached the compositor
-        // finish before taking the suspended-rendering baseline.
+        // 等待遮挡发生前排队的捕获完成，再记录暂停渲染基线。
         QTest::qWait(500);
         const quint64 revision = glass.frameRevision();
         for (int i = 0; i < 5; ++i) {
@@ -3486,7 +3718,7 @@ private slots:
     }
 
     void cancellingCitySearchHandlesSynchronousFinished() {
-        BatteryWidget weather(nullptr, BatteryWidget::CardKind::Weather, false);
+        DesktopWidget weather(nullptr, DesktopWidget::CardKind::Weather, false);
         delete weather.m_weatherNetwork;
         auto* network = new PendingNetwork(&weather);
         weather.m_weatherNetwork = network;
@@ -3508,7 +3740,7 @@ private slots:
     }
 
     void sharedSettingsCanSearchWeatherFromBatteryCard() {
-        BatteryWidget battery(nullptr, BatteryWidget::CardKind::Battery, false);
+        DesktopWidget battery(nullptr, DesktopWidget::CardKind::Battery, false);
         bool openedSearch = false;
         QTimer::singleShot(0, &battery, [&]() {
             auto* settingsDialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
@@ -3540,7 +3772,7 @@ private slots:
     }
 
     void malformedNetworkRepliesAndDictionaryButton() {
-        BatteryWidget dictionary(nullptr, BatteryWidget::CardKind::Dictionary, false);
+        DesktopWidget dictionary(nullptr, DesktopWidget::CardKind::Dictionary, false);
         auto* empty = new FakeReply("[]", &dictionary);
         empty->setProperty("dictionarySerial", dictionary.m_dictionaryReplySerial);
         empty->setProperty("dictionaryWord", dictionary.m_dictionaryWord);
@@ -3548,12 +3780,12 @@ private slots:
         QVERIFY(!dictionary.m_dictionaryDefinition.isEmpty());
         QVERIFY(!dictionary.m_dictionaryDefinition.contains(QStringLiteral("读取在线")));
         const int serial = dictionary.m_dictionaryReplySerial;
-        const QPoint button(qRound(50 * dictionary.m_uiScale),
-                            dictionary.height() - qRound(36 * dictionary.m_uiScale));
+        const QPoint button(qRound(50 * dictionary.m_widgetScale),
+                            dictionary.height() - qRound(36 * dictionary.m_widgetScale));
         mouse(dictionary, QEvent::MouseButtonPress, button, dictionary.pos() + button, Qt::LeftButton, Qt::LeftButton);
         mouse(dictionary, QEvent::MouseButtonRelease, button, dictionary.pos() + button, Qt::LeftButton, Qt::NoButton);
         QCOMPARE(dictionary.m_dictionaryReplySerial, serial + 1);
-        BatteryWidget weather(nullptr, BatteryWidget::CardKind::Weather, false);
+        DesktopWidget weather(nullptr, DesktopWidget::CardKind::Weather, false);
         weather.m_weatherTemperature = "24";
         auto* invalid = new FakeReply("{\"current_condition\":[{}]}", &weather);
         invalid->setProperty("weatherSerial", weather.m_weatherReplySerial);

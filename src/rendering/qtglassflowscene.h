@@ -1,7 +1,4 @@
-// Modified for macdowsOS Widget on 2026-09-13.
-// Changes include reusable background input, adaptive frame scheduling,
-// reduced-resolution rendering, and desktop-widget integration.
-// Distributed under GNU GPL v3.0; see ../LICENSE.
+// 基于 QtGlassFlow 修改，增加背景输入、按需刷新与桌面集成。采用 GPL v3，见项目根目录 LICENSE。
 
 #ifndef QTGLASSFLOWSCENE_H
 #define QTGLASSFLOWSCENE_H
@@ -17,6 +14,7 @@
 #include <QString>
 #include <QElapsedTimer>
 #include <QImage>
+#include "rendering/cleartypetext.h"
 
 class QPainter;
 class QTimer;
@@ -26,6 +24,7 @@ class QHideEvent;
 class QtGlassFlowScene : public QOpenGLWidget, protected QOpenGLFunctions
 {
     Q_OBJECT
+    ClearTypeText::Renderer m_textRenderer;
 public:
     enum State { Normal, Hovered, Pressed };
 
@@ -63,9 +62,7 @@ public:
     void setGlassObjectVisible(int index, bool visible);
     void setBackgroundImage(const QString &path);
     void setBackgroundImage(const QImage &image);
-    // Same as setBackgroundImage(), but the image is already vertically
-    // oriented for OpenGL texture coordinates. This avoids a second copy when
-    // a live desktop crop is captured every frame during a drag.
+    // 图像已按 GL 纹理坐标翻转，避免实时裁剪再次复制。
     void setBackgroundImageFlipped(const QImage &image);
 
     void setGlassRenderingEnabled(bool enabled);
@@ -74,24 +71,18 @@ public:
     float glassOpacity() const { return m_glassOpacity; }
     void setRefreshInterval(int intervalMs);
     int refreshInterval() const { return m_refreshInterval; }
-    // Hosts that handle dragging outside QtGlassFlowScene can keep the render
-    // timer at its interactive cadence while the pointer is down.
+    // 由宿主处理窗口拖动时，仍可启用交互刷新节奏。
     void setInteractionActive(bool active);
-    // Opt-in for widgets with a continuously changing payload (for example a
-    // sweeping second hand). Static cards can keep the lower idle cadence.
+    // 为连续变化的内容启用动画，例如平滑秒针；静态卡片按需绘制。
     void setAnimationEnabled(bool enabled);
     void setContinuousRenderingEnabled(bool enabled);
     void setRenderingSuspended(bool suspended);
     quint64 frameRevision() const { return m_frameRevision; }
-    // Read the last completed frame without asking QOpenGLWidget to render
-    // again. Cache one reduced, premultiplied image per visual revision.
+    // 读取最后完成帧，不触发额外重绘；每个视觉版本缓存一张预乘图像。
     QImage surfaceSnapshot();
     quint64 snapshotReadbacks() const { return m_snapshotReadbacks; }
 
-    // Internal render resolution multiplier. The final widget is still
-    // composited at the native device-pixel size, while the backdrop/FBO
-    // passes can run at a lower resolution to reduce fill-rate and bandwidth.
-    // A value of 1.0 uses the native resolution.
+    // 内部背景与 FBO 分辨率倍率；最终窗口仍按屏幕原生像素合成，1.0 表示原生画质。
     void setRenderScale(float scale);
     float renderScale() const { return m_renderScale; }
 
@@ -184,9 +175,7 @@ private:
     float m_attractionDist;
     float m_globalPower;
 
-    // The Gaussian offsets only depend on the blur settings and render scale.
-    // Keep them across backdrop updates; live capture can otherwise rebuild
-    // the same exp() table once per frame.
+    // 高斯偏移仅随模糊参数和画质变化，背景更新时复用，避免每帧计算指数表。
     float m_blurKernelSigma = -1.0f;
     int m_blurKernelStride = 0;
     QVector<QVector2D> m_blurKernelSamples;
@@ -205,4 +194,4 @@ private:
     int m_dragIndex;
 };
 
-#endif // QTGLASSFLOWSCENE_H
+#endif

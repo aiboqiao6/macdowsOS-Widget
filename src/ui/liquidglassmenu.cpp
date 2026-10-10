@@ -81,8 +81,7 @@ LiquidGlassMenu::LiquidGlassMenu(const QFont& textFont, QWidget* parent)
     setAttribute(Qt::WA_TranslucentBackground);
     setAttribute(Qt::WA_OpaquePaintEvent, false);
     setFont(textFont);
-    // The style only provides QMenu's layout/hit rectangles. All pixels are
-    // painted in the glass surface, so there is no opaque native menu panel.
+    // QMenu 只负责布局和命中区域，所有像素由透明玻璃子窗口绘制。
     setStyleSheet(QStringLiteral(
         "QMenu { background: transparent; border: none; padding: 7px; }"
         "QMenu::item { padding: 8px 14px 8px 36px; min-width: 144px; }"
@@ -112,7 +111,7 @@ void LiquidGlassMenu::createSurface()
 LiquidGlassMenu::~LiquidGlassMenu()
 {
     releaseBackdrop();
-    // Destroy the overlay before QMenu's action list is torn down.
+    // 先销毁覆盖层，再销毁菜单动作列表。
     delete m_surface;
     m_surface = nullptr;
 }
@@ -162,11 +161,7 @@ QPoint LiquidGlassMenu::preparePopup(const QPoint& position)
         origin.setX(qBound(available.left(), origin.x(), qMax(available.left(), available.right() - extent.width() + 1)));
         origin.setY(qBound(available.top(), origin.y(), qMax(available.top(), available.bottom() - extent.height() + 1)));
         const QRect captureArea(origin, extent);
-        // Capture before QMenu::popup/exec: the native popup may already be
-        // mapped by showEvent, which would sample its unpainted black surface.
-        // Sample at most the monitor's native pixel density. Upscaling the
-        // screen with GDI does not add detail; the glass renderer performs
-        // its own smooth supersampling for the higher quality levels.
+        // 弹出原生菜单前捕获背景，避免读到未绘制的黑色表面；捕获密度不超过屏幕原生像素。
         const qreal scale = output->devicePixelRatio() * qMin(1.0f, m_renderScale);
         m_fallback = QImage(QSize(qMax(1, qRound(extent.width() * scale)),
                                  qMax(1, qRound(extent.height() * scale))), QImage::Format_RGB32);
@@ -178,7 +173,7 @@ QPoint LiquidGlassMenu::preparePopup(const QPoint& position)
                                      [this]() { return m_fallback; });
         if (backdrop.isNull())
             backdrop = m_fallback;
-        // Keep the fallback free of composited glass to prevent feedback.
+        // 回退背景不包含玻璃合成结果，防止反馈。
         if (!backdrop.isNull())
             m_fallback = backdrop;
         LiquidGlassWidget::compositeDesktopGlass(backdrop, captureArea);
@@ -248,8 +243,7 @@ void LiquidGlassMenu::refreshBackdrop()
 
 void LiquidGlassMenu::paintEvent(QPaintEvent*)
 {
-    // The child owns all pixels. Scheduling a child update here would form a
-    // parent/child repaint loop and keep an otherwise idle menu rendering.
+    // 子窗口独立绘制，父窗口不能再次调度子窗口更新，以免形成重绘循环。
 }
 
 bool LiquidGlassMenu::event(QEvent* event)
@@ -280,8 +274,7 @@ void LiquidGlassMenu::paintContents(QPainter& painter)
     const QRectF bounds = QRectF(rect()).adjusted(.6, .6, -.6, -.6);
     QPainterPath shape;
     shape.addRoundedRect(bounds, kRadius, kRadius);
-    // A restrained dark tint keeps labels legible over both bright wallpaper
-    // and other cards, without replacing the real blurred/refracted backdrop.
+    // 低强度暗色遮罩保障亮背景上的文字对比度，同时保留实际折射与模糊。
     QLinearGradient tint(bounds.topLeft(), bounds.bottomLeft());
     tint.setColorAt(0, QColor(24, 33, 50, 145));
     tint.setColorAt(1, QColor(16, 23, 38, 174));

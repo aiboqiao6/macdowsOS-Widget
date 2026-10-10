@@ -40,8 +40,7 @@ namespace {
 void logCaptureFailure(const char* stage, quintptr target = 0) {
     QString details = QString("target=0x%1").arg(target, 0, 16);
 #ifdef Q_OS_WIN
-    // Called from a catch block: retain the device/WGC HRESULT that previously
-    // disappeared when the sampler fell back to wallpaper.
+    // 在异常处理块中记录捕获失败的 HRESULT，便于排查回退至壁纸的原因。
     details += QString(" HRESULT=0x%1").arg(quint32(winrt::to_hresult()), 8, 16, QLatin1Char('0'));
 #endif
     RenderDiagnostics::write(QString("capture.failure/%1").arg(stage), details, 1000);
@@ -117,8 +116,7 @@ QImage grabParts(const QVector<CapturePart>& parts, const QSize& size)
     if (parts.isEmpty() || size.isEmpty())
         return {};
 #ifdef Q_OS_WIN
-    // Reuse the DIB and memory DC on the capture thread. Only the reduced
-    // pixels are copied back to Qt; no full-screen pixmap or GPU readback.
+    // 捕获线程复用 DIB 与内存 DC，只向 Qt 复制所需的缩小图像。
     struct Surface {
         HDC dc = CreateCompatibleDC(nullptr);
         HBITMAP bitmap = nullptr;
@@ -151,8 +149,7 @@ QImage grabParts(const QVector<CapturePart>& parts, const QSize& size)
             return true;
         }
     };
-    // Different card sizes share the worker. Retain a bounded set of DIBs
-    // instead of reallocating when a clock capture follows a wide card.
+    // 保留数量受限的 DIB 缓存，避免不同尺寸的卡片轮流捕获时反复分配。
     thread_local QCache<quint64, Surface> surfaces(16 * 1024);
     const quint64 key = (quint64(size.width()) << 32) | quint32(size.height());
     Surface* cached = surfaces.object(key);
@@ -236,11 +233,9 @@ bool graphicsCaptureReady()
         bool ready = false;
         bool owned = false;
         Apartment() {
-            // A GUI thread may already be STA. That is a supported state for
-            // this caller, so inspect the HRESULT instead of intentionally
-            // throwing a WinRT exception that breaks the Visual Studio debugger.
+            // 界面线程可能已经初始化为 STA；直接检查 HRESULT，避免用异常处理正常的单元模式差异。
             const HRESULT result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-            owned = SUCCEEDED(result); // S_FALSE still needs CoUninitialize.
+            owned = SUCCEEDED(result); // 返回 S_FALSE 也必须配对调用 CoUninitialize。
             ready = owned || result == RPC_E_CHANGED_MODE;
         }
         ~Apartment() { if (owned) CoUninitialize(); }
@@ -253,19 +248,14 @@ bool graphicsCaptureReady()
     return supported;
 }
 
-// Windows Graphics Capture is a streaming API. Recreating its D3D device,
-// frame pool and capture session for every requested image costs at least one
-// compositor frame and previously limited a live panel to roughly 4-20 fps.
-// Keep one stream per lower HWND on the calling capture thread and read its
-// newest completed frame without restarting the session.
+// 每个下层窗口复用一个 WGC 捕获流，读取最新完成帧，避免反复创建设备和会话。
 class WindowCaptureStream final {
     struct CapturedFrame {
         explicit CapturedFrame(wgc::Direct3D11CaptureFrame value) : frame(std::move(value)) {}
         ~CapturedFrame() { try { if (frame) frame.Close(); } catch (...) {} }
         wgc::Direct3D11CaptureFrame frame{nullptr};
     };
-    // WGC may deliver an already-dispatched event after revocation. Delegates
-    // own only this mailbox, never the stream or its D3D resources.
+    // 撤销事件后仍可能收到已派发回调；委托只持有邮箱，不持有捕获流或 D3D 资源。
     struct FrameState {
         std::mutex mutex;
         std::condition_variable arrived;
@@ -295,7 +285,7 @@ public:
             m_state->latest.reset();
         }
         m_state->arrived.notify_all();
-        // Each operation must still run if another one fails on device loss.
+        // 设备丢失时仍要分别尝试释放每项资源。
         try { if (m_item && m_closedToken.value) m_item.Closed(m_closedToken); } catch (...) {}
         try { if (m_pool && m_token.value) m_pool.FrameArrived(m_token); } catch (...) {}
         try { if (m_session) m_session.Close(); } catch (...) {}
@@ -329,8 +319,7 @@ public:
             {
                 std::unique_lock<std::mutex> lock(m_state->mutex);
                 if (!m_state->latest) {
-                    // Only the first read waits for WGC startup. Every later
-                    // request consumes the newest already-delivered frame.
+                    // 仅首次读取等待 WGC 启动，后续请求直接使用最新到达帧。
                     m_state->arrived.wait_for(lock, std::chrono::milliseconds(50),
                         [this]() { return bool(m_state->latest) || m_state->stopping; });
                 }
@@ -389,10 +378,7 @@ private:
 
         auto interop = winrt::get_activation_factory<wgc::GraphicsCaptureItem,
                                                       IGraphicsCaptureItemInterop>();
-        // Recheck after device creation: a popup can disappear while the D3D
-        // device is being initialized. HRESULT handling avoids an additional
-        // application throw, but cannot suppress a throw inside the Windows
-        // implementation; unsupported HWNDs must be rejected before this call.
+        // 设备初始化期间弹出窗口可能已消失，创建捕获项前再次验证句柄。
         if (!validWindow())
             return;
         const HRESULT itemResult = interop->CreateForWindow(
@@ -420,8 +406,7 @@ private:
         });
         try { m_session.IsCursorCaptureEnabled(false); } catch (...) {}
         try { m_session.IsBorderRequired(false); } catch (...) {}
-        // Recent Windows versions expose an explicit capture throttle. Ask
-        // for every available compositor update, including high-Hz displays.
+        // 支持时关闭系统捕获节流，以适配高刷新率显示器。
         if (auto cadence = m_session.try_as<wgc::IGraphicsCaptureSession5>())
             cadence.MinUpdateInterval(std::chrono::milliseconds(0));
         m_token = m_pool.FrameArrived([state = m_state](auto const& sender, auto const&) {
@@ -429,8 +414,7 @@ private:
                 std::lock_guard<std::mutex> lock(state->mutex);
                 if (state->stopping || state->recreating)
                     return;
-                // Drain queued frames: displaying the oldest pool entry can
-                // keep a busy source visibly behind even with frequent paints.
+                // 排空队列，只保留最新帧，避免繁忙窗口的画面持续滞后。
                 while (auto frame = sender.TryGetNextFrame()) {
                     state->contentSize = frame.ContentSize();
                     state->latest = std::make_shared<CapturedFrame>(std::move(frame));
@@ -465,7 +449,7 @@ private:
             m_state->latest.reset();
         }
         m_staging.Reset();
-        // Recreate can wait for FrameArrived. Never hold its mailbox lock here.
+        // 重建帧池可能等待帧到达，此处不能持有邮箱锁。
         m_pool.Recreate(m_device, wdx::DirectXPixelFormat::B8G8R8A8UIntNormalized,
                         3, size);
         m_size = size;
@@ -609,9 +593,7 @@ private:
         else
             result = mappedImage.copy();
         m_d3dContext->Unmap(m_staging.Get(), 0);
-        // WGC's BGRA8 memory layout already matches QImage::Format_ARGB32 on
-        // Windows. Returning it directly avoids an additional full-frame
-        // conversion/copy on every live sample.
+        // Windows 上 BGRA8 与 QImage::Format_ARGB32 内存布局一致，可直接返回以减少复制。
         return {std::move(result), desktopCrop};
     }
 
@@ -655,7 +637,7 @@ QCache<WId, std::chrono::steady_clock::time_point>& failedWindowCaptures()
 
 WindowCaptureStreams& windowCaptureStreams()
 {
-    // Construct the apartment first so TLS destroys the streams before COM.
+    // 先构造 COM 单元，确保线程局部捕获流在 COM 反初始化前销毁。
     graphicsCaptureReady();
     static thread_local WindowCaptureStreams streams;
     return streams;
@@ -707,8 +689,7 @@ CapturedWindowImage captureWindowGraphics(HWND window, const QRect& windowBounds
             }
             stream = std::make_shared<WindowCaptureStream>(window);
             if (!stream->valid()) {
-                // Avoid recreating a rejected item dozens of times per second
-                // while the same unsupported or closing window remains listed.
+                // 短暂缓存失败窗口，避免每秒重复创建不支持或正在关闭的捕获源。
                 failures.insert(id, new std::chrono::steady_clock::time_point(now + std::chrono::seconds(1)));
                 return {};
             }
@@ -734,10 +715,7 @@ TargetReconstruction reconstructTarget(QImage& image, const QVector<CapturePart>
         result.target += projectToCapture(targetBounds, part);
 #ifdef Q_OS_WIN
     QRegion remaining = result.target;
-    // EnumWindows is top-to-bottom. Repaint the nearest ordinary opaque
-    // window for each target pixel. Wallpaper remains invalid and is
-    // supplied by the caller's stable fallback; glass windows are composited
-    // separately from their last completed surfaces.
+    // 按窗口从上到下的次序选取最近的不透明像素；壁纸与玻璃窗口由调用者另行合成。
     for (int i = targetIndex + 1; i < stack.size() && !remaining.isEmpty(); ++i) {
         const NativeWindows::Window& lower = stack.at(i);
         QRegion projected;
@@ -750,11 +728,7 @@ TargetReconstruction reconstructTarget(QImage& image, const QVector<CapturePart>
         const QRegion paintRegion = projected & remaining;
         if (paintRegion.isEmpty())
             continue;
-        // WS_EX_LAYERED is not synonymous with invisible or non-capturable.
-        // Qt, Chromium and many media windows use a layered top-level HWND
-        // while still presenting fully opaque changing content. Skipping those
-        // windows was the direct cause of live mode falling back to wallpaper
-        // forever for common sources. WGC provides the selected HWND's pixels.
+        // 分层窗口也可能包含正常的不透明内容，不能仅凭 WS_EX_LAYERED 排除捕获源。
         QRegion captureProjection;
         int intersectingParts = 0;
         const QRect desktopCaptureBounds = lower.bounds.intersected(targetBounds);
@@ -770,12 +744,9 @@ TargetReconstruction reconstructTarget(QImage& image, const QVector<CapturePart>
         CapturedWindowImage captured = captureWindowGraphics(
             reinterpret_cast<HWND>(lower.id), lower.bounds,
             desktopCaptureBounds, captureOutputSize);
-        // WGC owns these pixels. Solid black/white are valid content, not
-        // evidence of failure. Never replace them with an old frame or a GDI
-        // screenshot (which may include our own glass window).
+        // 纯黑和纯白都是有效画面，不能据此判定 WGC 失败并替换为旧帧。
         if (captured.pixels.isNull()) {
-            // WorkerW/Progman may host a live wallpaper. Try the other shell
-            // host if one cannot be captured; only then use the file fallback.
+            // 先尝试两个桌面宿主，均不能捕获时才回退至壁纸文件，以兼容动态壁纸。
             if (!lower.desktop)
                 remaining -= paintRegion;
             continue;
@@ -823,13 +794,7 @@ Plan capturePlan(const QVector<CapturePart>& parts, const QSize& size, WId targe
         const auto& window = stack.at(i);
         if (window.id == target)
             continue;
-        // GDI captures process-local glass windows even though they are
-        // excluded from our logical compositor. Mark those physical pixels
-        // invalid before they can enter the external backdrop cache; the
-        // caller composites each lower glass surface exactly once afterwards.
-        // Without this subtraction an overlapping card is present in both the
-        // screenshot and its cached surface, producing recursive glare while
-        // the upper card is dragged.
+        // 先从 GDI 捕获图中剔除本进程的玻璃窗口，再单独合成下层玻璃，避免重复叠加产生反馈。
         if (window.excluded) {
             for (const auto& part : parts)
                 plan.valid -= projectToCapture(window.bounds, part);
@@ -837,25 +802,17 @@ Plan capturePlan(const QVector<CapturePart>& parts, const QSize& size, WId targe
         }
         bool intersects = false;
         for (const auto& part : parts) {
-            // Shadows and DWM's rounded frame extend beyond GetWindowRect on
-            // some themes. Be conservative even for layered/translucent covers.
+            // 阴影和圆角可能超出窗口矩形，遮挡范围需保守扩展。
             const QRect bounds = window.bounds.adjusted(-16, -16, 16, 16);
             if (!bounds.intersects(part.source))
                 continue;
             intersects = true;
-            // Transparent/layered shell overlays often cover the entire
-            // virtual desktop while contributing no opaque pixels. Treating
-            // their bounds as an occluder invalidated the complete card crop,
-            // so live mode returned a black/wallpaper frame without ever
-            // reaching the real lower window.
+            // 透明桌面覆盖层不能按整块矩形视为不透明遮挡，否则会误删真正的下层窗口像素。
             if (i < targetIndex && window.opaque)
                 plan.valid -= projectToCapture(bounds, part);
         }
         if (i > targetIndex && intersects) {
-            // WGC captures each HWND independently. Moving a lower window
-            // changes its layout, not its identity as a safe backdrop source.
-            // Only relevant windows participate; unrelated UI elsewhere must
-            // not invalidate this crop while their native windows initialize.
+            // 窗口移动只改变位置，不改变捕获源身份；只跟踪与当前裁剪区域相关的窗口。
             plan.topology = (plan.topology ^ quint64(window.id)) * 1099511628211ull;
             hash(window.id);
             hash(window.bounds.x()); hash(window.bounds.y());
@@ -891,9 +848,7 @@ DesktopCapture::Frame grabFrame(const QVector<CapturePart>& parts, const QSize& 
     const bool targeted = target && NativeWindows::indexOf(beforeStack, target) >= 0;
     QImage image;
     if (targeted) {
-        // Reconstruct only the target rectangle from independently captured
-        // lower HWNDs. Everything else stays invalid and is filled from the
-        // stable wallpaper cache by the caller.
+        // 只重建目标矩形内可验证的下层窗口像素，剩余区域由稳定壁纸缓存补齐。
         image = QImage(size, QImage::Format_RGB32);
         image.fill(Qt::black);
     } else {
@@ -901,8 +856,7 @@ DesktopCapture::Frame grabFrame(const QVector<CapturePart>& parts, const QSize& 
     }
     const TargetReconstruction reconstructed = reconstructTarget(
         image, parts, target, beforeStack);
-    // Async delivery validates against a fresh native stack on the GUI thread
-    // before exposing any pixels. Avoid doing that same enumeration twice.
+    // 异步结果在界面线程交付前验证窗口层级，避免重复枚举。
     const Plan after = validateOnReturn ? capturePlan(parts, size, target) : before;
     if ((targeted ? before.topology != after.topology : before.scene != after.scene)
         || before.targetBounds != after.targetBounds || image.isNull())
@@ -911,8 +865,7 @@ DesktopCapture::Frame grabFrame(const QVector<CapturePart>& parts, const QSize& 
     const QRegion valid = targeted
         ? (reconstructed.valid & stable)
         : ((stable - reconstructed.target) | (reconstructed.valid & stable));
-    // Geometry still identifies the cache layout, so newly uncovered areas
-    // are rebuilt from wallpaper instead of retaining a moving-window ghost.
+    // 缓存布局仍需比较几何位置，新增露出区域应由壁纸重建，不能沿用窗口残影。
     return {std::move(image), valid, area, before.scene, target, scale, before.targetBounds,
             false, targeted ? before.topology : 0};
 }
@@ -920,13 +873,9 @@ DesktopCapture::Frame grabFrame(const QVector<CapturePart>& parts, const QSize& 
 class CaptureWorker final : public QObject {
 public:
     explicit CaptureWorker(QObject* parent) : QObject(parent) {
-        // Keep one capture lane so live requests reuse the same WGC/D3D
-        // stream and do not compete for GPU readback bandwidth.
+        // 使用单条捕获队列复用 WGC/D3D 流，避免争抢 GPU 回读带宽。
         pool.setMaxThreadCount(1);
-        // Do not destroy D3D/WGC thread-local objects during Windows thread
-        // detach. Some AMD drivers then wait for another thread while holding
-        // the loader lock, freezing later GUI/plugin loads. Keep the lane
-        // alive and release their capture resources in ordinary work items.
+        // 在线程退出之前通过普通任务释放捕获资源，避免驱动在系统加载器锁下销毁资源时死锁。
         pool.setExpiryTimeout(-1);
         idleCleanup.setSingleShot(true);
         idleCleanup.setTimerType(Qt::CoarseTimer);
@@ -950,8 +899,7 @@ public:
         idleCleanup.stop();
         pool.clear();
 #ifdef Q_OS_WIN
-        // Destroy WGC sessions on the worker thread that owns their cache
-        // before asking QThreadPool to retire that thread.
+        // 在拥有缓存的工作线程中销毁 WGC 会话，再结束线程池。
         pool.start(QRunnable::create([]() { clearWindowCaptureStreams(); }));
 #endif
         pool.waitForDone();
@@ -986,7 +934,7 @@ void DesktopCapture::request(const QRect& area, qreal pixelScale, WId target, QO
                                        completed = std::move(completed)]() {
         Frame frame;
         try { frame = grabFrame(parts, size, area, pixelScale, target, queued, false); }
-        catch (...) { logCaptureFailure("worker-grab", target); } // Always release the caller's in-flight slot on failure.
+        catch (...) { logCaptureFailure("worker-grab", target); } // 失败时也必须释放调用方的在途请求计数。
         QMetaObject::invokeMethod(owner, [guard, completed, frame = std::move(frame)]() mutable {
             if (guard) {
                 validate(frame);
@@ -1006,14 +954,11 @@ DesktopCapture::Frame DesktopCapture::grab(const QRect& area, qreal pixelScale, 
         frame = grabFrame(parts, size, area, pixelScale, target,
                           capturePlan(parts, size, target));
     } catch (...) {
-        // Match the asynchronous path: a transient capture/device failure
-        // yields an empty frame instead of escaping through the GUI event loop.
+        // 同步捕获失败返回空帧，不让设备异常越过界面事件循环。
         logCaptureFailure("synchronous-grab", target);
     }
 #ifdef Q_OS_WIN
-    // Synchronous grabs run on their caller (normally the GUI thread) and do
-    // not form a live stream. Close any session created for this one-shot read
-    // immediately; asynchronous worker requests retain and reuse theirs.
+    // 同步读取不是持续捕获流，用完立即关闭；异步工作线程继续复用会话。
     try { clearWindowCaptureStreams(); } catch (...) {}
 #endif
     return frame;
@@ -1025,7 +970,7 @@ void DesktopCapture::resetWorkerStreams()
     CaptureWorker* owner = captureWorkerInstance();
     if (!owner)
         return;
-    // Preserve queued completions and keep teardown off the GUI thread.
+    // 保留排队的完成回调，将资源释放移出界面线程。
     owner->pool.start(QRunnable::create([]() { clearWindowCaptureStreams(); }));
 #endif
 }
@@ -1066,9 +1011,7 @@ bool DesktopCapture::Cache::current() const
 
 QImage DesktopCapture::Cache::merge(Frame frame, const std::function<QImage()>& fallback)
 {
-    // Asynchronous requests are validated immediately before their callback.
-    // Avoid enumerating the complete native window stack a second time in
-    // that same callback; this was a significant part of every live frame.
+    // 异步回调交付前已验证窗口层级，此处复用结果以减少每帧枚举开销。
     if (!frame.validated && !validate(frame))
         return {};
     if (area != frame.area || image.size() != frame.image.size() || scene != frame.scene) {
@@ -1104,8 +1047,7 @@ QImage DesktopCapture::Cache::merge(Frame frame, const std::function<QImage()>& 
     target = frame.target;
     topology = frame.topology;
     scale = frame.scale;
-    // DWM can present the previous position for a frame after native geometry
-    // changes. Hold newly uncovered pixels briefly instead of admitting ghosts.
+    // 原生窗口移动后 DWM 可能滞后一帧，短暂保护新增露出区域以避免残影。
     const QRegion covered = QRegion(frame.image.rect()) - frame.valid;
     if (!coverageClock.isValid() || coverageClock.elapsed() > 120) {
         recentlyCovered = covered;
@@ -1116,8 +1058,7 @@ QImage DesktopCapture::Cache::merge(Frame frame, const std::function<QImage()>& 
     if (valid.isEmpty())
         return image;
     if (valid == QRegion(image.rect())) {
-        // Retain the shared image/cache key on static desktops. Changed full
-        // frames can be adopted directly without a second allocation or blit.
+        // 静态桌面复用共享图像；完整新帧直接接管，避免额外分配和复制。
         if (image != frame.image)
             image = std::move(frame.image);
         return image;

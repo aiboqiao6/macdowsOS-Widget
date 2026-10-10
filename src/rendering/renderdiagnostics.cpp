@@ -31,8 +31,7 @@ struct LogState {
     bool handlerInstalled = false;
 };
 LogState& state() {
-    // Qt may still emit platform teardown warnings after QApplication dies.
-    // Keep the handler state alive until process exit.
+    // QApplication 销毁后平台仍可能产生日志，处理器状态保留至进程退出。
     static auto* value = new LogState;
     return *value;
 }

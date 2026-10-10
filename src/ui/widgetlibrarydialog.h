@@ -22,8 +22,7 @@ class QPushButton;
 class QLabel;
 class QLineEdit;
 
-// A frameless gallery. Mouse capture keeps tile drags local so Escape and
-// interrupted drags cannot be mistaken for an unsupported desktop drop.
+// 无边框图库通过鼠标捕获管理拖动，退出或中断时不会误判为桌面放置。
 class WidgetLibraryDialog final : public LiquidGlassWidget
 {
     Q_OBJECT
@@ -32,9 +31,7 @@ public:
     static void refreshFontRendering();
     void setInterfaceScale(qreal scale);
 
-    // Capture the already-composited desktop while this window is hidden.
-    // The shared QtGlassFlow shader then blurs/refractions this image, so
-    // application windows are included instead of sampling wallpaper only.
+    // 图库隐藏时捕获完整桌面，再由共享玻璃管线处理模糊和折射。
     void prepareBackdrop();
 
     void notifyWidgetDropped(int kind, const QPoint& globalPos);
@@ -78,7 +75,7 @@ private:
     QPushButton* m_doneButton = nullptr;
     QLabel* m_sectionTitle = nullptr;
     QLineEdit* m_search = nullptr;
-    qreal m_uiScale = 1.0;
+    qreal m_interfaceScale = 1.0;
     bool m_scaleApplied = false;
     int m_tileColumns = 0;
     int m_selectedCategory = -1;

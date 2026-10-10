@@ -24,3 +24,23 @@ set WIDGET_STRESS_MS=
 `liveCaptureSoak` 持续改变背景颜色和窗口尺寸，检查渲染帧、背景变化，以及预热前后的进程私有内存、句柄数、GDI 对象数。可增加 `WIDGET_STRESS_MS` 进行更长时间验证。
 
 测试使用临时 INI 配置、Qt 测试数据目录和不可达的本地代理，避免修改正式设置或请求在线天气/词典服务。渲染测试需要已登录且未锁屏的交互式 Windows 桌面，会显示测试窗口；不要与其他 UI 自动化并行运行。图像输出保存在运行目录的 `artifacts` 下。
+
+中文注释审查从项目根目录运行：
+
+```bat
+python -X utf8 tests\review_comments.py
+```
+
+审查跳过字符串中的网址，检查自有 C++、GLSL 和回归源码中的英文注释、英文句子与遗留待办标记。注释的语义和必要性仍需人工审查。
+
+本次新增重点用例：
+
+- `clearTypeUsesRgbCoverageAndRestoresGlPainter` 检查真实 RGB 子像素覆盖和 GL 绘制状态恢复。
+- `previewDoesNotStartServicesOrCreateConfiguration` 检查普通图库预览不启动卡片后台任务、不提前创建配置。
+- `scalePreviewAnimatesWithoutBlockingControls` 检查中间尺寸、界面定时器延迟和向导表面尺寸稳定。
+- `settingsAndWizardShareScaleSelector` 检查设置复用缩放控件并保存连续比例。
+- `firstRunWizardShowsActualSizeWithoutResizingSurface` 对照浮动预览与真实桌面尺寸。
+- `musicCardsRenderStatesAndRestoreConfiguration` 检查音乐布局、播放/暂停状态和配置恢复。
+- `systemMediaReadsAndControlsOwnSession` 创建测试专用 Windows 媒体会话，验证标题、艺术家、时间线、暂停与切歌；不播放音频，不控制用户已有会话。系统没有发布测试会话或选择其他播放源时跳过该用例。
+
+可通过 `QT_SCREEN_SCALE_FACTORS` 为独立测试进程指定 1、1.25、1.5、1.75、2 等 DPR，检查不同像素密度。必须对照测试输出确认实际 DPR；部分 Qt 配置对数值 1 沿用系统缩放，此时可用 `QT_SCALE_FACTOR` 校准。两个变量都只影响测试进程，不修改 Windows 显示设置。此次验证记录见 [review-2026-10-11.md](review-2026-10-11.md)。

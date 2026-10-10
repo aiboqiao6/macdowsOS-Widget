@@ -37,11 +37,9 @@
 #endif
 
 namespace {
-constexpr int kWallpaperIdleIntervalMs = 10000; // 0.1 FPS when live sampling is off
+constexpr int kWallpaperIdleIntervalMs = 10000; // 关闭实时采样时每十秒刷新一次。
 
-// QImage is implicitly shared, so keeping one process-wide wallpaper canvas
-// avoids a full-screen RGBA allocation per widget (which is especially costly
-// on 4K/high-DPI desktops). Each instance still owns its small local crop.
+// 全进程共享壁纸画布，每个组件只保留局部裁剪，减少高 DPI 桌面的内存占用。
 QImage s_sharedWallpaperCanvas;
 QString s_sharedWallpaperSignature;
 QString s_sharedWallpaperScreenName;
@@ -52,7 +50,7 @@ QList<LiquidGlassWidget*> s_liveGlassWidgets;
 QPointer<QTimer> s_compositeRefreshTimer;
 quint64 s_surfaceRevision = 0;
 
-} // namespace
+}
 
 LiquidGlassWidget::LiquidGlassWidget(QWidget* parent)
     : QtGlassFlowScene(parent)
@@ -60,12 +58,7 @@ LiquidGlassWidget::LiquidGlassWidget(QWidget* parent)
     s_liveGlassWidgets.append(this);
     connect(this, &QtGlassFlowScene::frameRendered, this, &LiquidGlassWidget::queueCompositeRefresh);
     setWindowTitle(QStringLiteral("macdowsOS Widget"));
-    // Keep the card on the desktop layer. It remains draggable, but regular
-    // application windows stay above it just like a macOS desktop widget.
-    // On Windows the native Z order is switched dynamically in
-    // updateWindowLayer(). Do not also set WindowStaysOnBottomHint there:
-    // Qt can reapply that static hint while processing a move and demote a
-    // card immediately after we promoted it for dragging.
+    // 原生窗口层级由 updateWindowLayer 动态管理；静态置底标志会干扰拖动时临时提升。
     Qt::WindowFlags flags = Qt::Tool | Qt::FramelessWindowHint
                             | Qt::WindowDoesNotAcceptFocus;
 #ifndef Q_OS_WIN
@@ -86,23 +79,20 @@ LiquidGlassWidget::LiquidGlassWidget(QWidget* parent)
     setGlassObjectCornerRadius(m_glassObjectIndex, float(m_glassRadius));
     updateWindowMask();
 
-    // The GUI timer only schedules bounded worker requests and local crops.
-    // Unchanged desktop pixels skip texture uploads and blur passes.
+    // 界面定时器只提交数量受限的工作请求并裁剪缓存，背景不变时跳过纹理上传与模糊。
     m_backdropTimer = new QTimer(this);
     m_backdropTimer->setTimerType(Qt::CoarseTimer);
     m_backdropTimer->setInterval(kWallpaperIdleIntervalMs);
     connect(m_backdropTimer, &QTimer::timeout,
             this, &LiquidGlassWidget::captureDesktopBackdrop);
-    // Polling detects screenshot tools so the backdrop sampler can pause while
-    // a selection surface is changing the desktop underneath the card.
+    // 检测系统截图工具，选择区域期间暂停背景采样。
     m_captureMonitorTimer = new QTimer(this);
     m_captureMonitorTimer->setTimerType(Qt::CoarseTimer);
     m_captureMonitorTimer->setInterval(200);
     connect(m_captureMonitorTimer, &QTimer::timeout,
             this, &LiquidGlassWidget::updateSystemCaptureMode);
     NativeWindows::observeTopology(this, [this]() {
-        // Invalidate/recompose promptly when another application changes
-        // layers, even while the static-desktop timer is running at 10 Hz.
+        // 外部窗口层级变化时及时重新合成，不等待空闲刷新周期。
         if (isVisible()) {
             updateWindowLayer();
             if (m_desktopCaptureEnabled)
@@ -144,17 +134,14 @@ QImage LiquidGlassWidget::captureDesktopComposite(QScreen* screen, const QRect& 
 {
     if (!screen || area.isEmpty())
         return {};
-    // The card remains capturable normally. It is excluded only for the few
-    // milliseconds of this internal sample so its actual backdrop is read.
+    // 内部捕获通过进程内注册表排除玻璃窗口；系统截图仍可正常捕获组件。
     const bool targetVisible = excluded && excluded->isVisible();
     const qreal scale = screen->devicePixelRatio() * renderScale;
     const QRect captureArea = targetVisible
         ? area.adjusted(-48, -48, 48, 48) : area;
     const WId target = excluded && excluded->isVisible() ? excluded->winId() : 0;
     auto frame = DesktopCapture::grab(captureArea, scale, target);
-    // A foreground animation can change the native stack during the first
-    // synchronous sample. Retry once instead of exposing a null/partial frame
-    // to gallery hosts or explicit snapshot callers.
+    // 同步捕获期间窗口层级可能变化，失败后重试一次，避免向调用者交付不完整画面。
     if (frame.image.isNull())
         frame = DesktopCapture::grab(captureArea, scale, target);
     DesktopCapture::Cache temporary;
@@ -184,10 +171,7 @@ void LiquidGlassWidget::requestDesktopComposite(const QRect& area,
         return;
     }
     const qreal scale = screen->devicePixelRatio() * renderScale();
-    // Callers use this path for a settled interactive surface. Capture only
-    // the requested rectangle: unlike the desktop-card drag path, it does not
-    // need a movement runway, and the smaller transfer keeps live gallery
-    // updates lighter.
+    // 稳定面板只捕获当前矩形，无需为拖动预留额外背景区域。
     const QRect captureArea = area.intersected(screen->geometry());
     DesktopCapture::request(captureArea, scale, winId(), this,
         [this, area, captureArea, scale,
@@ -241,17 +225,14 @@ void LiquidGlassWidget::compositeGlassWindows(QImage& image, const QRect& area,
     if (target) {
         for (int i = 0; i < stack.size(); ++i)
             if (stack.at(i).id == target) { targetIndex = i; break; }
-        // A native recreation can remove the target for one event-loop turn.
-        // Do not insert windows of unknown relative order during that turn.
+        // 窗口重建期间层级暂时未知，不能加入未经验证的下层窗口。
         if (targetIndex < 0)
             return;
     }
     QPainter painter(&image);
     painter.scale(image.width() / qreal(area.width()), image.height() / qreal(area.height()));
     painter.translate(-area.topLeft());
-    // Paint lower layers bottom to top, using the same stack and the same
-    // completed frame for all consumers. Cloaked/shell windows are never
-    // opaque covers, and known glass windows are not subtracted as rectangles.
+    // 按从底到顶的次序合成同一份已完成帧，跳过隐藏窗口和桌面宿主。
     for (int i = stack.size() - 1; i > targetIndex; --i) {
         LiquidGlassWidget* widget = glassWindows.value(stack.at(i).id);
         if (!widget || !candidates.contains(widget))
@@ -274,11 +255,7 @@ void LiquidGlassWidget::compositeGlassWindows(QImage& image, const QRect& area,
             continue;
         painter.save();
         painter.setClipRegion(visible);
-        // The capture cache deliberately rejects the complete rectangle of a
-        // lower glass window. Rebuild that hole from the lower surface's own
-        // pristine shader input before drawing its translucent output. Using
-        // wallpaper as the hole fill made rounded corners sample a different
-        // colour, and repeated overlap/refraction appeared as growing glare.
+        // 捕获缓存剔除了整个玻璃矩形；先用下层窗口的原始背景补洞，再叠加其透明输出。
         if (!widget->m_lastCompositedBackdrop.isNull())
             painter.drawImage(widget->frameGeometry(),
                               widget->m_lastCompositedBackdrop);
@@ -370,9 +347,7 @@ void LiquidGlassWidget::setLiveBackdropEnabled(bool enabled, bool persist)
     m_unchangedCaptures = 0;
     updateRefreshRate();
     if (isVisible() && m_desktopCaptureEnabled) {
-        // setInterval() does not make a stopped timer live.  Be explicit here
-        // because the sampler may have been stopped while hidden or during a
-        // system capture when this preference is changed.
+        // 修改定时器间隔不会自动启动，偏好变更时需要显式恢复采样。
         if (m_backdropTimer && !m_systemCaptureActive)
             m_backdropTimer->start();
         captureDesktopBackdrop();
@@ -414,22 +389,17 @@ void LiquidGlassWidget::setDesktopCaptureEnabled(bool enabled)
 
 void LiquidGlassWidget::updateRefreshRate()
 {
-    // Reduced cadence is safe only for click-through cards: interactive cards
-    // must remain responsive even if the preference was left enabled earlier.
+    // 低频刷新只应用于鼠标穿透卡片，保留可交互组件的响应速度。
     const bool lowPower = m_lowPowerRefresh && m_mouseThrough;
     const int displayInterval = activeDisplayInterval();
     setRefreshInterval(lowPower ? 250 : displayInterval);
-    // Live mode must present at the same cadence even without pointer input
-    // or changing background pixels. Keep payload animation independent.
+    // 实时背景与内容动画独立，静止时也保持显示器刷新节奏。
     const bool desktopDrag = desktopDragActive();
     setContinuousRenderingEnabled(m_liveBackdropEnabled && !desktopDrag);
     if (m_backdropTimer) {
         const bool dragging = m_dragging && !lowPower;
         const bool live = !wallpaperOnlyWhenIdle() && !desktopDrag;
-        // Live sampling is presentation work, not a housekeeping task.  A
-        // coarse timer may be delayed by tens of milliseconds while the card
-        // is stationary, which made the enabled setting look frozen.  The
-        // bounded in-flight requests below already provide back-pressure.
+        // 实时采样使用精确定时器；在途请求数量限制负责背压，避免粗略定时器延迟。
         m_backdropTimer->setTimerType((dragging || live) ? Qt::PreciseTimer
                                                         : Qt::VeryCoarseTimer);
         const int interval = dragging ? displayInterval
@@ -516,19 +486,14 @@ void LiquidGlassWidget::configureGlass(float powerFactor, float refractionPower,
     setAttractionDistance(0.0f);
 }
 
-void LiquidGlassWidget::paintGlassSurfaceFrame(QPainter& p, const QRectF& card,
+void LiquidGlassWidget::paintGlassSurfaceFrame(QPainter& painter, const QRectF& card,
                                                 qreal radius) const
 {
-    // This is deliberately a content-independent edge pass.  Blur, clipping
-    // and corner geometry are owned by LiquidGlassWidget/QtGlassFlowScene;
-    // concrete widgets only draw their payload inside this shared surface.
-    p.save();
-    p.setRenderHint(QPainter::Antialiasing, true);
-    p.setBrush(Qt::NoBrush);
-    // One restrained directional rim is enough: the shader already owns
-    // the SDF alpha edge. The previous base stroke + gradient stroke +
-    // conical stroke + top line stacked into a blue/white double border,
-    // especially along the lower-right edge.
+    // 共享边缘绘制与内容无关；模糊、裁剪和圆角由玻璃基类负责。
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setBrush(Qt::NoBrush);
+    // 着色器已提供透明边缘，只增加一层方向性高光，避免形成重复亮边。
     QLinearGradient rim(card.topLeft(), card.bottomRight());
     rim.setColorAt(0.00, QColor(255, 255, 255, 105));
     rim.setColorAt(0.22, QColor(245, 250, 255, 54));
@@ -537,23 +502,23 @@ void LiquidGlassWidget::paintGlassSurfaceFrame(QPainter& p, const QRectF& card,
     rim.setColorAt(1.00, QColor(255, 255, 255, 62));
     QPen edge(QBrush(rim), 1.0);
     edge.setCosmetic(true);
-    p.setPen(edge);
-    p.drawRoundedRect(card.adjusted(.75, .75, -.75, -.75),
+    painter.setPen(edge);
+    painter.drawRoundedRect(card.adjusted(.75, .75, -.75, -.75),
                       qMax<qreal>(0.0, radius - .75),
                       qMax<qreal>(0.0, radius - .75));
 
-    p.save();
+    painter.save();
     QPainterPath tintPath;
     tintPath.addRoundedRect(card, radius, radius);
-    p.setClipPath(tintPath);
+    painter.setClipPath(tintPath);
     QLinearGradient gloss(card.topLeft(),
                           QPointF(card.left(), card.top() + card.height() * .40));
     gloss.setColorAt(0.0, QColor(255, 255, 255, 22));
     gloss.setColorAt(0.30, QColor(255, 255, 255, 5));
     gloss.setColorAt(1.0, QColor(255, 255, 255, 0));
-    p.fillRect(card, gloss);
-    p.restore();
-    p.restore();
+    painter.fillRect(card, gloss);
+    painter.restore();
+    painter.restore();
 }
 
 void LiquidGlassWidget::updateGlassObjectGeometry()
@@ -569,17 +534,11 @@ void LiquidGlassWidget::updateGlassObjectGeometry()
 void LiquidGlassWidget::updateWindowMask()
 {
 #ifdef Q_OS_WIN
-    // A native HRGN is binary and clips the alpha-smoothed OpenGL edge back
-    // to whole logical pixels.  On fractional DPI scales that produces the
-    // staircase visible around rounded cards.  Windows' translucent
-    // compositor already honours the framebuffer alpha, so keep the native
-    // window rectangular and let the shader own the antialiased silhouette.
+    // 原生窗口区域是二值裁剪，会破坏小数 DPI 的平滑圆角；使用帧缓冲 alpha 保留抗锯齿。
     clearMask();
 #else
     QPainterPath shape;
-    // The OpenGL glass object is laid out from (0,0) to the widget bounds.
-    // Keep the native window region on that exact same silhouette; an extra
-    // inset here produces a second, visibly smaller rounded rectangle.
+    // 窗口区域与完整玻璃表面保持一致，额外内缩会出现第二层边框。
     shape.addRoundedRect(QRectF(rect()), m_glassRadius, m_glassRadius);
     setMask(QRegion(shape.toFillPolygon().toPolygon()));
 #endif
@@ -618,9 +577,7 @@ bool LiquidGlassWidget::rebuildWallpaperCanvas(QScreen* screen)
     const qreal dpr = screen->devicePixelRatio();
     const QSize nativeSize(qMax(1, qRound(screen->size().width() * dpr)),
                            qMax(1, qRound(screen->size().height() * dpr)));
-    // Let supersampled quality modes draw from a correspondingly larger
-    // wallpaper source. This keeps 125%/150% rendering from merely enlarging
-    // an already reduced image, while the native desktop size remains the cap.
+    // 超采样画质使用相应分辨率的壁纸源，避免仅放大低分辨率图像。
     const int kBackdropMaxDimension = qRound(2560 * qMax<qreal>(1.0, renderScale()));
     const qreal canvasScale = qMin<qreal>(1.0,
         kBackdropMaxDimension / qreal(qMax(nativeSize.width(), nativeSize.height())));
@@ -664,8 +621,7 @@ bool LiquidGlassWidget::rebuildWallpaperCanvas(QScreen* screen)
         if (tiled) {
             painter.drawTiledPixmap(bounds.toRect(), QPixmap::fromImage(wallpaper));
         } else if (style == QStringLiteral("2") || style == QStringLiteral("22")) {
-            // Stretch, and Span on the active screen.  Span uses one image for
-            // the virtual desktop; on a single monitor this is pixel-identical.
+            // 拉伸与跨屏壁纸；单显示器下跨屏等同于拉伸。
             painter.drawImage(bounds, wallpaper);
         } else if (style == QStringLiteral("0")) {
             const QPointF topLeft((pixelSize.width() - wallpaper.width()) * .5,
@@ -710,15 +666,13 @@ void LiquidGlassWidget::updateCaptureExclusion(bool resetBackdrop)
         < QOperatingSystemVersion(QOperatingSystemVersion::Windows, 10, 0, 19041))
         return;
     const WId id = winId();
-    // Qt's translucent HWND still receives a Windows 11 non-client outline
-    // on some themes. That rectangular border is outside our GL alpha mask.
-    // The glass shader and overlay own the entire rounded edge.
+    // 关闭 Windows 非客户区矩形描边，圆角边缘由 GL 着色器和覆盖层统一绘制。
     using SetDwmAttribute = HRESULT (WINAPI *)(HWND, DWORD, LPCVOID, DWORD);
     static const auto setDwmAttribute = reinterpret_cast<SetDwmAttribute>(
         GetProcAddress(GetModuleHandleW(L"dwmapi.dll"), "DwmSetWindowAttribute"));
     if (setDwmAttribute) {
-        const int disabled = 1; // DWMNCRP_DISABLED
-        const DWORD noBorder = 0xfffffffe; // DWMWA_COLOR_NONE
+        const int disabled = 1; // 禁用非客户区渲染。
+        const DWORD noBorder = 0xfffffffe; // 不绘制 DWM 边框颜色。
         setDwmAttribute(reinterpret_cast<HWND>(id), 2, &disabled, sizeof(disabled));
         setDwmAttribute(reinterpret_cast<HWND>(id), 34, &noBorder, sizeof(noBorder));
     }
@@ -726,11 +680,7 @@ void LiquidGlassWidget::updateCaptureExclusion(bool resetBackdrop)
         NativeWindows::unregisterGlassWindow(m_registeredGlassWindow);
     m_registeredGlassWindow = id;
     NativeWindows::registerGlassWindow(id);
-    // Keep the card visible to every system screenshot and recording surface.
-    // NativeWindows' process-local glass registry still keeps it out of our
-    // own backdrop sampler.
-    // m_captureExcluded is an internal registration flag used only by the
-    // compositor and sampler. It does not alter native screenshot policy.
+    // 进程内注册标记只控制自身背景合成，不改变系统截图或录屏策略。
     m_captureExcluded = true;
 #endif
 }
@@ -740,9 +690,7 @@ void LiquidGlassWidget::updateSystemCaptureMode()
 #ifdef Q_OS_WIN
     if (!isVisible())
         return;
-    // Reuse the existing monitor tick as a fallback for native callers that
-    // suppress WINDOWPOSCHANGING or do not emit a usable reorder event. This
-    // check is independent of live capture and only repositions misplaced cards.
+    // 定时检查作为原生层级事件的后备，仅修复层级错误的卡片。
     updateWindowLayer();
     setSystemCaptureMode(NativeWindows::isSystemCaptureActive());
 #endif
@@ -756,8 +704,7 @@ void LiquidGlassWidget::setSystemCaptureMode(bool active)
     ++m_captureGeneration;
     m_compositeCaptureClock.invalidate();
 
-    // Pause sampling while the external screenshot surface is active; this
-    // avoids ingesting an intermediate frame into the backdrop cache.
+    // 系统截图覆盖层活动时暂停采样，避免把过渡画面写入背景缓存。
     updateCaptureExclusion(false);
     if (m_systemCaptureActive) {
         if (m_backdropTimer)
@@ -779,9 +726,7 @@ int LiquidGlassWidget::activeDisplayInterval() const
     qreal refreshRate = screen ? screen->refreshRate() : 60.0;
     if (!qIsFinite(refreshRate) || refreshRate < 24.0)
         refreshRate = 60.0;
-    // Use floor rather than round so the timer never undershoots the display
-    // rate (59.94 -> 16 ms, 144 -> 6 ms, 240 -> 4 ms). Actual presentation is
-    // synchronized by Qt and the Windows desktop compositor.
+    // 向下取整刷新间隔，避免低于显示器频率；最终呈现由 Qt 和 DWM 同步。
     return qBound(2, qFloor(1000.0 / qMin<qreal>(refreshRate, 500.0)), 42);
 }
 
@@ -793,8 +738,7 @@ bool LiquidGlassWidget::captureCompositedBackdrop(QScreen* screen)
     const bool live = m_liveBackdropEnabled && !(m_lowPowerRefresh && m_mouseThrough);
     if (m_capturesInFlight >= (live && !m_dragging ? 2 : 1))
         return true;
-    // Coarse timers may fire up to 5% early; allow that tolerance instead of
-    // unintentionally skipping every other idle tick.
+    // 粗略定时器允许提前触发，容忍该误差可避免隔次跳过空闲刷新。
     const int maxAge = live && !m_dragging ? 0
                      : (m_dragging ? 14 : qMax(1, m_backdropTimer->interval() * 94 / 100));
     if (m_compositeCaptureClock.isValid() && m_compositeCaptureClock.elapsed() < maxAge
@@ -803,21 +747,14 @@ bool LiquidGlassWidget::captureCompositedBackdrop(QScreen* screen)
     if (m_dragging && m_compositeCaptureClock.isValid()
         && m_compositeCaptureClock.elapsed() < maxAge)
         return true;
-    // A padded capture lets movement crop immediately from RAM while the
-    // next desktop frame arrives from the worker. Live surfaces use a bounded
-    // two-request pipeline so GPU presentation cannot leave the worker idle.
-    // Keep a small movement runway so crops stay responsive while dragging,
-    // but avoid the 3x pixel area of the previous 128 px pad.
-    // A small idle runway keeps motion crops responsive without expanding the
-    // capture to a large part of a high-DPI desktop.
+    // 捕获区域预留少量移动余量，并限制为两个在途请求，兼顾拖动响应与像素传输量。
     const int padding = live && !m_dragging ? 0 : (m_dragging ? 96 : 56);
     const QRect targetGeometry = frameGeometry();
     const QRect area = targetGeometry.adjusted(-padding, -padding, padding, padding);
     const quint64 generation = m_captureGeneration;
     ++m_capturesInFlight;
     m_compositeCaptureClock.restart();
-    // Store only the external desktop. Glass layers are composed at the
-    // current position from completed frames, independently of capture age.
+    // 只缓存外部桌面；玻璃层按当前位置与已完成帧单独合成。
     const qreal scale = screen->devicePixelRatio() * renderScale();
     DesktopCapture::request(area, scale, winId(), this,
         [this, area, scale, generation](DesktopCapture::Frame frame) {
@@ -838,8 +775,7 @@ bool LiquidGlassWidget::captureCompositedBackdrop(QScreen* screen)
             ++s_surfaceRevision;
             updateCompositeCrop();
         }
-        // Start the next asynchronous request before returning to Qt's
-        // vsynced composition. A queued zero timer here lost a display tick.
+        // 交付结果后立即提交下一次捕获，避免排队定时器额外损失一帧。
         if (m_liveBackdropEnabled && !(m_lowPowerRefresh && m_mouseThrough)
             && !desktopDragActive())
             captureDesktopBackdrop();
@@ -874,8 +810,7 @@ bool LiquidGlassWidget::fullyOccluded() const
 
 void LiquidGlassWidget::updateCompositeCrop()
 {
-    // A desktop drag owns a fresh wallpaper/lower-card composition. Neither a
-    // queued capture nor another card's frame signal may restore an old crop.
+    // 拖动时背景由当前壁纸与下层卡片即时合成，不能被异步旧结果覆盖。
     if (directBackdropDuringDrag() && desktopDragActive())
         return;
     if (fullyOccluded())
@@ -896,9 +831,7 @@ void LiquidGlassWidget::updateCompositeCrop()
     if (sourceUnchanged && overlapping == m_lastCropHadLayers
         && (!overlapping || m_lastCropSceneRevision == s_surfaceRevision))
         return;
-    // A no-op crop does not consume any captured pixels. Avoid rebuilding the
-    // native capture plan on every render tick in that case; still validate
-    // before every actual composition, including topology/overlap changes.
+    // 无变化的裁剪不读取捕获像素；真正合成前仍须验证层级与重叠关系。
     if (!m_backdropCache.current())
         return;
     m_lastCropHadLayers = overlapping;
@@ -911,8 +844,7 @@ void LiquidGlassWidget::updateCompositeCrop()
     QImage sample = m_compositeCanvas.copy(qRound(offset.x() * sx), qRound(offset.y() * sy),
                                           qMax(1, qRound(width() * sx)), qMax(1, qRound(height() * sy)));
     compositeGlassWindows(sample, frameGeometry(), this);
-    // QImage's comparison uses optimized row comparisons and returns early.
-    // A per-pixel 64-bit hash was slower and still required a full image scan.
+    // 使用 QImage 的优化行比较，避免逐像素哈希的完整扫描开销。
     if (sample == m_lastCompositedBackdrop)
         return;
     m_lastCompositedBackdrop = sample;
@@ -931,12 +863,7 @@ void LiquidGlassWidget::captureDesktopBackdrop()
     if (!screen)
         return;
 
-    // During a desktop-card drag ordinary application windows are hidden by
-    // the host. Build the exact current backdrop locally from the shared
-    // wallpaper plus lower glass surfaces. This path is independent of the
-    // asynchronous capture worker, whose result cannot be accepted while the
-    // target HWND is changing position, and therefore remains smooth even
-    // across movements larger than the capture runway.
+    // 拖动时普通应用窗口已隐藏，直接合成共享壁纸与下层玻璃，无需等待异步捕获。
     if (m_dragging && directBackdropDuringDrag()) {
         setRenderingSuspended(false);
         QImage sample = wallpaperBackdrop(frameGeometry(),
@@ -949,14 +876,10 @@ void LiquidGlassWidget::captureDesktopBackdrop()
         return;
     }
 
-    // Desktop widgets stay visually quiet when not moving: their glass samples
-    // the wallpaper only, avoiding periodic lower-window captures and texture
-    // churn. Dragging switches to the live composited path below immediately.
+    // 关闭实时背景时，静止卡片只采样壁纸；拖动时切换至下层合成。
     if ((wallpaperOnlyWhenIdle() || (directBackdropDuringDrag() && desktopDragActive()))
         && !m_dragging) {
-        // A card may have been suspended while it was covered during a prior
-        // live-capture phase. Idle wallpaper mode must always restore its own
-        // paint loop and keep the native desktop layer in sync as well.
+        // 从遮挡暂停切回壁纸模式时恢复绘制循环，并同步原生窗口层级。
         updateWindowLayer();
         setRenderingSuspended(false);
         const QImage sample = wallpaperBackdrop(frameGeometry(),
@@ -967,8 +890,7 @@ void LiquidGlassWidget::captureDesktopBackdrop()
         }
         return;
     }
-    // Covered desktop cards cannot contribute visible pixels. Keep checking
-    // visibility at the normal cadence, but avoid captures and GPU work.
+    // 完全遮挡的卡片跳过捕获与 GPU 绘制，但继续检测可见性变化。
     updateWindowLayer();
     const bool occluded = fullyOccluded();
     setRenderingSuspended(occluded);
@@ -992,9 +914,7 @@ QImage LiquidGlassWidget::wallpaperBackdrop(const QRect& area, qreal scale)
                    QImage::Format_RGB32);
     result.fill(Qt::black);
     QPainter painter(&result);
-    // Supersampled quality requests a fractional enlargement of the native
-    // wallpaper canvas. Nearest-neighbour copies create repeating pixel blocks
-    // before the blur even begins, especially at 125%/150% quality.
+    // 超采样壁纸使用平滑缩放，避免最近邻放大产生重复像素块。
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
     for (QScreen* screen : QGuiApplication::screens()) {
         const QRect part = area.intersected(screen->geometry());
@@ -1027,8 +947,7 @@ void LiquidGlassWidget::showEvent(QShowEvent* event)
 {
     QtGlassFlowScene::showEvent(event);
     updateCaptureExclusion();
-    // Showing a native window can reset its position in the Z band. Force one
-    // layer update even when the cached state says it was already demoted.
+    // 显示窗口可能重置层级，强制同步一次原生层级。
     m_windowLayerInitialized = false;
     if (m_panelWindow)
         preparePanelOpening();
@@ -1046,9 +965,7 @@ void LiquidGlassWidget::showEvent(QShowEvent* event)
 void LiquidGlassWidget::hideEvent(QHideEvent* event)
 {
     finishWindowDrag();
-    // Hidden cards do not contribute pixels. Stop the desktop sampler as well
-    // as the scene timer in the shared base, so tray hide/show does not leave
-    // one periodic callback per widget running in the background.
+    // 隐藏时同时停止背景采样与场景定时器，避免后台无效唤醒。
     if (m_backdropTimer)
         m_backdropTimer->stop();
     if (m_captureMonitorTimer)
@@ -1106,14 +1023,12 @@ void LiquidGlassWidget::finishWindowDrag()
     ++m_captureGeneration;
     m_compositeCaptureClock.invalidate();
     setInteractionActive(false);
-    // Snap and hide the preview before demoting the card or taking its final
-    // background, so the preview cannot become part of the stored material.
+    // 先吸附并隐藏放置预览，再降低层级与捕获最终背景，避免把预览写入材质。
     windowDragFinished();
     if (directBackdropDuringDrag())
         refreshDragRendering();
     updateWindowLayer();
-    // Drop pixels captured while this card was in the drag/topmost band
-    // immediately, including when an earlier worker request is still pending.
+    // 立即丢弃拖动或临时置顶期间的旧捕获结果，包括尚未完成的请求。
     m_backdropCache.clear();
     m_compositeCanvas = {};
     QImage fallback = wallpaperBackdrop(frameGeometry(), devicePixelRatioF() * renderScale());
@@ -1139,10 +1054,7 @@ bool LiquidGlassWidget::nativeEvent(const QByteArray& eventType, void* message, 
         if (native->message == WM_WINDOWPOSCHANGING) {
             auto* position = reinterpret_cast<WINDOWPOS*>(native->lParam);
             if (position && !(position->flags & SWP_NOZORDER)) {
-                // Prevent click/owner/Qt raises before Windows presents the
-                // card above applications. Dragging and library panels retain
-                // their own layer policy. Only change the insertion anchor:
-                // Windows ignores NOACTIVATE/NOOWNERZORDER edits in this message.
+                // 拖动与面板之外的卡片只修正插入锚点，避免点击或 Qt 提升窗口时盖住应用。
                 position->hwndInsertAfter = reinterpret_cast<HWND>(
                     NativeWindows::desktopInsertAfter(reinterpret_cast<WId>(native->hwnd)));
             }
@@ -1188,11 +1100,7 @@ void LiquidGlassWidget::moveEvent(QMoveEvent* event)
 {
     QtGlassFlowScene::moveEvent(event);
     if (m_desktopCaptureEnabled && isVisible()) {
-        // Coalesce native move events through the existing sampler. A release
-        // explicitly invalidates the age to refresh the final snapped cell.
-        // During a drag mouseMoveEvent() performs the crop once after the
-        // geometry has settled; doing it here as well caused two full QImage
-        // copies per pointer event and produced visible judder.
+        // 合并原生移动事件；拖动时在几何稳定后只裁剪一次，释放时立即刷新最终位置。
         if (m_dragging)
             updateRefreshRate();
         else
@@ -1228,14 +1136,7 @@ void LiquidGlassWidget::mouseMoveEvent(QMouseEvent* event)
             m_dragging = true;
             ++m_captureGeneration;
             m_compositeCaptureClock.invalidate();
-            // Static cards normally stop their scene timer completely.  A
-            // window drag is still an interactive animation even though no
-            // internal glass object is being dragged, so explicitly enable
-            // the active display's render cadence until finishWindowDrag()
-            // disables it.
-            // Without this, frames are presented only when the asynchronous
-            // backdrop sampler completes (typically around four times a
-            // second), independently of the selected render quality.
+            // 窗口拖动期间显式启用显示器刷新节奏，结束后恢复静态卡片的事件驱动绘制。
             setInteractionActive(true);
             windowDragStarted();
             if (directBackdropDuringDrag())
