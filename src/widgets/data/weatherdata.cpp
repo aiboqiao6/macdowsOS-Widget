@@ -5,7 +5,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QTimer>
+#include <QDate>
+#include <QTime>
 
 #include "widgets/weatherformat.h"
 #include "ui/weathercitydialog.h"
@@ -99,7 +100,6 @@ void DesktopWidget::refreshWeather()
     QUrl url(QStringLiteral("https://d1.weather.com.cn/weather_index/%1.html").arg(cityId));
     QNetworkRequest request(url);
     CardRequest::configureWeather(request);
-    m_weatherLoading = true;
     // 刷新天气期间保留最后完整快照，避免清空内容造成闪烁。
     if (m_weatherTemperature.isEmpty()) {
         m_weatherDescription = QStringLiteral("获取天气中…");
@@ -108,8 +108,6 @@ void DesktopWidget::refreshWeather()
     QNetworkReply* reply = CardRequest::get(*m_weatherNetwork, request);
     m_weatherReply = reply;
     reply->setProperty("weatherSerial", m_weatherReplySerial);
-    // 为网络请求设置超时，避免离线或认证网络中的回复长期存活。
-
 }
 
 void DesktopWidget::handleWeatherReply(QNetworkReply* reply)
@@ -134,10 +132,6 @@ void DesktopWidget::handleWeatherReply(QNetworkReply* reply)
         const QRegularExpression codeExpression(
             QStringLiteral(R"(<big\b[^>]*class\s*=\s*["'][^"']*\bd(\d{1,2})\b[^"']*["'])"),
             QRegularExpression::CaseInsensitiveOption);
-        const QRegularExpression descriptionExpression(
-            QStringLiteral(R"(<p\b[^>]*class\s*=\s*["'][^"']*\bwea\b[^"']*["'][^>]*>(.*?)</p>)"),
-            QRegularExpression::DotMatchesEverythingOption
-            | QRegularExpression::CaseInsensitiveOption);
         const QRegularExpression temperatureExpression(
             QStringLiteral(R"(<p\b[^>]*class\s*=\s*["'][^"']*\btem\b[^"']*["'][^>]*>.*?<span[^>]*>\s*(-?\d+)\s*</span>\s*/\s*<i[^>]*>\s*(-?\d+))"),
             QRegularExpression::DotMatchesEverythingOption
@@ -151,8 +145,6 @@ void DesktopWidget::handleWeatherReply(QNetworkReply* reply)
             if (index++ == 0)
                 continue;
             const QRegularExpressionMatch codeMatch = codeExpression.match(card);
-            const QRegularExpressionMatch descriptionMatch =
-                descriptionExpression.match(card);
             const QRegularExpressionMatch temperatureMatch =
                 temperatureExpression.match(card);
             if (!temperatureMatch.hasMatch())
@@ -161,8 +153,6 @@ void DesktopWidget::handleWeatherReply(QNetworkReply* reply)
             item.label = chineseWeekdayLabel(QDate::currentDate().addDays(days.size() + 1));
             item.high = temperatureMatch.captured(1).trimmed();
             item.low = temperatureMatch.captured(2).trimmed();
-            item.description = descriptionMatch.hasMatch()
-                ? descriptionMatch.captured(1).simplified() : QString();
             item.code = codeMatch.hasMatch() ? codeMatch.captured(1).toInt() : -1;
             item.night = false;
             days.append(item);
@@ -190,7 +180,6 @@ void DesktopWidget::handleWeatherReply(QNetworkReply* reply)
             if (hourMarker >= 0)
                 item.time = item.time.mid(hourMarker + 1).trimmed();
             item.code = numericWeatherCode(fields.at(1));
-            item.description = fields.at(2).trimmed();
             item.temperature = weatherValue(fields.at(3));
             item.night = fields.at(1).trimmed().startsWith(QLatin1Char('n'));
             hours.append(item);
@@ -241,7 +230,6 @@ void DesktopWidget::handleWeatherReply(QNetworkReply* reply)
                 item.label = day.value(QStringLiteral("fi")).toString().trimmed();
             item.high = weatherValue(day.value(QStringLiteral("fc")));
             item.low = weatherValue(day.value(QStringLiteral("fd")));
-            item.description = day.value(QStringLiteral("fa")).toString().trimmed();
             item.code = numericWeatherCode(day.value(QStringLiteral("fa")).toString());
             item.night = day.value(QStringLiteral("fb")).toString().trimmed()
                              .startsWith(QLatin1Char('n'));
@@ -253,8 +241,6 @@ void DesktopWidget::handleWeatherReply(QNetworkReply* reply)
             // 一次替换完整列表，避免绘制时看到部分清空的状态。
             m_weatherDays = std::move(parsedDays);
         }
-        m_weatherLoading = false;
-        m_weatherUpdated = QDateTime::currentDateTime();
 
         QNetworkRequest hourlyRequest(QUrl(
             QStringLiteral("https://www.weather.com.cn/weather1d/%1.shtml")
@@ -264,8 +250,6 @@ void DesktopWidget::handleWeatherReply(QNetworkReply* reply)
         m_weatherReply = hourlyReply;
         hourlyReply->setProperty("weatherSerial", m_weatherReplySerial);
         hourlyReply->setProperty("weatherHourly", true);
-
-
         // 首页预报天数不足时补充七日页面，以便从明天开始显示五行。
         QNetworkRequest dailyRequest(QUrl(
             QStringLiteral("https://www.weather.com.cn/weather/%1.shtml")
@@ -276,7 +260,6 @@ void DesktopWidget::handleWeatherReply(QNetworkReply* reply)
         dailyReply->setProperty("weatherDaily", true);
 
     } else {
-        m_weatherLoading = false;
         m_weatherDescription = m_weatherTemperature.isEmpty()
             ? QStringLiteral("天气暂不可用") : QStringLiteral("更新失败 · 显示上次天气");
     }

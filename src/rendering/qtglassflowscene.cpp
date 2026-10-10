@@ -63,7 +63,7 @@ QtGlassFlowScene::QtGlassFlowScene(QWidget *parent)
       m_globalPower(3.0f), m_timer(nullptr), m_refreshInterval(16),
       m_externalInteraction(false),
       m_animationEnabled(false),
-      m_hoveredIndex(-1), m_dragIndex(-1)
+      m_dragIndex(-1)
 {
     setMouseTracking(true);
     setAttribute(Qt::WA_OpaquePaintEvent, true);
@@ -130,13 +130,12 @@ void QtGlassFlowScene::cleanupGL()
 }
 
 int QtGlassFlowScene::addGlassObject(const QPointF &pos, const QSizeF &size,
-                                     float power, const QString &text)
+                                     float power)
 {
     GlassObject object;
     object.position = pos;
     object.size = size;
     object.powerFactor = power;
-    object.text = text;
     m_objects.append(object);
     m_connectionsDirty = true;
     update();
@@ -169,28 +168,11 @@ void QtGlassFlowScene::setGlassObjectVisible(int index, bool visible)
     if (m_objects[index].visible == visible)
         return;
     m_objects[index].visible = visible;
-    if (!visible) {
-        if (m_hoveredIndex == index)
-            m_hoveredIndex = -1;
-        if (m_dragIndex == index)
-            m_dragIndex = -1;
+    if (!visible && m_dragIndex == index) {
+        m_dragIndex = -1;
+        syncTimerCadence();
     }
     m_connectionsDirty = true;
-    update();
-}
-
-void QtGlassFlowScene::setBackgroundImage(const QString &path)
-{
-    m_bgPath = path;
-    m_bgImage = QImage();
-    m_bgImageAlreadyFlipped = false;
-    m_bgDirty = true;
-    m_blurCacheDirty = true;
-    if (isValid() && m_gpuReady) {
-        makeCurrent();
-        loadBackgroundTexture();
-        doneCurrent();
-    }
     update();
 }
 
@@ -212,7 +194,6 @@ void QtGlassFlowScene::setBackgroundImageInternal(const QImage &image,
     if (m_bgImage.cacheKey() == image.cacheKey()
         && m_bgImageAlreadyFlipped == alreadyFlipped)
         return;
-    m_bgPath.clear();
     m_bgImage = image;
     m_bgImageAlreadyFlipped = alreadyFlipped;
     m_bgDirty = true;
@@ -479,7 +460,7 @@ void QtGlassFlowScene::initializeGL()
         .arg(quintptr(this), 0, 16).arg(m_gpuReady).arg(m_blitShader->isLinked())
         .arg(m_blurShader->isLinked()).arg(m_glassShader->isLinked()));
     initQuad();
-    if (m_gpuReady && (!m_bgPath.isEmpty() || !m_bgImage.isNull()))
+    if (m_gpuReady && !m_bgImage.isNull())
         loadBackgroundTexture();
 
     if (!m_timer) {
@@ -576,11 +557,9 @@ void QtGlassFlowScene::destroyFBOs()
 
 void QtGlassFlowScene::loadBackgroundTexture()
 {
-    QImage image = m_bgImage.isNull() && !m_bgPath.isEmpty() ? QImage(m_bgPath) : m_bgImage;
-    if (image.isNull()) {
-        qWarning() << "failed to load background image:" << m_bgPath;
+    QImage image = m_bgImage;
+    if (image.isNull())
         return;
-    }
     // 上传原始共享像素，在背景绘制阶段处理方向；常用 BGRA 格式无需每帧转换或翻转。
     GLenum uploadFormat = GL_RGBA;
     GLenum uploadType = GL_UNSIGNED_BYTE;
@@ -774,8 +753,6 @@ void QtGlassFlowScene::renderGlassObject(int index)
     const float power = object.powerFactor > 0 ? object.powerFactor : m_globalPower;
     m_glassShader->bind();
     m_glassShader->setUniformValue("u_blurredTex", 0);
-    m_glassShader->setUniformValue("u_resolution", QVector2D(m_sceneFbo ? m_sceneFbo->width() : width(),
-                                                               m_sceneFbo ? m_sceneFbo->height() : height()));
     m_glassShader->setUniformValue("u_objCenter", QVector2D(centerNdc.x(), centerNdc.y()));
     m_glassShader->setUniformValue("u_objHalfSize", QVector2D(halfNdc.width(), halfNdc.height()));
     const float dpr = float(devicePixelRatioF());
@@ -914,20 +891,6 @@ void QtGlassFlowScene::paintGL()
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::TextAntialiasing,
                           !(painter.font().styleStrategy() & QFont::NoAntialias));
-    QFont font = painter.font();
-    font.setPointSizeF(12.0);
-    font.setBold(true);
-    painter.setFont(font);
-    for (int i = 0; i < m_objects.size(); ++i) {
-        const GlassObject &object = m_objects[i];
-        if (!object.visible || object.text.isEmpty())
-            continue;
-        const QRectF objectRect(object.position, object.size);
-        painter.setPen(QColor(0, 0, 0, 120));
-        painter.drawText(objectRect.translated(1, 1), Qt::AlignCenter, object.text);
-        painter.setPen(i == m_hoveredIndex ? QColor(255, 255, 255) : QColor(240, 240, 248));
-        painter.drawText(objectRect, Qt::AlignCenter, object.text);
-    }
     paintOverlay(painter);
     painter.end();
     m_textRenderer.end();
@@ -1045,10 +1008,7 @@ void QtGlassFlowScene::mousePressEvent(QMouseEvent *event)
         for (int i = m_objects.size() - 1; i >= 0; --i) {
             if (hitTest(i, event->position())) {
                 m_dragIndex = i;
-                m_objects[i].state = Pressed;
-                m_objects[i].dragging = true;
                 m_objects[i].dragOffset = event->position() - m_objects[i].position;
-                emit objectClicked(i);
                 syncTimerCadence();
                 update();
                 return;
@@ -1060,7 +1020,7 @@ void QtGlassFlowScene::mousePressEvent(QMouseEvent *event)
 
 void QtGlassFlowScene::mouseMoveEvent(QMouseEvent *event)
 {
-    if (m_dragIndex >= 0 && m_dragIndex < m_objects.size() && m_objects[m_dragIndex].dragging) {
+    if (m_dragIndex >= 0 && m_dragIndex < m_objects.size()) {
         GlassObject &object = m_objects[m_dragIndex];
         QPointF position = event->position() - object.dragOffset;
         position.setX(qBound<qreal>(0, position.x(), width() - object.size.width()));
@@ -1070,20 +1030,6 @@ void QtGlassFlowScene::mouseMoveEvent(QMouseEvent *event)
         update();
         return;
     }
-    int hover = -1;
-    for (int i = m_objects.size() - 1; i >= 0; --i) {
-        if (hitTest(i, event->position())) { hover = i; break; }
-    }
-    if (hover != m_hoveredIndex) {
-        if (m_hoveredIndex >= 0 && m_hoveredIndex < m_objects.size()
-            && m_objects[m_hoveredIndex].state != Pressed)
-            m_objects[m_hoveredIndex].state = Normal;
-        m_hoveredIndex = hover;
-        if (hover >= 0)
-            m_objects[hover].state = Hovered;
-        syncTimerCadence();
-        update();
-    }
     QOpenGLWidget::mouseMoveEvent(event);
 }
 
@@ -1091,24 +1037,10 @@ void QtGlassFlowScene::mouseReleaseEvent(QMouseEvent *event)
 {
     if (event->button() == Qt::LeftButton && m_dragIndex >= 0
         && m_dragIndex < m_objects.size()) {
-        GlassObject &object = m_objects[m_dragIndex];
-        object.dragging = false;
-        object.state = hitTest(m_dragIndex, event->position()) ? Hovered : Normal;
         m_dragIndex = -1;
         syncTimerCadence();
         update();
         return;
     }
     QOpenGLWidget::mouseReleaseEvent(event);
-}
-
-void QtGlassFlowScene::leaveEvent(QEvent *event)
-{
-    if (m_hoveredIndex >= 0 && m_hoveredIndex < m_objects.size()
-        && m_objects[m_hoveredIndex].state != Pressed)
-        m_objects[m_hoveredIndex].state = Normal;
-    m_hoveredIndex = -1;
-    syncTimerCadence();
-    update();
-    QOpenGLWidget::leaveEvent(event);
 }

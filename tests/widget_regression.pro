@@ -34,11 +34,18 @@ SOURCES += ../src/app/fontsettings.cpp \
     ../src/widgets/data/dictionarydata.cpp \
     ../src/widgets/data/weatherdata.cpp \
     ../src/widgets/desktopwidget.cpp \
+    ../src/widgets/desktopwidget_interaction.cpp \
     ../src/widgets/desktopwidget_paint.cpp \
+    ../src/widgets/desktopwidget_placement.cpp \
     ../src/widgets/desktopwidget_power.cpp \
+    ../src/widgets/desktopwidget_preview.cpp \
     ../src/widgets/desktopwidget_settings.cpp \
+    ../src/widgets/desktopwidget_storage.cpp \
+    ../src/widgets/desktopwidget_tray.cpp \
     ../src/widgets/musiccard.cpp \
+    ../src/widgets/widgetgeometry.cpp \
     widget_regression.cpp
+
 HEADERS += ../src/app/fontsettings.h \
     ../src/config.h \
     ../src/media/systemmediasession.h \
@@ -54,11 +61,5 @@ HEADERS += ../src/app/fontsettings.h \
     ../src/ui/widgetlibrarydialog.h \
     ../src/widgets/cardmetrics.h \
     ../src/widgets/musiccard.h \
-    ../src/widgets/weatherformat.h
-SOURCES += ../src/widgets/widgetgeometry.cpp
-HEADERS += ../src/widgets/widgetgeometry.h
-SOURCES += ../src/widgets/desktopwidget_tray.cpp
-SOURCES += ../src/widgets/desktopwidget_placement.cpp
-SOURCES += ../src/widgets/desktopwidget_storage.cpp
-SOURCES += ../src/widgets/desktopwidget_preview.cpp
-SOURCES += ../src/widgets/desktopwidget_interaction.cpp
+    ../src/widgets/weatherformat.h \
+    ../src/widgets/widgetgeometry.h

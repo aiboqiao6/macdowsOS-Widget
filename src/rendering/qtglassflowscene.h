@@ -28,22 +28,16 @@ class QtGlassFlowScene : public QOpenGLWidget, protected QOpenGLFunctions
     Q_OBJECT
     ClearTypeText::Renderer m_textRenderer;
 public:
-    enum State { Normal, Hovered, Pressed };
-
     struct GlassObject {
         QPointF position;
         QSizeF size;
         float powerFactor;
         float cornerRadius;
-        QString text;
-        State state;
-        bool dragging;
         QPointF dragOffset;
         bool visible;
 
         GlassObject()
-            : powerFactor(3.0f), cornerRadius(0.0f), state(Normal),
-              dragging(false), visible(true) {}
+            : powerFactor(3.0f), cornerRadius(0.0f), visible(true) {}
     };
 
     struct Connection {
@@ -56,13 +50,11 @@ public:
     ~QtGlassFlowScene() override;
 
     int addGlassObject(const QPointF &pos, const QSizeF &size,
-                       float power = 3.0f,
-                       const QString &text = QString());
+                       float power = 3.0f);
     void setGlassObjectGeometry(int index, const QPointF &pos,
                                 const QSizeF &size);
     void setGlassObjectCornerRadius(int index, float radius);
     void setGlassObjectVisible(int index, bool visible);
-    void setBackgroundImage(const QString &path);
     void setBackgroundImage(const QImage &image);
     // 图像已按 GL 纹理坐标翻转，避免实时裁剪再次复制。
     void setBackgroundImageFlipped(const QImage &image);
@@ -96,7 +88,6 @@ public:
     void setAttractionDistance(float v);
 
 signals:
-    void objectClicked(int index);
     void frameRendered();
 
 protected:
@@ -109,7 +100,6 @@ protected:
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
-    void leaveEvent(QEvent *event) override;
 
 private:
     friend class WidgetRegression;
@@ -158,7 +148,6 @@ private:
     GLuint m_bgTexture;
     int m_bgWidth;
     int m_bgHeight;
-    QString m_bgPath;
     QImage m_bgImage;
     bool m_bgImageAlreadyFlipped;
     bool m_bgDirty;
@@ -199,7 +188,6 @@ private:
     bool m_renderingSuspended = false;
     QElapsedTimer m_diagnosticsClock;
     quint64 m_diagnosticsFrames = 0;
-    int m_hoveredIndex;
     int m_dragIndex;
 };
 

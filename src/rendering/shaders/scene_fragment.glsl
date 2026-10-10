@@ -5,7 +5,6 @@ varying vec2 v_texcoord;
 
 // === 背景与几何 ===
 uniform sampler2D u_blurredTex;
-uniform vec2 u_resolution;
 uniform vec2 u_objCenter;     // 标准化设备坐标，范围为负一到一。
 uniform vec2 u_objHalfSize;   // 标准化设备坐标下的半尺寸。
 uniform vec2 u_objHalfSizePx; // 原生像素半尺寸。

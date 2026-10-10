@@ -67,20 +67,9 @@ void DesktopWidget::moveToGroupPosition()
     const int columns = qMax(1, (area.width() - gap) / pitch);
     const int rows = qMax(1, (area.height() - gap) / pitch);
     const int span = gridColumnSpan(m_cardKind, m_cardVariant);
-    int column = qMax(0, columns - span);
+    const int column = qMax(0, columns - span);
     const int rowSpan = gridRowSpan(m_cardKind, m_cardVariant);
-    int row = qMax(0, rows - rowSpan);
-    switch (m_cardKind) {
-    case CardKind::Battery:
-        row = m_cardVariant == 1 ? qMax(0, rows - 1) : qMax(0, rows - rowSpan); break;
-    case CardKind::Weather:
-        row = qMax(0, rows - rowSpan); break;
-    case CardKind::Clock:
-        row = qMax(0, rows - rowSpan); break;
-    case CardKind::Dictionary:
-    case CardKind::Music:
-        row = qMax(0, rows - 1); break;
-    }
+    const int row = qMax(0, rows - rowSpan);
     const QRect target = nearestGridRect(m_cardKind, m_cardVariant,
         gridOrigin(area, gap) + QPoint(column * pitch, row * pitch), m_widgetScale, this);
     if (target.isValid()) {

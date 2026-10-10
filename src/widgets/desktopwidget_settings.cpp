@@ -22,6 +22,29 @@
 #include <QSpinBox>
 #include <QVBoxLayout>
 
+namespace {
+QSlider* addPercentRow(QFormLayout* form, const QString& label, int minimum, int value)
+{
+    auto* row = new QWidget(form->parentWidget());
+    auto* layout = new QHBoxLayout(row);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(8);
+    auto* slider = new QSlider(Qt::Horizontal, row);
+    slider->setRange(minimum, 100);
+    slider->setValue(value);
+    auto* spin = new QSpinBox(row);
+    spin->setRange(minimum, 100);
+    spin->setSuffix(QStringLiteral("%"));
+    spin->setValue(slider->value());
+    layout->addWidget(slider, 1);
+    layout->addWidget(spin);
+    QObject::connect(slider, &QSlider::valueChanged, spin, &QSpinBox::setValue);
+    QObject::connect(spin, qOverload<int>(&QSpinBox::valueChanged), slider, &QSlider::setValue);
+    form->addRow(label, row);
+    return slider;
+}
+}
+
 void DesktopWidget::showSettingsDialog()
 {
     QDialog dialog(this);
@@ -103,43 +126,8 @@ void DesktopWidget::showSettingsDialog()
             AppSettings().value(QStringLiteral("weather/location"), m_weatherLocation).toString());
     });
 
-    auto* blurRow = new QWidget(&dialog);
-    auto* blurLayout = new QHBoxLayout(blurRow);
-    blurLayout->setContentsMargins(0, 0, 0, 0);
-    blurLayout->setSpacing(8);
-    auto* blurSlider = new QSlider(Qt::Horizontal, blurRow);
-    blurSlider->setRange(0, 100);
-    blurSlider->setValue(materialBlurStrength());
-    auto* blurSpin = new QSpinBox(blurRow);
-    blurSpin->setRange(0, 100);
-    blurSpin->setSuffix(QStringLiteral("%"));
-    blurSpin->setValue(blurSlider->value());
-    blurLayout->addWidget(blurSlider, 1);
-    blurLayout->addWidget(blurSpin);
-    connect(blurSlider, &QSlider::valueChanged,
-            blurSpin, &QSpinBox::setValue);
-    connect(blurSpin, qOverload<int>(&QSpinBox::valueChanged),
-            blurSlider, &QSlider::setValue);
-    form->addRow(QStringLiteral("模糊程度"), blurRow);
-
-    auto* opacityRow = new QWidget(&dialog);
-    auto* opacityLayout = new QHBoxLayout(opacityRow);
-    opacityLayout->setContentsMargins(0, 0, 0, 0);
-    opacityLayout->setSpacing(8);
-    auto* opacitySlider = new QSlider(Qt::Horizontal, opacityRow);
-    opacitySlider->setRange(5, 100);
-    opacitySlider->setValue(qBound(5, qRound(glassOpacity() * 100.0), 100));
-    auto* opacitySpin = new QSpinBox(opacityRow);
-    opacitySpin->setRange(5, 100);
-    opacitySpin->setSuffix(QStringLiteral("%"));
-    opacitySpin->setValue(opacitySlider->value());
-    opacityLayout->addWidget(opacitySlider, 1);
-    opacityLayout->addWidget(opacitySpin);
-    connect(opacitySlider, &QSlider::valueChanged,
-            opacitySpin, &QSpinBox::setValue);
-    connect(opacitySpin, qOverload<int>(&QSpinBox::valueChanged),
-            opacitySlider, &QSlider::setValue);
-    form->addRow(QStringLiteral("透明度"), opacityRow);
+    auto* blurSlider = addPercentRow(form, QStringLiteral("模糊程度"), 0, materialBlurStrength());
+    auto* opacitySlider = addPercentRow(form, QStringLiteral("透明度"), 5, qRound(glassOpacity() * 100.0));
 
     auto* mouseThrough = new QCheckBox(QStringLiteral("鼠标穿透（组件不接收点击）"), &dialog);
     mouseThrough->setChecked(mouseThroughEnabled());

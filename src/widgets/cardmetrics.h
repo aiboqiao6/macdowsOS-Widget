@@ -6,8 +6,7 @@ namespace CardMetrics {
 inline constexpr int kGridBaseCell = 328;
 inline constexpr int kBatteryListRows = 6;
 // 设备列表包含本机，六个显示项最多容纳五个外设。
-inline constexpr int kMaxDisplayedDevices = 6;
-inline constexpr int kMaxConnectedDevices = kMaxDisplayedDevices - 1;
+inline constexpr int kMaxConnectedDevices = kBatteryListRows - 1;
 inline constexpr int kWeatherHourlySlots = 6;
 inline constexpr int kWeatherDailySlots = 5;
 // 天气分区按 2×2 卡片归一化，布局不受组件缩放与 DPI 影响。

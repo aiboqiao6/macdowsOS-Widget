@@ -8,7 +8,6 @@
 #include <QString>
 #include <QTimer>
 #include <QVector>
-#include <QDateTime>
 #include <QRect>
 #include <QRectF>
 #include <QList>
@@ -83,7 +82,6 @@ private:
     struct WeatherHour {
         QString time;
         QString temperature;
-        QString description;
         int code = -1;
         bool night = false;
     };
@@ -91,7 +89,6 @@ private:
         QString label;
         QString high;
         QString low;
-        QString description;
         int code = -1;
         bool night = false;
     };
@@ -194,8 +191,6 @@ private:
     QVector<WeatherDay> m_weatherDays;
     int m_weatherCode = -1;
     bool m_weatherNight = false;
-    bool m_weatherLoading = true;
-    QDateTime m_weatherUpdated;
     int m_weatherReplySerial = 0;
     QTimer m_dictionaryTimer;
     QString m_dictionaryWord;

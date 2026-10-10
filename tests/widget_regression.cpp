@@ -37,6 +37,7 @@
 #include <QScreen>
 #include <QSettings>
 #include <QSlider>
+#include <QSpinBox>
 #include <QSignalSpy>
 #include <QSharedMemory>
 #include <QScopeGuard>
@@ -514,12 +515,28 @@ private slots:
     void settingsAndWizardShareScaleSelector() {
         DesktopWidget widget(nullptr, DesktopWidget::CardKind::Clock, false);
         bool checked = false;
+        bool percentagesSynced = false;
         QTimer::singleShot(0, &widget, [&] {
             auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
             if (!dialog) return;
             auto* slider = dialog->findChild<QSlider*>("scaleSlider");
             auto* selector = slider ? dynamic_cast<ScaleSelector*>(slider->parentWidget()) : nullptr;
             if (selector) {
+                const auto spins = dialog->findChildren<QSpinBox*>();
+                if (spins.size() == 2) {
+                    auto* blur = spins[0]->parentWidget()->findChild<QSlider*>();
+                    auto* opacity = spins[1]->parentWidget()->findChild<QSlider*>();
+                    if (blur && opacity) {
+                        blur->setValue(72);
+                        percentagesSynced = spins[0]->value() == 72;
+                        spins[0]->setValue(64);
+                        percentagesSynced &= blur->value() == 64;
+                        opacity->setValue(0);
+                        percentagesSynced &= opacity->value() == 5 && spins[1]->value() == 5;
+                        spins[1]->setValue(83);
+                        percentagesSynced &= opacity->value() == 83;
+                    }
+                }
                 slider->setValue(125);
                 checked = selector->previewSize() == DesktopWidget::cardSize(
                     DesktopWidget::CardKind::Battery, 0, 1.25, dialog->screen()->availableGeometry());
@@ -528,8 +545,43 @@ private slots:
         });
         widget.showSettingsDialog();
         QVERIFY(checked);
+        QVERIFY(percentagesSynced);
         QCOMPARE(widget.m_widgetScale, 1.25);
         QCOMPARE(AppSettings().value("appearance/scale").toDouble(), 1.25);
+        QCOMPARE(widget.materialBlurStrength(), 64);
+        QVERIFY(qAbs(widget.glassOpacity() - 0.83) < 0.001);
+        QCOMPARE(AppSettings().value("appearance/blurStrength").toInt(), 64);
+        QVERIFY(qAbs(AppSettings().value("appearance/opacity").toDouble() - 0.83) < 0.001);
+    }
+
+    void sceneDragStopsOnReleaseAndObjectHide() {
+        QtGlassFlowScene scene;
+        scene.resize(240, 180);
+        const int lower = scene.addGlassObject(QPointF(20, 20), QSizeF(80, 60));
+        const int upper = scene.addGlassObject(QPointF(20, 20), QSizeF(80, 60));
+        scene.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&scene));
+        QVERIFY(scene.m_timer);
+        QVERIFY(!scene.m_timer->isActive());
+        const auto send = [&](QEvent::Type type, QPoint point, Qt::MouseButton button,
+                              Qt::MouseButtons buttons) {
+            mouse(scene, type, point, scene.mapToGlobal(point), button, buttons);
+        };
+        send(QEvent::MouseButtonPress, QPoint(60, 50), Qt::LeftButton, Qt::LeftButton);
+        QVERIFY(scene.m_timer->isActive());
+        send(QEvent::MouseMove, QPoint(100, 80), Qt::NoButton, Qt::LeftButton);
+        QCOMPARE(scene.m_objects[lower].position, QPointF(20, 20));
+        QCOMPARE(scene.m_objects[upper].position, QPointF(60, 50));
+        send(QEvent::MouseButtonRelease, QPoint(100, 80), Qt::LeftButton, Qt::NoButton);
+        QVERIFY(!scene.m_timer->isActive());
+        send(QEvent::MouseMove, QPoint(150, 100), Qt::NoButton, Qt::NoButton);
+        QCOMPARE(scene.m_objects[upper].position, QPointF(60, 50));
+        send(QEvent::MouseButtonPress, QPoint(100, 80), Qt::LeftButton, Qt::LeftButton);
+        scene.setGlassObjectVisible(upper, false);
+        QVERIFY(!scene.m_timer->isActive());
+        send(QEvent::MouseMove, QPoint(150, 100), Qt::NoButton, Qt::LeftButton);
+        QCOMPARE(scene.m_objects[upper].position, QPointF(60, 50));
+        send(QEvent::MouseButtonRelease, QPoint(150, 100), Qt::LeftButton, Qt::NoButton);
     }
 
     void musicCardsRenderStatesAndRestoreConfiguration() {
@@ -900,20 +952,20 @@ private slots:
         QCOMPARE(forecast.m_weatherDays.at(1).label, QStringLiteral("周三"));
 
         const QVector<DesktopWidget::WeatherHour> hours = {
-            {QStringLiteral("11时"), QStringLiteral("30"), QStringLiteral("多云"), 1},
-            {QStringLiteral("12时"), QStringLiteral("30"), QStringLiteral("多云"), 1},
-            {QStringLiteral("13时"), QStringLiteral("31"), QStringLiteral("多云"), 1},
-            {QStringLiteral("14时"), QStringLiteral("31"), QStringLiteral("多云"), 1},
-            {QStringLiteral("15时"), QStringLiteral("31"), QStringLiteral("多云"), 1},
-            {QStringLiteral("16时"), QStringLiteral("31"), QStringLiteral("多云"), 1}
+            {QStringLiteral("11时"), QStringLiteral("30"), 1},
+            {QStringLiteral("12时"), QStringLiteral("30"), 1},
+            {QStringLiteral("13时"), QStringLiteral("31"), 1},
+            {QStringLiteral("14时"), QStringLiteral("31"), 1},
+            {QStringLiteral("15时"), QStringLiteral("31"), 1},
+            {QStringLiteral("16时"), QStringLiteral("31"), 1}
         };
         const QVector<DesktopWidget::WeatherDay> days = {
-            {QStringLiteral("今天"), QStringLiteral("32"), QStringLiteral("21"), QStringLiteral("多云"), 1},
-            {QStringLiteral("周三"), QStringLiteral("31"), QStringLiteral("23"), QStringLiteral("小雨"), 7},
-            {QStringLiteral("周四"), QStringLiteral("29"), QStringLiteral("20"), QStringLiteral("小雨"), 7},
-            {QStringLiteral("周五"), QStringLiteral("28"), QStringLiteral("21"), QStringLiteral("多云"), 1},
-            {QStringLiteral("周六"), QStringLiteral("30"), QStringLiteral("22"), QStringLiteral("晴"), 0},
-            {QStringLiteral("周日"), QStringLiteral("29"), QStringLiteral("21"), QStringLiteral("多云"), 1}
+            {QStringLiteral("今天"), QStringLiteral("32"), QStringLiteral("21"), 1},
+            {QStringLiteral("周三"), QStringLiteral("31"), QStringLiteral("23"), 7},
+            {QStringLiteral("周四"), QStringLiteral("29"), QStringLiteral("20"), 7},
+            {QStringLiteral("周五"), QStringLiteral("28"), QStringLiteral("21"), 1},
+            {QStringLiteral("周六"), QStringLiteral("30"), QStringLiteral("22"), 0},
+            {QStringLiteral("周日"), QStringLiteral("29"), QStringLiteral("21"), 1}
         };
         for (DesktopWidget* widget : {&compact, &hourly, &forecast}) {
             widget->setDesktopLayerEnabled(false);
@@ -975,13 +1027,13 @@ private slots:
             widget.m_weatherNight = state.night;
             widget.m_weatherHours = state.hasForecast ? hours
                                                        : QVector<DesktopWidget::WeatherHour>{
-                                                           {QString(), QString(), QString(), -1},
-                                                           {QStringLiteral("稍后"), QString(), QString(), -1}
+                                                           {QString(), QString(), -1},
+                                                           {QStringLiteral("稍后"), QString(), -1}
                                                        };
             widget.m_weatherDays = state.hasForecast ? days
                                                       : QVector<DesktopWidget::WeatherDay>{
-                                                           {QStringLiteral("今天"), QString(), QString(), QString(), -1},
-                                                           {QStringLiteral("周三"), QString(), QString(), QString(), -1}
+                                                           {QStringLiteral("今天"), QString(), QString(), -1},
+                                                           {QStringLiteral("周三"), QString(), QString(), -1}
                                                        };
             widget.update();
             QTest::qWait(25);
@@ -3470,7 +3522,7 @@ private slots:
         card.m_weatherNight = true;
         for (int i = 0; i < 6; ++i)
             card.m_weatherHours.append({QString::number(11 + i * 3) + QStringLiteral("时"),
-                QString::number(31 - i), QStringLiteral("多云"), 1});
+                QString::number(31 - i), 1});
         QImage backdrop(card.size() * card.devicePixelRatioF(), QImage::Format_RGB32);
         backdrop.fill(QColor(24, 37, 67));
         QPainter source(&backdrop);
@@ -3921,7 +3973,6 @@ private slots:
         weather.handleWeatherReply(invalid);
         QCOMPARE(weather.m_weatherTemperature, QString("24"));
         QVERIFY(weather.m_weatherDescription.contains(QStringLiteral("更新失败")));
-        QVERIFY(!weather.m_weatherLoading);
     }
 };
 

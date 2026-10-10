@@ -238,15 +238,8 @@ void DesktopWidget::syncGroupSettings(qreal scale, int blurStrength,
     settings.sync();
     setGlobalFontSmoothing(fontSmoothing);
     // 尺寸变化尽量保留自由放置位置，仅显式重新排列时布局整个网格。
-    bool scaleChanged = false;
     for (DesktopWidget* widget : s_instances) {
-        if (widget && !qFuzzyCompare(widget->m_widgetScale, scale)) {
-            scaleChanged = true;
-            break;
-        }
-    }
-    for (DesktopWidget* widget : s_instances) {
-        if (scaleChanged)
+        if (!qFuzzyCompare(widget->m_widgetScale, scale))
             widget->applyScale(scale);
         widget->setMaterialBlurStrength(blurStrength);
         widget->setGlassOpacity(opacity);
@@ -264,4 +257,3 @@ void DesktopWidget::syncGroupSettings(qreal scale, int blurStrength,
     }
     saveAllConfigurations();
 }
-
