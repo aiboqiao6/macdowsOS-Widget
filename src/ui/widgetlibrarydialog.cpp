@@ -1,7 +1,6 @@
 #include "ui/widgetlibrarydialog.h"
 #include "widgets/desktopwidget.h"
 #include "widgets/widgetgeometry.h"
-#include "media/systemmediasession.h"
 #include "rendering/responsivelayout.h"
 #include "app/appsettings.h"
 
@@ -62,6 +61,7 @@ void paintNavIcon(QPainter& painter, const QRectF& bounds, int category)
                           : category == 2 ? QColor(38, 153, 230)
                           : category == 3 ? QColor(239, 242, 246)
                           : category == 4 ? QColor(153, 87, 219)
+                          : category == 6 ? QColor(244, 100, 93)
                                           : QColor(235, 76, 112);
         painter.setPen(Qt::NoPen);
         painter.setBrush(fill);
@@ -99,6 +99,13 @@ void paintNavIcon(QPainter& painter, const QRectF& bounds, int category)
         painter.drawLine(metrics.point(.73, .15), metrics.point(.73, .61));
         painter.drawEllipse(metrics.rect(.23, .62, .20, .15));
         painter.drawEllipse(metrics.rect(.53, .53, .20, .15));
+    } else if (category == 6) {
+        painter.drawRoundedRect(metrics.rect(.18, .23, .64, .60), metrics.size(.08), metrics.size(.08));
+        painter.drawLine(metrics.point(.18, .41), metrics.point(.82, .41));
+        painter.drawLine(metrics.point(.35, .15), metrics.point(.35, .30));
+        painter.drawLine(metrics.point(.65, .15), metrics.point(.65, .30));
+        painter.drawLine(metrics.point(.42, .58), metrics.point(.58, .58));
+        painter.drawLine(metrics.point(.50, .58), metrics.point(.50, .72));
     } else {
         painter.drawRoundedRect(metrics.rect(.16, .16, .28, .28), 2, 2);
         painter.drawRoundedRect(metrics.rect(.56, .16, .28, .28), 2, 2);
@@ -163,11 +170,6 @@ public:
         m_press = QPoint(-1, -1);
         // 复用真实组件内容绘制预览，按当前屏幕像素密度缓存，不显示 GL 窗口。
         refreshPreview();
-        if (m_cardKind == int(DesktopWidget::CardKind::Music)) {
-            connect(SystemMediaSession::instance(), &SystemMediaSession::changed, this, [this] {
-                if (isVisible()) refreshPreview();
-            });
-        }
     }
 
     void setScale(qreal scale)
@@ -187,8 +189,6 @@ public:
             .arg(m_cardKind).arg(m_cardVariant).arg(previewSize.width()).arg(previewSize.height())
             .arg(dpr, 0, 'g', 12).arg(DesktopWidget::globalFontSmoothing())
             .arg(m_owner->darkModeEnabled());
-        if (m_cardKind == int(DesktopWidget::CardKind::Music))
-            previewCache().remove(key);
         if (const auto* cached = previewCache().object(key)) {
             m_preview = *cached;
         } else {
@@ -426,7 +426,7 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
 
     const QStringList navLabels = { QStringLiteral("所有小组件"), QStringLiteral("电池"),
                                      QStringLiteral("天气"), QStringLiteral("时钟"),
-                                     QStringLiteral("词典"), QStringLiteral("音乐") };
+                                     QStringLiteral("词典"), QStringLiteral("音乐"), QStringLiteral("倒数日") };
     for (int i = 0; i < navLabels.size(); ++i) {
         auto* button = new QPushButton(navLabels.at(i), sidebar);
         button->setObjectName(i == 0 ? QStringLiteral("navSelected") : QStringLiteral("navButton"));
@@ -467,7 +467,7 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     m_tileLayout = tileLayout;
     for (const QString& name : {QStringLiteral("电池"), QStringLiteral("天气"),
                                QStringLiteral("时钟"), QStringLiteral("词典"),
-                               QStringLiteral("音乐")}) {
+                               QStringLiteral("音乐"), QStringLiteral("倒数日")}) {
         auto* heading = new QLabel(name, scrollHost);
         heading->setObjectName(QStringLiteral("categoryTitle"));
         m_categoryTitles.append(heading);
@@ -497,8 +497,10 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     addTile(QStringLiteral("每日单词"), QStringLiteral("随机单词与释义"), 3, 0, 4);
     addTile(QStringLiteral("词典详情"), QStringLiteral("单词、音标与释义"), 3, 1, 4);
     addTile(QStringLiteral("词典卡片"), QStringLiteral("轻量词汇提醒"), 3, 2, 4);
-    addTile(QStringLiteral("音乐 · 紧凑"), QStringLiteral("系统播放状态与封面"), 4, 0, 5);
-    addTile(QStringLiteral("音乐 · 横向"), QStringLiteral("曲目信息、进度与播放控制"), 4, 1, 5);
+    addTile(QStringLiteral("音乐 · 紧凑"), QStringLiteral("专辑封面、曲目与播放按钮"), 4, 0, 5);
+    addTile(QStringLiteral("音乐 · 正在播放"), QStringLiteral("封面取色、曲目信息与播放控制"), 4, 1, 5);
+    addTile(QStringLiteral("倒数日"), QStringLiteral("重要日期、剩余天数与每年重复纪念日"), 5, 0, 6);
+    addTile(QStringLiteral("倒数日 · 横向"), QStringLiteral("目标日期与天数，支持每年重复纪念日"), 5, 1, 6);
     tileLayout->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     scroll->setWidget(scrollHost);
     contentLayout->addWidget(scroll, 1);
@@ -674,7 +676,8 @@ void WidgetLibraryDialog::selectCategory(int category)
                                                  : category == 2 ? QStringLiteral("天气")
                                                     : category == 3 ? QStringLiteral("时钟")
                                                     : category == 4 ? QStringLiteral("词典")
-                                                                    : QStringLiteral("音乐")));
+                                                    : category == 5 ? QStringLiteral("音乐")
+                                                                    : QStringLiteral("倒数日")));
     if (category == 0)
         resetRecommendations();
     applyTileFilter();

@@ -24,6 +24,7 @@ QString DesktopWidget::kindName(CardKind kind)
     case CardKind::Clock: return QStringLiteral("clock");
     case CardKind::Dictionary: return QStringLiteral("dictionary");
     case CardKind::Music: return QStringLiteral("music");
+    case CardKind::Countdown: return QStringLiteral("countdown");
     }
     return QStringLiteral("battery");
 }
@@ -34,6 +35,7 @@ DesktopWidget::CardKind DesktopWidget::kindFromName(const QString& value)
     if (value == QStringLiteral("clock")) return CardKind::Clock;
     if (value == QStringLiteral("dictionary")) return CardKind::Dictionary;
     if (value == QStringLiteral("music")) return CardKind::Music;
+    if (value == QStringLiteral("countdown")) return CardKind::Countdown;
     return CardKind::Battery;
 }
 
@@ -62,6 +64,13 @@ void DesktopWidget::saveAllConfigurations()
         item.insert(QStringLiteral("x"), widget->x());
         item.insert(QStringLiteral("y"), widget->y());
         item.insert(QStringLiteral("visible"), widget->isVisible());
+        if (widget->m_cardKind == CardKind::Countdown) {
+            QJsonObject event;
+            event.insert(QStringLiteral("title"), widget->m_countdown.title);
+            event.insert(QStringLiteral("date"), widget->m_countdown.date.toString(Qt::ISODate));
+            event.insert(QStringLiteral("annual"), widget->m_countdown.annual);
+            item.insert(QStringLiteral("countdown"), event);
+        }
         widgets.append(item);
     }
     const QString path = configurationPath();
@@ -110,7 +119,7 @@ QList<DesktopWidget*> DesktopWidget::restoreWidgets()
         const QString type = item.value(QStringLiteral("type")).toString();
         if (type != QStringLiteral("battery") && type != QStringLiteral("weather")
             && type != QStringLiteral("clock") && type != QStringLiteral("dictionary")
-            && type != QStringLiteral("music"))
+            && type != QStringLiteral("music") && type != QStringLiteral("countdown"))
             continue;
         const CardKind kind = kindFromName(type);
         // 优先由电量组件持有托盘，配置次序变化不改变此规则。
@@ -122,6 +131,16 @@ QList<DesktopWidget*> DesktopWidget::restoreWidgets()
                                          primary,
                                          item.value(QStringLiteral("id")).toString(),
                                          storedVariant);
+        if (kind == CardKind::Countdown) {
+            const QJsonObject event = item.value(QStringLiteral("countdown")).toObject();
+            const QString title = event.value(QStringLiteral("title")).toString().simplified().left(80);
+            const QDate date = QDate::fromString(event.value(QStringLiteral("date")).toString(), Qt::ISODate);
+            if (!title.isEmpty())
+                widget->m_countdown.title = title;
+            if (date.isValid() && date.year() >= 1900 && date.year() <= 9999)
+                widget->m_countdown.date = date;
+            widget->m_countdown.annual = event.value(QStringLiteral("annual")).toBool(false);
+        }
         QPoint restoredPosition(item.value(QStringLiteral("x")).toInt(),
                                 item.value(QStringLiteral("y")).toInt());
         if (version < 4 && item.contains(QStringLiteral("gridColumn"))

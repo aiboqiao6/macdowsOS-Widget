@@ -13,6 +13,7 @@ int defaultVariant(DesktopWidget::CardKind kind)
     case DesktopWidget::CardKind::Clock: return 0;      // 浅色指针表盘。
     case DesktopWidget::CardKind::Dictionary: return 1; // 横向释义。
     case DesktopWidget::CardKind::Music: return 1;
+    case DesktopWidget::CardKind::Countdown: return 0;
     }
     return 0;
 }
@@ -20,7 +21,7 @@ int defaultVariant(DesktopWidget::CardKind kind)
 int variantCount(DesktopWidget::CardKind kind)
 {
     return kind == DesktopWidget::CardKind::Clock ? 9
-        : kind == DesktopWidget::CardKind::Music ? 2 : 3;
+        : kind == DesktopWidget::CardKind::Music || kind == DesktopWidget::CardKind::Countdown ? 2 : 3;
 }
 
 int normalizedVariant(DesktopWidget::CardKind kind, int variant)

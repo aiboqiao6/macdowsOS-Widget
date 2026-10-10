@@ -22,6 +22,7 @@
 #include <QContextMenuEvent>
 #include <QDir>
 #include <QDialog>
+#include <QDateEdit>
 #include <QLineEdit>
 #include <QFrame>
 #include <QGridLayout>
@@ -559,12 +560,15 @@ private slots:
     }
 
     void previewDoesNotStartServicesOrCreateConfiguration() {
+        const auto services = qApp->findChildren<SystemMediaSession*>().size();
         for (auto kind : {DesktopWidget::CardKind::Battery, DesktopWidget::CardKind::Weather,
-                          DesktopWidget::CardKind::Clock, DesktopWidget::CardKind::Dictionary}) {
+                          DesktopWidget::CardKind::Clock, DesktopWidget::CardKind::Dictionary,
+                          DesktopWidget::CardKind::Music, DesktopWidget::CardKind::Countdown}) {
             const QImage image = DesktopWidget::renderPreview(kind, 0, QSize(328,328), 1.5);
             QVERIFY(!image.isNull());
             QVERIFY(!QFile::exists(AppSettings::filePath()));
         }
+        QCOMPARE(qApp->findChildren<SystemMediaSession*>().size(), services);
     }
 
     void scalePreviewAnimatesWithoutBlockingControls() {
@@ -729,6 +733,127 @@ private slots:
         send(QEvent::MouseButtonRelease, QPoint(150, 100), Qt::LeftButton, Qt::NoButton);
     }
 
+    void countdownHandlesCalendarDaysAndAnnualDates() {
+        CountdownCard::Event event{QStringLiteral("旅行"), QDate(2026, 11, 1), false};
+        auto result = CountdownCard::state(event, QDate(2026, 10, 11));
+        QCOMPARE(result.days, 21);
+        QVERIFY(!result.elapsed);
+        result = CountdownCard::state(event, QDate(2026, 11, 1));
+        QCOMPARE(result.days, 0);
+        QVERIFY(!result.elapsed);
+        result = CountdownCard::state(event, QDate(2026, 11, 3));
+        QCOMPARE(result.days, 2);
+        QVERIFY(result.elapsed);
+        event.annual = true;
+        result = CountdownCard::state(event, QDate(2026, 11, 2));
+        QCOMPARE(result.occurrence, QDate(2027, 11, 1));
+        QCOMPARE(result.days, 364);
+        QVERIFY(!result.elapsed);
+        event.date = QDate(2024, 2, 29);
+        QCOMPARE(CountdownCard::state(event, QDate(2025, 2, 27)).occurrence, QDate(2025, 2, 28));
+        QCOMPARE(CountdownCard::state(event, QDate(2025, 2, 28)).days, 0);
+        QCOMPARE(CountdownCard::state(event, QDate(2027, 3, 1)).occurrence, QDate(2028, 2, 29));
+        event.date = QDate(2030, 1, 1);
+        QCOMPARE(CountdownCard::state(event, QDate(2026, 12, 31)).occurrence, event.date);
+        event.date = {};
+        QVERIFY(!CountdownCard::state(event).occurrence.isValid());
+    }
+
+    void countdownEditsCancelAndRestoreIndependentEvents() {
+        {
+            DesktopWidget first(nullptr, DesktopWidget::CardKind::Countdown, false, "countdown-first", 0, true);
+            DesktopWidget second(nullptr, DesktopWidget::CardKind::Countdown, false, "countdown-second", 1, true);
+            const auto original = first.m_countdown;
+            for (bool accept : {false, true}) {
+                bool found = false;
+                QTimer::singleShot(0, &first, [&] {
+                    auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                    if (!dialog) return;
+                    auto* title = dialog->findChild<QLineEdit*>("countdownTitle");
+                    auto* date = dialog->findChild<QDateEdit*>("countdownDate");
+                    auto* annual = dialog->findChild<QCheckBox*>("countdownAnnual");
+                    found = title && date && annual;
+                    if (found) {
+                        title->setText(QStringLiteral("  我的生日  "));
+                        date->setDate(QDate(2000, 2, 29));
+                        annual->setChecked(true);
+                        dialog->grab().save("artifacts/countdown-editor.png");
+                    }
+                    if (accept && found) dialog->accept(); else dialog->reject();
+                });
+                first.editCountdown();
+                QVERIFY(found);
+                QCOMPARE(first.m_countdown.title, accept ? QStringLiteral("我的生日") : original.title);
+                QCOMPARE(first.m_countdown.date, accept ? QDate(2000, 2, 29) : original.date);
+                QCOMPARE(first.m_countdown.annual, accept);
+            }
+            second.m_countdown = {QStringLiteral("毕业"), QDate(2027, 6, 20), false};
+            first.saveConfiguration();
+        }
+        auto restored = DesktopWidget::restoreWidgets();
+        const auto cleanup = qScopeGuard([&] { qDeleteAll(restored); });
+        QCOMPARE(restored.size(), 2);
+        QCOMPARE(restored[0]->cardKind(), DesktopWidget::CardKind::Countdown);
+        QCOMPARE(restored[0]->m_countdown.title, QStringLiteral("我的生日"));
+        QCOMPARE(restored[0]->m_countdown.date, QDate(2000, 2, 29));
+        QVERIFY(restored[0]->m_countdown.annual);
+        QCOMPARE(restored[0]->cardVariant(), 0);
+        QCOMPARE(restored[1]->m_countdown.title, QStringLiteral("毕业"));
+        QCOMPARE(restored[1]->m_countdown.date, QDate(2027, 6, 20));
+        QVERIFY(!restored[1]->m_countdown.annual);
+        QCOMPARE(restored[1]->cardVariant(), 1);
+    }
+
+    void countdownGalleryFiltersAndKeepsGridScale() {
+        WidgetLibraryDialog gallery;
+        QCOMPARE(gallery.m_navButtons.size(), 7);
+        gallery.selectCategory(6);
+        int shown = 0;
+        for (auto* tile : gallery.m_tiles) {
+            if (tile->isHidden()) continue;
+            ++shown;
+            QCOMPARE(tile->property("tileKind").toInt(), int(DesktopWidget::CardKind::Countdown));
+            QCOMPARE(tile->property("tileCategory").toInt(), 6);
+        }
+        QCOMPARE(shown, 2);
+        gallery.m_search->setText(QStringLiteral("纪念日"));
+        shown = 0;
+        for (auto* tile : gallery.m_tiles)
+            if (!tile->isHidden()) ++shown;
+        QCOMPARE(shown, 2);
+        for (qreal scale : {.4, .7, 1.0, 1.5, 2.0}) {
+            const QRect workArea(0, 0, 6000, 4000);
+            const QSize compactSize = DesktopWidget::cardSize(DesktopWidget::CardKind::Countdown, 0, scale, workArea);
+            const QSize wide = DesktopWidget::cardSize(DesktopWidget::CardKind::Countdown, 1, scale, workArea);
+            QCOMPARE(compactSize, QSize(qRound(328 * scale), qRound(328 * scale)));
+            QCOMPARE(wide.height(), compactSize.height());
+            QCOMPARE(wide.width(), compactSize.width() * 2 + WidgetGeometry::gridGapForArea(workArea, scale));
+        }
+    }
+
+    void musicAndCountdownVisualReview() {
+        for (bool dark : {false, true}) {
+            DesktopWidget::setGlobalDarkMode(dark);
+            QImage board(1120, 820, QImage::Format_ARGB32_Premultiplied);
+            board.fill(dark ? QColor(20, 25, 30) : QColor(233, 234, 238));
+            QPainter painter(&board);
+            for (int row = 0; row < 2; ++row) {
+                const auto kind = row == 0 ? DesktopWidget::CardKind::Music : DesktopWidget::CardKind::Countdown;
+                for (int variant = 0; variant < 2; ++variant) {
+                    const QSize size(variant == 0 ? 328 : 672, 328);
+                    const auto image = DesktopWidget::renderPreview(kind, variant, size, 2.0);
+                    QVERIFY(!image.isNull());
+                    QCOMPARE(image.devicePixelRatio(), 2.0);
+                    QCOMPARE(image.pixelColor(0, 0).alpha(), 0);
+                    painter.drawImage(QPointF(40 + variant * 368, 40 + row * 390), image);
+                }
+            }
+            painter.end();
+            QVERIFY(board.save(QStringLiteral("artifacts/music-countdown-%1.png").arg(dark ? "dark" : "light")));
+        }
+        DesktopWidget::setGlobalDarkMode(false);
+    }
+
     void musicCardsRenderStatesAndRestoreConfiguration() {
         MediaSnapshot media;
         media.available = true;
@@ -739,9 +864,17 @@ private slots:
         media.durationMs = 240000;
         media.positionMs = 75000;
         for (const QSize size : {QSize(328,328), QSize(672,328)}) {
-            const auto regions = MusicCard::layout(QRectF(QPointF(), QSizeF(size)));
+            const QRectF bounds(QPointF(0, 0), QSizeF(size));
+            const auto regions = MusicCard::layout(bounds);
             QVERIFY(!regions.toggle.intersects(regions.previous));
             QVERIFY(!regions.toggle.intersects(regions.next));
+            QVERIFY(bounds.contains(regions.artwork));
+            QVERIFY(bounds.contains(regions.toggle));
+            QVERIFY(!regions.title.intersects(regions.toggle));
+            QVERIFY(!regions.artist.intersects(regions.toggle));
+            const auto offset = MusicCard::layout(bounds.translated(40, 25));
+            QCOMPARE(offset.toggle, regions.toggle.translated(40, 25));
+            QCOMPARE(offset.artwork, regions.artwork.translated(40, 25));
             for (bool playing : {true, false}) {
                 media.playing = playing;
                 QImage image(size * 2, QImage::Format_ARGB32_Premultiplied);

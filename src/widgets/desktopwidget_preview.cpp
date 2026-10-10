@@ -33,6 +33,7 @@ QImage DesktopWidget::renderPreview(CardKind kind, int variant, const QSize& siz
     preview.m_dictionaryDefinition = QStringLiteral("不期而遇的美好；意外发现的幸运。");
     preview.m_hasBattery = true;
     preview.m_batteryLevel = 86;
+    preview.m_countdown.title = QStringLiteral("下次旅行");
     // 保留卡片真实网格比例，不强行拉伸到图库统一矩形。
     const QSize reference = gridWidgetSize(kind, variant, kGridBaseCell,
                                            qRound(kGridBaseGap));
@@ -54,7 +55,7 @@ QImage DesktopWidget::renderPreview(CardKind kind, int variant, const QSize& siz
     image.fill(Qt::transparent);
     QPainter painter(&image);
     painter.setRenderHint(QPainter::Antialiasing);
-    // 缩略图使用统一的深色展示画布，保留独立卡片轮廓，避免文字直接浮在图库背景上。
+    // 缩略图按外观模式绘制独立展示画布，避免文字直接浮在图库背景上。
     const QRectF card{QPointF(), QSizeF(renderSize)};
     const qreal radius = LiquidGlassStyle::kCardCornerRadius * preview.m_widgetScale;
     painter.setPen(QPen(QColor(255, 255, 255, 28), 1.0 / dpr));

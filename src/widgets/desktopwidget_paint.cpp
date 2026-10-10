@@ -28,7 +28,11 @@ void DesktopWidget::paintOverlay(QPainter& painter)
     case CardKind::Weather: paintWeatherCard(painter, card); break;
     case CardKind::Clock: paintClockCard(painter, card); break;
     case CardKind::Dictionary: paintDictionaryCard(painter, card); break;
-    case CardKind::Music: MusicCard::paint(painter, card, SystemMediaSession::instance()->snapshot()); break;
+    case CardKind::Music:
+        MusicCard::paint(painter, card, m_previewOnly ? MusicCard::previewSnapshot()
+                                                    : SystemMediaSession::instance()->snapshot());
+        break;
+    case CardKind::Countdown: CountdownCard::paint(painter, card, m_countdown); break;
     }
     painter.restore();
 }

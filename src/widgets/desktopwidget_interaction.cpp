@@ -30,7 +30,7 @@ void DesktopWidget::showWidgetLibrary()
         m_library = new WidgetLibraryDialog;
         connect(m_library, &WidgetLibraryDialog::widgetDropped, this,
                 [](int encoded, const QPoint& globalPos) {
-                    const CardKind kind = static_cast<CardKind>(qBound(0, encoded / 100, 4));
+                    const CardKind kind = static_cast<CardKind>(qBound(0, encoded / 100, int(CardKind::Countdown)));
                     const int variant = encoded % 100;
                     if (!addWidget(kind, globalPos, variant))
                         QToolTip::showText(globalPos, QStringLiteral("当前屏幕没有足够的空位，可缩小组件后重试"));
@@ -38,7 +38,7 @@ void DesktopWidget::showWidgetLibrary()
         connect(m_library, &WidgetLibraryDialog::widgetDragPreview, this,
                 [this](int encoded, const QPoint& globalPos, bool visible) {
                     if (visible)
-                        showGridPreview(static_cast<CardKind>(qBound(0, encoded / 100, 4)),
+                        showGridPreview(static_cast<CardKind>(qBound(0, encoded / 100, int(CardKind::Countdown))),
                                         encoded % 100, globalPos);
                     else
                         hideGridPreview();
@@ -59,6 +59,11 @@ void DesktopWidget::showWidgetLibrary()
 void DesktopWidget::mouseDoubleClickEvent(QMouseEvent* event)
 {
     if (event->button() == Qt::LeftButton) {
+        if (m_cardKind == CardKind::Countdown) {
+            editCountdown();
+            event->accept();
+            return;
+        }
         if (m_cardKind == CardKind::Music) {
             event->accept();
             return;
@@ -165,6 +170,11 @@ void DesktopWidget::contextMenuEvent(QContextMenuEvent* event)
     QAction* addAction = menu.addGlassAction(QStringLiteral("添加小组件…"), LiquidGlassMenu::Icon::Add);
     menu.addSeparator();
     QAction* cityAction = nullptr;
+    QAction* countdownAction = nullptr;
+    if (m_cardKind == CardKind::Countdown) {
+        countdownAction = menu.addGlassAction(QStringLiteral("编辑倒数日…"), LiquidGlassMenu::Icon::Edit);
+        menu.addSeparator();
+    }
     if (m_cardKind == CardKind::Weather) {
         cityAction = menu.addGlassAction(QStringLiteral("搜索城市…"), LiquidGlassMenu::Icon::Search);
         menu.addSeparator();
@@ -177,6 +187,8 @@ void DesktopWidget::contextMenuEvent(QContextMenuEvent* event)
         showWidgetLibrary();
     } else if (cityAction && selected == cityAction) {
         searchWeatherCity();
+    } else if (countdownAction && selected == countdownAction) {
+        editCountdown();
     } else if (selected == removeAction && removeAction->isEnabled()) {
         const bool wasPrimary = m_ownsTray;
         if (m_trayIcon)

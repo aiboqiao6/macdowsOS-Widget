@@ -3,6 +3,7 @@
 #include "rendering/liquidglasswidget.h"
 #include "rendering/nativewindows.h"
 #include "platform/powerdevices.h"
+#include "widgets/countdowncard.h"
 
 #include <QPoint>
 #include <QString>
@@ -30,7 +31,7 @@ class DesktopWidget final : public LiquidGlassWidget
 {
 public:
     // 图库拖动编码使用枚举值，新增类型必须追加，避免改变已有编码。
-    enum class CardKind { Battery, Weather, Clock, Dictionary, Music };
+    enum class CardKind { Battery, Weather, Clock, Dictionary, Music, Countdown };
 
     explicit DesktopWidget(QWidget* parent = nullptr,
                            CardKind kind = CardKind::Battery,
@@ -45,6 +46,7 @@ public:
     bool placeAtDesktopPoint(const QPoint& point);
     void saveConfiguration() const;
     void showSettingsDialog();
+    void editCountdown();
 
     static QList<DesktopWidget*> restoreWidgets();
     static DesktopWidget* addWidget(CardKind kind, const QPoint& desktopPoint,
@@ -159,6 +161,9 @@ private:
     bool m_hasBattery = false;
     CardKind m_cardKind = CardKind::Battery;
     int m_cardVariant = 0;
+    bool m_previewOnly = false;
+    CountdownCard::Event m_countdown;
+    QDate m_countdownLastDate = QDate::currentDate();
     QString m_hostDeviceName;
     bool m_ownsTray = true;
     QString m_instanceId;

@@ -42,6 +42,7 @@ DesktopWidget::DesktopWidget(QWidget* parent, CardKind kind, bool ownsTray,
                              const QString& instanceId, int variant, bool previewOnly)
     : LiquidGlassWidget(parent), m_cardKind(kind), m_ownsTray(ownsTray),
       m_cardVariant(normalizedVariant(kind, variant)),
+      m_previewOnly(previewOnly),
       m_instanceId(instanceId.isEmpty()
                         ? QUuid::createUuid().toString(QUuid::WithoutBraces)
                         : instanceId)
@@ -60,7 +61,7 @@ DesktopWidget::DesktopWidget(QWidget* parent, CardKind kind, bool ownsTray,
         : qMax(4, qRound(kGridBaseGap * m_widgetScale));
     setFixedSize(gridWidgetSize(m_cardKind, m_cardVariant, initialCell, initialGap));
     setGlassRadius(LiquidGlassStyle::kCardCornerRadius * m_widgetScale);
-    // 预览构造跳过网络、外设轮询和桌面捕获；音乐绘制复用共享会话。
+    // 预览构造跳过网络、媒体会话、外设轮询和桌面捕获。
     if (previewOnly) {
         setDesktopCaptureEnabled(false);
         setDesktopLayerEnabled(false);
@@ -85,6 +86,7 @@ DesktopWidget::DesktopWidget(QWidget* parent, CardKind kind, bool ownsTray,
                : (m_cardKind == CardKind::Weather ? QStringLiteral("天气 · 拖动移动组件")
                   : (m_cardKind == CardKind::Clock ? QStringLiteral("时钟 · 拖动移动组件")
                      : (m_cardKind == CardKind::Music ? QStringLiteral("音乐 · 拖动移动组件")
+                        : m_cardKind == CardKind::Countdown ? QStringLiteral("倒数日 · 双击编辑 · 拖动移动组件")
                         : QStringLiteral("词典 · 拖动移动组件")))));
 
     if (m_cardKind == CardKind::Music) {
@@ -140,6 +142,10 @@ DesktopWidget::DesktopWidget(QWidget* parent, CardKind kind, bool ownsTray,
     // 外部配置五秒同步一次，避免重复读取 JSON；正常设置变更即时推送。
     m_settingsTimer.setInterval(5000);
     connect(&m_settingsTimer, &QTimer::timeout, this, [this]() {
+        if (m_cardKind == CardKind::Countdown && m_countdownLastDate != QDate::currentDate()) {
+            m_countdownLastDate = QDate::currentDate();
+            update();
+        }
         AppSettings current;
         const QString savedLocation = current.value(QStringLiteral("weather/location"),
                                                     QStringLiteral("北京")).toString().trimmed();

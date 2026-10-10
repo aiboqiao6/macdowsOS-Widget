@@ -12,10 +12,14 @@ struct Layout {
     QRectF artist;
     QRectF status;
     QRectF progress;
+    QRectF elapsed;
+    QRectF remaining;
+    QRectF branding;
     QRectF previous;
     QRectF toggle;
     QRectF next;
 };
 Layout layout(const QRectF& bounds);
 void paint(QPainter& painter, const QRectF& bounds, const MediaSnapshot& media);
+MediaSnapshot previewSnapshot();
 }

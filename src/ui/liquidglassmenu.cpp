@@ -43,6 +43,10 @@ void drawIcon(QPainter& painter, const QRectF& box, LiquidGlassMenu::Icon icon)
         painter.drawLine(QPointF(7, 8), QPointF(7, 13));
         painter.drawLine(QPointF(11, 8), QPointF(11, 13));
         break;
+    case LiquidGlassMenu::Icon::Edit:
+        painter.drawPolygon(QPolygonF{QPointF(3, 11), QPointF(11, 3), QPointF(15, 7), QPointF(7, 15), QPointF(2, 16)});
+        painter.drawLine(QPointF(9, 5), QPointF(13, 9));
+        break;
     }
     painter.restore();
 }

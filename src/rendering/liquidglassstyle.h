@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-// 所有玻璃表面共用固定材质；画质档位只控制采样密度，不切换光学样式。
+// 所有玻璃表面共用光学参数；亮暗模式改变透光与反光，画质档位只控制采样密度。
 namespace LiquidGlassStyle {
 inline constexpr float kShapePower = 3.8f;
 inline constexpr float kRefractionPower = 1.32f;

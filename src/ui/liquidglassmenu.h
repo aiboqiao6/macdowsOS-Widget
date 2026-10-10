@@ -10,7 +10,7 @@ class LiquidGlassMenuSurface;
 class LiquidGlassMenu final : public QMenu
 {
 public:
-    enum class Icon { Add, Search, Remove };
+    enum class Icon { Add, Search, Remove, Edit };
     explicit LiquidGlassMenu(const QFont& font, QWidget* parent = nullptr);
     ~LiquidGlassMenu() override;
     QAction* addGlassAction(const QString& text, Icon icon);

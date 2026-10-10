@@ -144,6 +144,8 @@
     <ClCompile Include="src/ui/scaleselector.cpp" />
     <ClCompile Include="src/media/systemmediasession.cpp" />
     <ClCompile Include="src/widgets/musiccard.cpp" />
+    <ClCompile Include="src/widgets/countdowncard.cpp" />
+    <ClCompile Include="src/widgets/countdowneditor.cpp" />
     <ClCompile Include="src/rendering/cleartypetext.cpp" />
     <ClCompile Include="src/widgets/desktopwidget_paint.cpp" />
     <ClCompile Include="src/widgets/desktopwidget_settings.cpp" />
@@ -161,6 +163,7 @@
   <ItemGroup>
     <ClInclude Include="src/ui/scaleselector.h" />
     <ClInclude Include="src/widgets/musiccard.h" />
+    <ClInclude Include="src/widgets/countdowncard.h" />
     <ClInclude Include="src/rendering/cleartypetext.h" />
     <ClInclude Include="src/widgets/cardmetrics.h" />
     <ClInclude Include="src/widgets/weatherformat.h" />

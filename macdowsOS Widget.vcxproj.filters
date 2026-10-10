@@ -45,9 +45,12 @@
     <ClCompile Include="src/ui/scaleselector.cpp"><Filter>src\ui</Filter></ClCompile>
     <ClCompile Include="src/media/systemmediasession.cpp"><Filter>src\media</Filter></ClCompile>
     <ClCompile Include="src/widgets/musiccard.cpp"><Filter>src\widgets</Filter></ClCompile>
+    <ClCompile Include="src/widgets/countdowncard.cpp"><Filter>src\widgets</Filter></ClCompile>
+    <ClCompile Include="src/widgets/countdowneditor.cpp"><Filter>src\widgets</Filter></ClCompile>
     <ClCompile Include="src/rendering/cleartypetext.cpp"><Filter>src\rendering</Filter></ClCompile>
     <ClInclude Include="src/ui/scaleselector.h"><Filter>src\ui</Filter></ClInclude>
     <ClInclude Include="src/widgets/musiccard.h"><Filter>src\widgets</Filter></ClInclude>
+    <ClInclude Include="src/widgets/countdowncard.h"><Filter>src\widgets</Filter></ClInclude>
     <ClInclude Include="src/rendering/cleartypetext.h"><Filter>src\rendering</Filter></ClInclude>
     <QtMoc Include="src/media/systemmediasession.h"><Filter>src\media</Filter></QtMoc>
     <ClCompile Include="src/widgets/desktopwidget_paint.cpp"><Filter>src\widgets</Filter></ClCompile>

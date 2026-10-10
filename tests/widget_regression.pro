@@ -43,6 +43,8 @@ SOURCES += ../src/app/fontsettings.cpp \
     ../src/widgets/desktopwidget_storage.cpp \
     ../src/widgets/desktopwidget_tray.cpp \
     ../src/widgets/musiccard.cpp \
+    ../src/widgets/countdowncard.cpp \
+    ../src/widgets/countdowneditor.cpp \
     ../src/widgets/widgetgeometry.cpp \
     widget_regression.cpp
 
@@ -62,5 +64,6 @@ HEADERS += ../src/app/fontsettings.h \
     ../src/ui/widgetlibrarydialog.h \
     ../src/widgets/cardmetrics.h \
     ../src/widgets/musiccard.h \
+    ../src/widgets/countdowncard.h \
     ../src/widgets/weatherformat.h \
     ../src/widgets/widgetgeometry.h
