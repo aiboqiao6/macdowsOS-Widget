@@ -2,12 +2,14 @@
 #include "ui/firstrunwizard.h"
 #include "app/appsettings.h"
 #include "config.h"
+#include "rendering/renderdiagnostics.h"
 
 #include <QApplication>
 #include <QDir>
 #include <QFileInfo>
 #include <QFontDatabase>
 #include <QStandardPaths>
+#include <QScreen>
 #include <QTimer>
 
 #ifdef Q_OS_WIN
@@ -48,6 +50,25 @@ int main(int argc, char* argv[])
     app.setApplicationDisplayName(QStringLiteral("macdowsOS Widget"));
     app.setApplicationVersion(QString::fromLatin1(AppConfig::Version));
     app.setOrganizationName(QStringLiteral("macdowsOS"));
+    if (!RenderDiagnostics::initialize())
+        qWarning("Could not open the local rendering diagnostic log");
+    for (QScreen* screen : QGuiApplication::screens()) {
+        const QRect area = screen->geometry();
+        RenderDiagnostics::write("display", QString("name=%1 geometry=%2,%3,%4x%5 DPR=%6 refreshHz=%7 depth=%8")
+            .arg(screen->name()).arg(area.x()).arg(area.y()).arg(area.width()).arg(area.height())
+            .arg(screen->devicePixelRatio()).arg(screen->refreshRate()).arg(screen->depth()));
+    }
+#ifdef Q_OS_WIN
+    for (DWORD index = 0; ; ++index) {
+        DISPLAY_DEVICEW adapter{};
+        adapter.cb = sizeof(adapter);
+        if (!EnumDisplayDevicesW(nullptr, index, &adapter, 0))
+            break;
+        RenderDiagnostics::write("display.adapter", QString("name=%1 GPU=%2 device=%3 flags=0x%4")
+            .arg(QString::fromWCharArray(adapter.DeviceName), QString::fromWCharArray(adapter.DeviceString),
+                 QString::fromWCharArray(adapter.DeviceID)).arg(adapter.StateFlags, 0, 16));
+    }
+#endif
     // All widget artwork and Qt controls use the bundled PingFang face. The
     // registration happens before any windows are restored so text metrics
     // cannot differ between the gallery and live cards.
@@ -64,6 +85,8 @@ int main(int argc, char* argv[])
         FirstRunWizard wizard;
         if (!wizard.run()) {
             BatteryWidget::shutdown();
+            RenderDiagnostics::write("session.exit", "reason=first-run-cancelled exitCode=0");
+            RenderDiagnostics::shutdown();
 #ifdef Q_OS_WIN
             ReleaseMutex(instanceMutex);
             CloseHandle(instanceMutex);
@@ -71,8 +94,19 @@ int main(int argc, char* argv[])
             return 0;
         }
     }
-    BatteryWidget::setGlobalFontSmoothing(qBound(0,
-        AppSettings().value(QStringLiteral("appearance/fontSmoothing"), 2).toInt(), 3));
+    {
+        const AppSettings saved;
+        RenderDiagnostics::write("render.settings", QString("renderScale=%1 liveBackdrop=%2 lowPower=%3 mouseThrough=%4 opacity=%5 blur=%6 fontSmoothing=%7")
+            .arg(saved.value("performance/renderScale").toDouble())
+            .arg(saved.value("appearance/liveBackdrop").toBool())
+            .arg(saved.value("interaction/lowPowerRefresh").toBool())
+            .arg(saved.value("interaction/mouseThrough").toBool())
+            .arg(saved.value("appearance/opacity").toDouble())
+            .arg(saved.value("appearance/blurStrength").toInt())
+            .arg(saved.value("appearance/fontSmoothing").toInt()));
+        BatteryWidget::setGlobalFontSmoothing(qBound(0,
+            saved.value(QStringLiteral("appearance/fontSmoothing"), 2).toInt(), 3));
+    }
 
     // Restore user-created independent cards from widgets.json. On first run
     // seed the reference layout with four cards; every card owns its window,
@@ -93,6 +127,8 @@ int main(int argc, char* argv[])
     }
     const int result = app.exec();
     BatteryWidget::shutdown();
+    RenderDiagnostics::write("session.exit", QString("exitCode=%1").arg(result));
+    RenderDiagnostics::shutdown();
 #ifdef Q_OS_WIN
     ReleaseMutex(instanceMutex);
     CloseHandle(instanceMutex);

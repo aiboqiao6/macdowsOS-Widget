@@ -122,6 +122,7 @@
     <ClCompile Include="src/ui/liquidglassmenu.cpp" />
     <ClCompile Include="src/rendering/liquidglasswidget.cpp" />
     <ClCompile Include="src/rendering/nativewindows.cpp" />
+    <ClCompile Include="src/rendering/renderdiagnostics.cpp" />
     <ClCompile Include="src/rendering/desktopcapture.cpp" />
     <ClCompile Include="src\rendering\qtglassflowscene.cpp" />
   </ItemGroup>
@@ -133,6 +134,7 @@
     <ClInclude Include="src/ui/liquidglassmenu.h" />
     <ClInclude Include="src/rendering/liquidglasswidget.h" />
     <ClInclude Include="src/rendering/nativewindows.h" />
+    <ClInclude Include="src/rendering/renderdiagnostics.h" />
     <ClInclude Include="src/rendering/desktopcapture.h" />
     <ClInclude Include="src/rendering/responsivelayout.h" />
   </ItemGroup>

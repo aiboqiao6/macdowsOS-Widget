@@ -12,9 +12,11 @@ SOURCES += widget_regression.cpp \
     ../src/ui/liquidglassmenu.cpp \
     ../src/rendering/liquidglasswidget.cpp \
     ../src/rendering/nativewindows.cpp \
+    ../src/rendering/renderdiagnostics.cpp \
     ../src/rendering/desktopcapture.cpp \
     ../src/rendering/qtglassflowscene.cpp
 HEADERS += ../src/config.h \
+    ../src/rendering/renderdiagnostics.h \
     ../src/ui/widgetlibrarydialog.h \
     ../src/rendering/qtglassflowscene.h
 RESOURCES += ../resources.qrc ../src/rendering/shaders.qrc

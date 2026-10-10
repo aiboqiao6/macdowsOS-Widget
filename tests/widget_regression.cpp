@@ -2,6 +2,7 @@
 #include "rendering/liquidglasswidget.h"
 #include "rendering/nativewindows.h"
 #include "rendering/responsivelayout.h"
+#include "rendering/renderdiagnostics.h"
 #include "ui/widgetlibrarydialog.h"
 #include "ui/firstrunwizard.h"
 #include "app/appsettings.h"
@@ -26,6 +27,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkProxy>
 #include <QPainter>
+#include <QOpenGLExtraFunctions>
 #include <QPushButton>
 #include <QProcess>
 #include <QScreen>
@@ -45,6 +47,7 @@
 #include <algorithm>
 #include <atomic>
 #include <memory>
+#include <thread>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -3211,6 +3214,252 @@ private slots:
         glass.setBackgroundImage(source);
         QVERIFY2(compareFrame(glass.grabFramebuffer()) <= 1,
                  "Restoring the unflipped image changed the frame");
+    }
+
+    void renderDiagnosticsAreThreadSafeBoundedAndPreserveQtMessages() {
+        QTemporaryDir logs;
+        QVERIFY(logs.isValid());
+        QVERIFY(RenderDiagnostics::initialize(logs.path()));
+        const auto cleanup = qScopeGuard([]() { RenderDiagnostics::shutdown(); });
+        QCOMPARE(RenderDiagnostics::logPath(), logs.filePath("render.log"));
+        RenderDiagnostics::write("unicode", QStringLiteral("托盘渲染\nsecond line"));
+        QTest::ignoreMessage(QtWarningMsg, "render diagnostic warning probe");
+        qWarning("render diagnostic warning probe");
+        QList<std::shared_ptr<std::thread>> writers;
+        for (int thread = 0; thread < 4; ++thread)
+            writers.append(std::make_shared<std::thread>([thread]() {
+                for (int index = 0; index < 60; ++index)
+                    RenderDiagnostics::write("concurrent", QString("writer=%1 item=%2").arg(thread).arg(index));
+            }));
+        for (const auto& writer : writers)
+            writer->join();
+        QFile current(RenderDiagnostics::logPath());
+        QVERIFY(current.open(QIODevice::ReadOnly));
+        const QByteArray records = current.readAll();
+        current.close();
+        QCOMPARE(records.count("[concurrent]"), 240);
+        QVERIFY(records.contains(QStringLiteral("托盘渲染\\nsecond line").toUtf8()));
+        QVERIFY(records.contains("render diagnostic warning probe"));
+        for (int index = 0; index < 1000; ++index)
+            RenderDiagnostics::write("throttled", "repeat", 10000);
+        QVERIFY(current.open(QIODevice::ReadOnly));
+        QCOMPARE(current.readAll().count("[throttled]"), 1);
+        current.close();
+        for (int index = 0; index < 2200; ++index)
+            RenderDiagnostics::write("rotation", QString(4096, QLatin1Char('x')));
+        RenderDiagnostics::shutdown();
+        QVERIFY(!RenderDiagnostics::enabled());
+        for (const QString& file : {QString("render.log"), QString("render.log.1"),
+                                    QString("render.log.2"), QString("render.log.3")}) {
+            const QFileInfo info(logs.filePath(file));
+            QVERIFY(info.exists());
+            QVERIFY(info.size() <= 2 * 1024 * 1024);
+        }
+        QVERIFY(!QFile::exists(logs.filePath("render.log.4")));
+        // Initialization failure must not replace QtTest's message handler.
+        QFile blocked(logs.filePath("not-a-directory"));
+        QVERIFY(blocked.open(QIODevice::WriteOnly));
+        blocked.close();
+        QVERIFY(!RenderDiagnostics::initialize(blocked.fileName()));
+        QTest::ignoreMessage(QtWarningMsg, "message handler after failed log open");
+        qWarning("message handler after failed log open");
+    }
+
+    void renderDiagnosticsRecordRendererErrorsAndHeartbeat() {
+        QTemporaryDir logs;
+        QVERIFY(RenderDiagnostics::initialize(logs.path()));
+        const auto cleanup = qScopeGuard([]() { RenderDiagnostics::shutdown(); });
+        TestGlass glass;
+        glass.setDesktopCaptureEnabled(false);
+        glass.overlay = QColor(25, 220, 50);
+        glass.setAnimationEnabled(true);
+        glass.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&glass));
+        glass.makeCurrent();
+        glass.context()->functions()->glEnable(GLenum(0xffffffff));
+        glass.reportGlErrors("diagnostic-probe");
+        glass.doneCurrent();
+        QTest::qWait(5200);
+        QVERIFY(!glass.surfaceSnapshot().isNull());
+        QFile current(RenderDiagnostics::logPath());
+        QVERIFY(current.open(QIODevice::ReadOnly));
+        const QByteArray records = current.readAll();
+        current.close();
+        QVERIFY(records.contains("[gl.context.create]"));
+        QVERIFY(records.contains("renderer="));
+        QVERIFY(records.contains("DPR="));
+        QVERIFY(records.contains("[gl.fbo.create]"));
+        QVERIFY(records.contains("diagnostic-probe"));
+        QVERIFY(records.contains("code=0x500"));
+        QVERIFY(records.contains("[render.heartbeat]"));
+        QVERIFY(QFile::exists(logs.filePath("render.log")));
+        QFile::remove("artifacts/render-diagnostics-sample.log");
+        QVERIFY(QFile::copy(logs.filePath("render.log"), "artifacts/render-diagnostics-sample.log"));
+    }
+
+    void backgroundUploadHandlesPaddedRowsAndForeignState() {
+        TestGlass glass;
+        glass.setDesktopCaptureEnabled(false);
+        glass.setFixedSize(201, 141);
+        glass.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&glass));
+        const int stride = 128 * 4;
+        QByteArray storage(stride * 97, char(0x55));
+        QImage padded(reinterpret_cast<uchar*>(storage.data()), 101, 97, stride,
+                      QImage::Format_RGB32);
+        for (int y = 0; y < padded.height(); ++y)
+            for (int x = 0; x < padded.width(); ++x)
+                padded.setPixel(x, y, qRgb(40 + x, 60 + y, (x + y) % 100));
+        glass.setBackgroundImage(padded.copy());
+        const QImage reference = glass.grabFramebuffer();
+        glass.setBackgroundImage(padded);
+        QCOMPARE(glass.grabFramebuffer(), reference);
+
+        glass.makeCurrent();
+        auto* gl = glass.context()->extraFunctions();
+        gl->glActiveTexture(GL_TEXTURE1);
+        gl->glPixelStorei(GL_UNPACK_ALIGNMENT, 8);
+        gl->glPixelStorei(GL_UNPACK_ROW_LENGTH, 104);
+        gl->glPixelStorei(GL_UNPACK_SKIP_PIXELS, 1);
+        gl->glPixelStorei(GL_UNPACK_SKIP_ROWS, 1);
+        // Exercise the upload directly so Qt cannot reset the foreign state
+        // first. The padded allocation keeps the old, incorrect read in bounds.
+        glass.m_bgDirty = true;
+        glass.loadBackgroundTexture();
+        GLint value = 0;
+        gl->glGetIntegerv(GL_UNPACK_ROW_LENGTH, &value);
+        QCOMPARE(value, 104);
+        gl->glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        gl->glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        gl->glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+        gl->glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+        gl->glActiveTexture(GL_TEXTURE0);
+        glass.doneCurrent();
+        QCOMPARE(glass.grabFramebuffer(), reference);
+    }
+
+    void snapshotIgnoresForeignPixelPackBuffer() {
+        TestGlass glass;
+        glass.setDesktopCaptureEnabled(false);
+        glass.overlay = QColor(25, 220, 50);
+        glass.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&glass));
+        const QImage expected = glass.surfaceSnapshot();
+        QVERIFY(!expected.isNull());
+        glass.makeCurrent();
+        auto* gl = glass.context()->extraFunctions();
+        GLuint buffer = 0;
+        gl->glGenBuffers(1, &buffer);
+        gl->glBindBuffer(GL_PIXEL_PACK_BUFFER, buffer);
+        gl->glBufferData(GL_PIXEL_PACK_BUFFER, 1024 * 1024, nullptr, GL_STREAM_READ);
+        QOpenGLFramebufferObject foreignTarget(16, 16);
+        foreignTarget.bind();
+        glass.m_snapshotRevision = 0;
+        const QImage actual = glass.surfaceSnapshot();
+        GLint binding = 0, framebuffer = 0;
+        gl->glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &binding);
+        gl->glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
+        gl->glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        gl->glDeleteBuffers(1, &buffer);
+        while (gl->glGetError() != GL_NO_ERROR) {}
+        glass.doneCurrent();
+        QCOMPARE(GLuint(binding), buffer);
+        QCOMPARE(GLuint(framebuffer), foreignTarget.handle());
+        QCOMPARE(actual, expected);
+    }
+
+    void sceneRecoversForeignDrawState() {
+        TestGlass glass;
+        glass.setDesktopCaptureEnabled(false);
+        QImage background(200, 140, QImage::Format_RGB32);
+        background.fill(QColor(160, 80, 30));
+        glass.setBackgroundImage(background);
+        glass.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&glass));
+        const QImage expected = glass.surfaceSnapshot();
+        glass.makeCurrent();
+        auto* gl = glass.context()->extraFunctions();
+        gl->glClearColor(1, 0, 1, 1);
+        gl->glClear(GL_COLOR_BUFFER_BIT);
+        gl->glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        gl->glEnable(GL_DEPTH_TEST);
+        gl->glEnable(GL_STENCIL_TEST);
+        gl->glStencilFunc(GL_NEVER, 0, 0xff);
+        gl->glEnable(GL_SCISSOR_TEST);
+        gl->glScissor(0, 0, 1, 1);
+        gl->glActiveTexture(GL_TEXTURE1);
+        gl->glBlendEquation(GL_FUNC_REVERSE_SUBTRACT);
+        glass.m_blurCacheDirty = true;
+        glass.paintGL();
+        const QImage actual = glass.surfaceSnapshot();
+        glass.doneCurrent();
+        QCOMPARE(actual, expected);
+    }
+
+    void popupRecompositionPreservesMultipleGlassWindows() {
+        TestGlass left, right;
+        const QPoint origin = QGuiApplication::primaryScreen()->availableGeometry().center();
+        QList<QImage> expected;
+        int index = 0;
+        for (auto* glass : {&left, &right}) {
+            glass->setDesktopCaptureEnabled(false);
+            glass->move(origin + QPoint(index * 215 - 210, -70));
+            glass->setRenderScale(index ? 1.25f : .6f);
+            glass->overlay = index ? QColor(25, 220, 50) : QColor(220, 50, 25);
+            QImage background(200, 140, QImage::Format_RGB32);
+            background.fill(QColor(40, 60, 90));
+            glass->setBackgroundImage(background);
+            glass->show();
+            QVERIFY(QTest::qWaitForWindowExposed(glass));
+            expected.append(glass->grabFramebuffer());
+            ++index;
+        }
+        QMenu popup;
+        popup.addAction(QStringLiteral("Tray list composition regression"));
+        popup.addAction(QStringLiteral("Second tray item"));
+        for (int cycle = 0; cycle < 30; ++cycle) {
+            popup.popup(origin + QPoint(cycle % 2 ? 20 : -120, -50));
+            QTest::qWait(20);
+            for (int i = 0; i < 2; ++i) {
+                TestGlass* glass = i ? &right : &left;
+                glass->setRenderingSuspended(true);
+                // Poison the discarded FBO while the popup changes DWM
+                // topology; both paused cards still owe Qt a complete paint.
+                glass->makeCurrent();
+                auto* gl = glass->context()->functions();
+                gl->glClearColor(1, 0, 1, 1);
+                gl->glClear(GL_COLOR_BUFFER_BIT);
+                glass->doneCurrent();
+                QCOMPARE(glass->grabFramebuffer(), expected.at(i));
+                glass->setRenderingSuspended(false);
+            }
+            popup.hide();
+            QTest::qWait(20);
+        }
+        QVERIFY(left.grabFramebuffer().save(QStringLiteral("artifacts/tray-popup-left.png")));
+        QVERIFY(right.grabFramebuffer().save(QStringLiteral("artifacts/tray-popup-right.png")));
+    }
+
+    void suspendedSceneStillPaintsExposedFramebuffer() {
+        TestGlass glass;
+        glass.setDesktopCaptureEnabled(false);
+        glass.overlay = QColor(25, 220, 50);
+        QImage background(200, 140, QImage::Format_RGB32);
+        background.fill(QColor(160, 80, 30));
+        glass.setBackgroundImage(background);
+        glass.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&glass));
+        const QImage expected = glass.grabFramebuffer();
+        glass.setRenderingSuspended(true);
+        // Qt invalidates a NoPartialUpdate FBO before an expose/recompose.
+        // Deterministically poison it instead of depending on driver contents.
+        glass.makeCurrent();
+        auto* gl = glass.context()->functions();
+        gl->glClearColor(1, 0, 1, 1);
+        gl->glClear(GL_COLOR_BUFFER_BIT);
+        glass.doneCurrent();
+        QCOMPARE(glass.grabFramebuffer(), expected);
+        QVERIFY(!glass.m_timer->isActive());
     }
 
     void coveredWidgetDoesNotCapture() {

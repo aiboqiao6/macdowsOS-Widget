@@ -4,6 +4,7 @@
 #include "ui/widgetlibrarydialog.h"
 #include "ui/liquidglassmenu.h"
 #include "rendering/responsivelayout.h"
+#include "rendering/renderdiagnostics.h"
 
 #include <QApplication>
 #include <QtConcurrent/QtConcurrentRun>
@@ -15,6 +16,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QDesktopServices>
 #include <QEnterEvent>
 #include <QGuiApplication>
 #include <QHash>
@@ -932,6 +934,13 @@ void BatteryWidget::setupTrayIcon()
     connect(m_startupAction, &QAction::toggled, this, &BatteryWidget::setStartupEnabled);
 
     menu->addSeparator();
+    auto* logsAction = menu->addAction(QStringLiteral("打开渲染日志文件夹"));
+    logsAction->setEnabled(!RenderDiagnostics::logPath().isEmpty());
+    connect(logsAction, &QAction::triggered, this, []() {
+        const QString path = RenderDiagnostics::logPath();
+        if (!path.isEmpty())
+            QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
+    });
     auto* aboutAction = menu->addAction(QStringLiteral("关于 macdowsOS Widget"));
     connect(aboutAction, &QAction::triggered, this, &BatteryWidget::showAboutDialog);
     menu->addSeparator();

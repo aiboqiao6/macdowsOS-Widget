@@ -125,6 +125,7 @@ private:
                         const QString &fragPath);
     void initQuad();
     void cleanupGL();
+    void reportGlErrors(const char* stage);
     void drawFullscreenQuad(QOpenGLShaderProgram *prog);
     void createFBOs(int w, int h);
     void destroyFBOs();
@@ -198,6 +199,8 @@ private:
     bool m_continuousRendering = false;
     bool m_renderingSuspended = false;
     QElapsedTimer m_clock;
+    QElapsedTimer m_diagnosticsClock;
+    quint64 m_diagnosticsFrames = 0;
     int m_hoveredIndex;
     int m_dragIndex;
 };

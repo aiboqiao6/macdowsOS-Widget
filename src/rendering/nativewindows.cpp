@@ -1,4 +1,5 @@
 #include "nativewindows.h"
+#include "renderdiagnostics.h"
 #include <QElapsedTimer>
 #include <QCoreApplication>
 #include <QMutex>
@@ -54,13 +55,23 @@ private:
     inline static TopologyWatcher* active = nullptr;
     HWINEVENTHOOK objectHook = nullptr;
     HWINEVENTHOOK foregroundHook = nullptr;
-    static void CALLBACK changed(HWINEVENTHOOK, DWORD event, HWND, LONG object, LONG child, DWORD, DWORD) {
+    static void CALLBACK changed(HWINEVENTHOOK, DWORD event, HWND window, LONG object, LONG child, DWORD, DWORD) {
         if (!active || (event != EVENT_SYSTEM_FOREGROUND && (object != OBJID_WINDOW || child != 0)))
             return;
         if (event != EVENT_SYSTEM_FOREGROUND && event != EVENT_OBJECT_SHOW && event != EVENT_OBJECT_HIDE
             && event != EVENT_OBJECT_REORDER && event != EVENT_OBJECT_LOCATIONCHANGE)
             return;
         NativeWindows::invalidate();
+        if (RenderDiagnostics::enabled()) {
+            wchar_t name[128]{};
+            GetClassNameW(window, name, 128);
+            DWORD process = 0;
+            GetWindowThreadProcessId(window, &process);
+            RenderDiagnostics::write(event == EVENT_SYSTEM_FOREGROUND ? "window.foreground" : "window.topology",
+                QString("event=0x%1 hwnd=0x%2 sourcePid=%3 class=%4")
+                    .arg(event, 0, 16).arg(reinterpret_cast<quintptr>(window), 0, 16)
+                    .arg(process).arg(QString::fromWCharArray(name)), 250);
+        }
         if (!active->timer.isActive())
             active->timer.start(0);
     }
@@ -388,7 +399,15 @@ void NativeWindows::placeDesktop(WId id)
     constexpr UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
     // Insert directly into the desktop band. An unconditional NOTOPMOST
     // first moves an already-normal card to the front of all normal apps.
-    SetWindowPos(window, reinterpret_cast<HWND>(desktopInsertAfter(id)), 0, 0, 0, 0, flags);
+    const HWND anchor = reinterpret_cast<HWND>(desktopInsertAfter(id));
+    if (!SetWindowPos(window, anchor, 0, 0, 0, 0, flags)) {
+        const DWORD error = GetLastError();
+        DWORD anchorProcess = 0;
+        GetWindowThreadProcessId(anchor, &anchorProcess);
+        RenderDiagnostics::write(QString("window.layer.failed/0x%1").arg(id, 0, 16),
+            QString("operation=desktop error=%1 anchor=0x%2 anchorPid=%3")
+                .arg(error).arg(reinterpret_cast<quintptr>(anchor), 0, 16).arg(anchorProcess), 10000);
+    }
     // An anchor can be promoted concurrently by another process.
     if (isTopmost(id))
         SetWindowPos(window, HWND_BOTTOM, 0, 0, 0, 0, flags);

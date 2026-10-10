@@ -1,5 +1,6 @@
 #include "desktopcapture.h"
 #include "nativewindows.h"
+#include "renderdiagnostics.h"
 #include <QPainter>
 #include <cstring>
 
@@ -36,6 +37,15 @@
 #endif
 
 namespace {
+void logCaptureFailure(const char* stage, quintptr target = 0) {
+    QString details = QString("target=0x%1").arg(target, 0, 16);
+#ifdef Q_OS_WIN
+    // Called from a catch block: retain the device/WGC HRESULT that previously
+    // disappeared when the sampler fell back to wallpaper.
+    details += QString(" HRESULT=0x%1").arg(quint32(winrt::to_hresult()), 8, 16, QLatin1Char('0'));
+#endif
+    RenderDiagnostics::write(QString("capture.failure/%1").arg(stage), details, 1000);
+}
 struct CapturePart {
     QRect source;
     QRect destination;
@@ -268,7 +278,7 @@ public:
     explicit WindowCaptureStream(HWND window) : m_window(window)
     {
         try { initialize(); }
-        catch (...) { close(); }
+        catch (...) { logCaptureFailure("initialize", reinterpret_cast<quintptr>(window)); close(); }
     }
 
     ~WindowCaptureStream()
@@ -343,6 +353,7 @@ public:
             }
             return image;
         } catch (...) {
+            logCaptureFailure("copy-frame", reinterpret_cast<quintptr>(m_window));
             m_valid = false;
             return {};
         }
@@ -975,7 +986,7 @@ void DesktopCapture::request(const QRect& area, qreal pixelScale, WId target, QO
                                        completed = std::move(completed)]() {
         Frame frame;
         try { frame = grabFrame(parts, size, area, pixelScale, target, queued, false); }
-        catch (...) {} // Always release the caller's in-flight slot on failure.
+        catch (...) { logCaptureFailure("worker-grab", target); } // Always release the caller's in-flight slot on failure.
         QMetaObject::invokeMethod(owner, [guard, completed, frame = std::move(frame)]() mutable {
             if (guard) {
                 validate(frame);
@@ -997,6 +1008,7 @@ DesktopCapture::Frame DesktopCapture::grab(const QRect& area, qreal pixelScale, 
     } catch (...) {
         // Match the asynchronous path: a transient capture/device failure
         // yields an empty frame instead of escaping through the GUI event loop.
+        logCaptureFailure("synchronous-grab", target);
     }
 #ifdef Q_OS_WIN
     // Synchronous grabs run on their caller (normally the GUI thread) and do

@@ -53,6 +53,12 @@
     <ClCompile Include="src/rendering/nativewindows.cpp">
       <Filter>src\rendering</Filter>
     </ClCompile>
+    <ClCompile Include="src/rendering/renderdiagnostics.cpp">
+      <Filter>src\rendering</Filter>
+    </ClCompile>
+    <ClInclude Include="src/rendering/renderdiagnostics.h">
+      <Filter>src\rendering</Filter>
+    </ClInclude>
     <ClCompile Include="src/rendering/desktopcapture.cpp">
       <Filter>src\rendering</Filter>
     </ClCompile>

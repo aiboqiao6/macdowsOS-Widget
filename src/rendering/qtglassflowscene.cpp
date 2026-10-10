@@ -4,6 +4,7 @@
 // Distributed under GNU GPL v3.0; see ../LICENSE.
 
 #include "qtglassflowscene.h"
+#include "renderdiagnostics.h"
 
 #include <QFile>
 #include <QImage>
@@ -22,6 +23,49 @@
 #include <cmath>
 
 namespace {
+// QPainter and native integrations can leave pixel-transfer state in this
+// context. CPU image pointers must never be interpreted as PBO offsets, and
+// QImage row padding must not become visible pixels. Restore the caller's state
+// so reading another glass surface is safe inside Qt's composition as well.
+class PixelTransferScope final {
+public:
+    PixelTransferScope(QOpenGLFunctions* gl, bool upload, int rowLength = 0)
+        : m_gl(gl), m_bufferTarget(upload ? GL_PIXEL_UNPACK_BUFFER : GL_PIXEL_PACK_BUFFER) {
+        const GLenum states[] = {
+            GLenum(upload ? GL_UNPACK_ALIGNMENT : GL_PACK_ALIGNMENT),
+            GLenum(upload ? GL_UNPACK_ROW_LENGTH : GL_PACK_ROW_LENGTH),
+            GLenum(upload ? GL_UNPACK_SKIP_PIXELS : GL_PACK_SKIP_PIXELS),
+            GLenum(upload ? GL_UNPACK_SKIP_ROWS : GL_PACK_SKIP_ROWS)
+        };
+        for (int i = 0; i < 4; ++i) {
+            m_states[i] = states[i];
+            m_gl->glGetIntegerv(m_states[i], &m_values[i]);
+            m_gl->glPixelStorei(m_states[i], i == 0 ? 4 : (i == 1 ? rowLength : 0));
+        }
+        m_gl->glGetIntegerv(upload ? GL_PIXEL_UNPACK_BUFFER_BINDING : GL_PIXEL_PACK_BUFFER_BINDING,
+                           &m_buffer);
+        m_gl->glBindBuffer(m_bufferTarget, 0);
+        if (RenderDiagnostics::enabled()
+            && (m_buffer || m_values[0] != 4 || m_values[1] || m_values[2] || m_values[3])) {
+            RenderDiagnostics::write(QString("gl.transfer-state/0x%1/%2")
+                .arg(quintptr(QOpenGLContext::currentContext()), 0, 16).arg(upload ? "upload" : "read"),
+                QString("inheritedPbo=%1 alignment=%2 rowLength=%3 skipPixels=%4 skipRows=%5 usedRowLength=%6")
+                    .arg(m_buffer).arg(m_values[0]).arg(m_values[1]).arg(m_values[2]).arg(m_values[3]).arg(rowLength), 1000);
+        }
+    }
+    ~PixelTransferScope() {
+        m_gl->glBindBuffer(m_bufferTarget, GLuint(m_buffer));
+        for (int i = 0; i < 4; ++i)
+            m_gl->glPixelStorei(m_states[i], m_values[i]);
+    }
+private:
+    QOpenGLFunctions* m_gl;
+    GLenum m_bufferTarget;
+    GLint m_buffer = 0;
+    GLenum m_states[4];
+    GLint m_values[4];
+};
+
 static const char *kBlitVertSrc =
     "#version 120\n"
     "attribute vec2 a_position;\n"
@@ -76,6 +120,7 @@ QtGlassFlowScene::QtGlassFlowScene(QWidget *parent)
     fmt.setRenderableType(QSurfaceFormat::OpenGL);
     fmt.setProfile(QSurfaceFormat::CompatibilityProfile);
     fmt.setVersion(2, 1);
+    fmt.setAlphaBufferSize(8);
     fmt.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
     // QOpenGLWidget renders into an offscreen texture which is subsequently
     // composed by Qt and DWM. Waiting for another swap interval here creates
@@ -104,6 +149,8 @@ void QtGlassFlowScene::cleanupGL()
 {
     if (!context())
         return;
+    RenderDiagnostics::write("gl.context.destroy", QString("surface=0x%1 context=0x%2 frames=%3")
+        .arg(quintptr(this), 0, 16).arg(quintptr(context()), 0, 16).arg(m_frameRevision));
     disconnect(context(), &QOpenGLContext::aboutToBeDestroyed,
                this, &QtGlassFlowScene::cleanupGL);
     makeCurrent();
@@ -111,6 +158,7 @@ void QtGlassFlowScene::cleanupGL()
     delete m_snapshotFbo;
     m_snapshotFbo = nullptr;
     m_surfaceSnapshot = {};
+    m_frameRevision = 0;
     m_snapshotRevision = 0;
     if (m_bgTexture) {
         glDeleteTextures(1, &m_bgTexture);
@@ -269,6 +317,8 @@ void QtGlassFlowScene::setRenderingSuspended(bool suspended)
     if (m_renderingSuspended == suspended)
         return;
     m_renderingSuspended = suspended;
+    RenderDiagnostics::write(QString("render.suspend/0x%1").arg(quintptr(this), 0, 16),
+        QString("suspended=%1 visible=%2 frame=%3").arg(suspended).arg(isVisible()).arg(m_frameRevision), 1000);
     syncTimerCadence();
     if (!suspended)
         update();
@@ -407,6 +457,20 @@ void QtGlassFlowScene::drawFullscreenQuad(QOpenGLShaderProgram *program)
 void QtGlassFlowScene::initializeGL()
 {
     initializeOpenGLFunctions();
+    if (RenderDiagnostics::enabled()) {
+        const auto string = [this](GLenum name) {
+            const auto* bytes = glGetString(name);
+            return bytes ? QString::fromUtf8(reinterpret_cast<const char*>(bytes)) : QStringLiteral("unavailable");
+        };
+        const QSurfaceFormat actual = context()->format();
+        RenderDiagnostics::write("gl.context.create", QString("surface=0x%1 hwnd=0x%2 context=0x%3 vendor=%4 renderer=%5 GL=%6 GLSL=%7 format=%8.%9 alpha=%10 samples=%11 DPR=%12 renderScale=%13")
+            .arg(quintptr(this), 0, 16).arg(quintptr(effectiveWinId()), 0, 16).arg(quintptr(context()), 0, 16)
+            .arg(string(GL_VENDOR), string(GL_RENDERER), string(GL_VERSION), string(GL_SHADING_LANGUAGE_VERSION))
+            .arg(actual.majorVersion()).arg(actual.minorVersion()).arg(actual.alphaBufferSize())
+            .arg(actual.samples()).arg(devicePixelRatioF()).arg(m_renderScale));
+        m_diagnosticsClock.start();
+        m_diagnosticsFrames = 0;
+    }
     connect(context(), &QOpenGLContext::aboutToBeDestroyed,
             this, &QtGlassFlowScene::cleanupGL, Qt::DirectConnection);
     glDisable(GL_DEPTH_TEST);
@@ -427,6 +491,9 @@ void QtGlassFlowScene::initializeGL()
     compileProgram(m_glassShader, QStringLiteral(":/qtglassflow/shaders/scene_vertex.glsl"),
                    QStringLiteral(":/qtglassflow/shaders/scene_fragment.glsl"));
     m_gpuReady = m_blitShader->isLinked() && m_blurShader->isLinked() && m_glassShader->isLinked();
+    RenderDiagnostics::write("gl.shaders", QString("surface=0x%1 ready=%2 blit=%3 blur=%4 glass=%5")
+        .arg(quintptr(this), 0, 16).arg(m_gpuReady).arg(m_blitShader->isLinked())
+        .arg(m_blurShader->isLinked()).arg(m_glassShader->isLinked()));
     initQuad();
     if (m_gpuReady && (!m_bgPath.isEmpty() || !m_bgImage.isNull()))
         loadBackgroundTexture();
@@ -445,6 +512,22 @@ void QtGlassFlowScene::initializeGL()
     // cause a tight repaint loop on every non-animated widget.
     syncTimerCadence();
     m_clock.start();
+    reportGlErrors("initialize");
+}
+
+void QtGlassFlowScene::reportGlErrors(const char* stage)
+{
+    if (!RenderDiagnostics::enabled())
+        return;
+    for (int index = 0; index < 16; ++index) {
+        const GLenum error = glGetError();
+        if (error == GL_NO_ERROR)
+            break;
+        RenderDiagnostics::write(QString("gl.error/0x%1/%2").arg(quintptr(this), 0, 16).arg(stage),
+            QString("code=0x%1 frame=%2 defaultFbo=%3 size=%4x%5 DPR=%6 scale=%7")
+                .arg(error, 0, 16).arg(m_frameRevision).arg(defaultFramebufferObject())
+                .arg(width()).arg(height()).arg(devicePixelRatioF()).arg(m_renderScale), 1000);
+    }
 }
 
 void QtGlassFlowScene::resizeGL(int w, int h)
@@ -487,6 +570,10 @@ void QtGlassFlowScene::createFBOs(int w, int h)
     m_sceneFbo = new QOpenGLFramebufferObject(w, h, format);
     m_blurPingFbo = new QOpenGLFramebufferObject(w, h, format);
     m_blurPongFbo = new QOpenGLFramebufferObject(w, h, format);
+    RenderDiagnostics::write("gl.fbo.create", QString("surface=0x%1 size=%2x%3 scene=%4 ping=%5 pong=%6 valid=%7/%8/%9")
+        .arg(quintptr(this), 0, 16).arg(w).arg(h).arg(m_sceneFbo->handle())
+        .arg(m_blurPingFbo->handle()).arg(m_blurPongFbo->handle())
+        .arg(m_sceneFbo->isValid()).arg(m_blurPingFbo->isValid()).arg(m_blurPongFbo->isValid()));
     const auto setLinear = [this](QOpenGLFramebufferObject *fbo) {
         glBindTexture(GL_TEXTURE_2D, fbo->texture());
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -499,6 +586,7 @@ void QtGlassFlowScene::createFBOs(int w, int h)
     setLinear(m_blurPingFbo);
     setLinear(m_blurPongFbo);
     m_blurCacheDirty = true;
+    reportGlErrors("fbo-create");
 }
 
 void QtGlassFlowScene::destroyFBOs()
@@ -535,6 +623,16 @@ void QtGlassFlowScene::loadBackgroundTexture()
     } else if (image.format() != QImage::Format_RGBA8888) {
         image = image.convertToFormat(QImage::Format_RGBA8888);
     }
+    // External QImages may have an arbitrary byte stride. Desktop OpenGL's
+    // ROW_LENGTH is measured in pixels, so repack only unrepresentable strides.
+    if (image.bytesPerLine() % 4)
+        image = image.copy();
+    PixelTransferScope transfer(this, true, int(image.bytesPerLine() / 4));
+    GLint activeTexture = 0;
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
+    glActiveTexture(GL_TEXTURE0);
+    GLint textureBinding = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &textureBinding);
     if (!m_bgTexture)
         glGenTextures(1, &m_bgTexture);
     glBindTexture(GL_TEXTURE_2D, m_bgTexture);
@@ -552,7 +650,9 @@ void QtGlassFlowScene::loadBackgroundTexture()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    reportGlErrors("texture-upload");
+    glBindTexture(GL_TEXTURE_2D, GLuint(textureBinding));
+    glActiveTexture(GLenum(activeTexture));
     m_bgWidth = image.width();
     m_bgHeight = image.height();
     m_bgDirty = false;
@@ -819,10 +919,17 @@ void QtGlassFlowScene::updateConnections()
 
 void QtGlassFlowScene::paintGL()
 {
-    // Qt can deliver a paint queued before occlusion even after our timer
-    // stops. Retain the last completed snapshot/revision until resumed.
-    if (m_renderingSuspended)
-        return;
+    // Suspension stops scheduling/capture, not paints requested by Qt. With
+    // NoPartialUpdate Qt may discard the FBO before an expose or DWM recompose;
+    // returning here presents undefined pixels (or a blank transparent card).
+    // Always rebuild a requested frame from the cached backdrop and overlay.
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_SCISSOR_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glActiveTexture(GL_TEXTURE0);
+    glBlendEquation(GL_FUNC_ADD);
     const qreal dpr = devicePixelRatioF();
     const int nativePixelWidth = qMax(1, qRound(width() * dpr));
     const int nativePixelHeight = qMax(1, qRound(height() * dpr));
@@ -855,6 +962,7 @@ void QtGlassFlowScene::paintGL()
             renderGlassObject(i);
     }
     glDisable(GL_BLEND);
+    reportGlErrors("glass-paint");
 
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
@@ -876,7 +984,18 @@ void QtGlassFlowScene::paintGL()
     }
     paintOverlay(painter);
     painter.end();
+    reportGlErrors("overlay-paint");
     ++m_frameRevision;
+    if (RenderDiagnostics::enabled() && m_diagnosticsClock.elapsed() >= 5000) {
+        const qint64 elapsed = m_diagnosticsClock.restart();
+        RenderDiagnostics::write("render.heartbeat", QString("surface=0x%1 hwnd=0x%2 frame=%3 fps=%4 suspended=%5 visible=%6 geometry=%7,%8,%9x%10 DPR=%11 scale=%12 defaultFbo=%13 captureCache=%14 snapshotReads=%15")
+            .arg(quintptr(this), 0, 16).arg(quintptr(effectiveWinId()), 0, 16).arg(m_frameRevision)
+            .arg((m_frameRevision - m_diagnosticsFrames) * 1000.0 / qMax<qint64>(1, elapsed), 0, 'f', 1)
+            .arg(m_renderingSuspended).arg(isVisible()).arg(x()).arg(y()).arg(width()).arg(height())
+            .arg(devicePixelRatioF()).arg(m_renderScale).arg(defaultFramebufferObject())
+            .arg(!m_blurCacheDirty).arg(m_snapshotReadbacks));
+        m_diagnosticsFrames = m_frameRevision;
+    }
     emit frameRendered();
 }
 
@@ -889,7 +1008,16 @@ QImage QtGlassFlowScene::surfaceSnapshot()
 
     QOpenGLContext* previous = QOpenGLContext::currentContext();
     QSurface* previousSurface = previous ? previous->surface() : nullptr;
-    makeCurrent();
+    // QOpenGLWidget::makeCurrent() also binds its default FBO. When already
+    // inside this context, preserve the caller's offscreen target first.
+    if (previous != context())
+        makeCurrent();
+    if (QOpenGLContext::currentContext() != context())
+    {
+        RenderDiagnostics::write("gl.make-current.failed", QString("surface=0x%1 contextValid=%2")
+            .arg(quintptr(this), 0, 16).arg(context() && context()->isValid()), 1000);
+        return m_surfaceSnapshot;
+    }
     const QSize native(qRound(width() * devicePixelRatioF()), qRound(height() * devicePixelRatioF()));
     // The visible framebuffer is already at native device resolution. Never
     // enlarge this snapshot: doing so adds no detail and forces overlapping
@@ -898,8 +1026,13 @@ QImage QtGlassFlowScene::surfaceSnapshot()
     const QSize reduced(qMax(1, qRound(native.width() * qMin(1.0f, m_renderScale))),
                         qMax(1, qRound(native.height() * qMin(1.0f, m_renderScale))));
     QSize readSize = native;
+    const bool canBlit = QOpenGLFramebufferObject::hasOpenGLFramebufferBlit();
+    GLint readFramebuffer = 0, drawFramebuffer = 0;
+    glGetIntegerv(canBlit ? GL_READ_FRAMEBUFFER_BINDING : GL_FRAMEBUFFER_BINDING, &readFramebuffer);
+    if (canBlit)
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFramebuffer);
     glBindFramebuffer(GL_FRAMEBUFFER, defaultFramebufferObject());
-    if (QOpenGLFramebufferObject::hasOpenGLFramebufferBlit()) {
+    if (canBlit) {
         if (!m_snapshotFbo || m_snapshotFbo->size() != reduced) {
             delete m_snapshotFbo;
             m_snapshotFbo = new QOpenGLFramebufferObject(reduced);
@@ -915,8 +1048,18 @@ QImage QtGlassFlowScene::surfaceSnapshot()
         }
     }
     QImage pixels(readSize, QImage::Format_RGBA8888_Premultiplied);
-    glReadPixels(0, 0, readSize.width(), readSize.height(), GL_RGBA, GL_UNSIGNED_BYTE, pixels.bits());
-    glBindFramebuffer(GL_FRAMEBUFFER, defaultFramebufferObject());
+    {
+        PixelTransferScope transfer(this, false);
+        glReadPixels(0, 0, readSize.width(), readSize.height(), GL_RGBA, GL_UNSIGNED_BYTE, pixels.bits());
+        reportGlErrors("snapshot-read");
+    }
+    if (canBlit) {
+        auto* gl = context()->extraFunctions();
+        gl->glBindFramebuffer(GL_READ_FRAMEBUFFER, GLuint(readFramebuffer));
+        gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GLuint(drawFramebuffer));
+    } else {
+        glBindFramebuffer(GL_FRAMEBUFFER, GLuint(readFramebuffer));
+    }
     doneCurrent();
     if (previous && previousSurface)
         previous->makeCurrent(previousSurface);
