@@ -20,7 +20,7 @@
 
 # 鸣谢
 
-液态玻璃渲染已融合到项目的 `src/rendering`，设计基础来自 [QtGlassFlow](https://github.com/SuperSiyer/QtGlassFlow)。
+设计基础来自 [QtGlassFlow](https://github.com/SuperSiyer/QtGlassFlow)。
 
 # 渲染诊断日志
 
