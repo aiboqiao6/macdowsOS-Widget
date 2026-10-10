@@ -1,5 +1,6 @@
 #include "rendering/cleartypetext.h"
 #include "rendering/renderdiagnostics.h"
+#include "rendering/glpixeltransfer.h"
 
 #include <QFontMetricsF>
 #include <QOpenGLContext>
@@ -54,7 +55,7 @@ void Renderer::end()
     m_device = nullptr;
 }
 
-void Renderer::clear()
+void Renderer::clearMasks()
 {
     auto* context = QOpenGLContext::currentContext();
     if (!context)
@@ -67,6 +68,15 @@ void Renderer::clear()
             gl->glDeleteTextures(1, &mask->texture);
     }
     m_masks.clear();
+}
+
+void Renderer::clear()
+{
+    auto* context = QOpenGLContext::currentContext();
+    if (!context)
+        return;
+    clearMasks();
+    auto* gl = context->extraFunctions();
     if (m_vertexBuffer)
         gl->glDeleteBuffers(1, &m_vertexBuffer);
     m_vertexBuffer = 0;
@@ -106,12 +116,7 @@ bool Renderer::paint(QPainter& painter, const QPointF& baseline, const QString& 
             return false;
         if (m_masks.totalCost() + cost > m_masks.maxCost()) {
             // QCache 的自动驱逐不会释放 GL 纹理；先统一清空，保持缓存内存有界。
-            const auto keys = m_masks.keys();
-            for (const auto& cachedKey : keys) {
-                auto* cached = m_masks.object(cachedKey);
-                gl->glDeleteTextures(1, &cached->texture);
-            }
-            m_masks.clear();
+            clearMasks();
         }
         mask = created.release();
         m_masks.insert(key, mask, cost);
@@ -177,29 +182,13 @@ bool Renderer::paint(QPainter& painter, const QPointF& baseline, const QString& 
     if (!mask->texture) {
         gl->glGenTextures(1, &mask->texture);
         gl->glBindTexture(GL_TEXTURE_2D, mask->texture);
-        // Qt 的图像上传可能遗留 PBO、行长度或跳过偏移，不能用于这里的 CPU 指针。
-        GLint unpackBuffer, rowLength, skipRows, skipPixels, alignment;
-        gl->glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpackBuffer);
-        gl->glGetIntegerv(GL_UNPACK_ROW_LENGTH, &rowLength);
-        gl->glGetIntegerv(GL_UNPACK_SKIP_ROWS, &skipRows);
-        gl->glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &skipPixels);
-        gl->glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
-        gl->glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-        gl->glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-        gl->glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
-        gl->glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
-        gl->glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        PixelTransferScope transfer(gl, true);
         gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, mask->pixels.width(), mask->pixels.height(),
                          0, GL_RGBA, GL_UNSIGNED_BYTE, mask->pixels.constBits());
         gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        gl->glPixelStorei(GL_UNPACK_ROW_LENGTH, rowLength);
-        gl->glPixelStorei(GL_UNPACK_SKIP_ROWS, skipRows);
-        gl->glPixelStorei(GL_UNPACK_SKIP_PIXELS, skipPixels);
-        gl->glPixelStorei(GL_UNPACK_ALIGNMENT, alignment);
-        gl->glBindBuffer(GL_PIXEL_UNPACK_BUFFER, unpackBuffer);
     } else {
         gl->glBindTexture(GL_TEXTURE_2D, mask->texture);
     }
@@ -219,7 +208,7 @@ bool Renderer::paint(QPainter& painter, const QPointF& baseline, const QString& 
     gl->glEnable(GL_BLEND);
     gl->glBlendEquation(GL_FUNC_ADD);
     gl->glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-    // 分别混合 RGB 覆盖率，再用最大覆盖率更新 alpha；透明玻璃边缘仍保留正确透明度。
+    // 分别混合 RGB 覆盖率，再用最大覆盖率更新 alpha，保持透明玻璃上的字形覆盖。
     for (int channel = 0; channel < 4; ++channel) {
         gl->glColorMask(channel == 0, channel == 1, channel == 2, channel == 3);
         m_shader->setUniformValue("channel", channel);

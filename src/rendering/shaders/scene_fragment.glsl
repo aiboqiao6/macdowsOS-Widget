@@ -20,25 +20,17 @@ uniform float u_d;
 uniform float u_fPower;
 
 // === 材质参数 ===
-uniform float u_noise;        // 默认极低（0.01），仅用于消除色带
-uniform float u_time;
+uniform float u_noise;        // 按画质限制在一个颜色量化单位内，最高档关闭。
 uniform float u_edgeAaScale;  // 随画质变化的解析边缘覆盖率。
 
-// === Smooth-union 桥接 ===
+// === 平滑并集桥接 ===
 uniform int u_numConnections;
 uniform vec2 u_connCenterB[8];
 uniform vec2 u_connHalfSizeB[8];
 uniform float u_connPowerB[8];
 uniform float u_connStrength[8];
 
-// === 液态玻璃控件 ===
-uniform vec3 u_tintColor;
-uniform float u_tintStrength;
 uniform float u_opacity;
-uniform float u_rippleTime;      // 负一表示无波纹。
-uniform vec2 u_rippleCenter;     // 局部坐标，范围为零到一。
-uniform float u_flowSpeed;       // 零表示无流动。
-uniform float u_deformAmount;    // 零表示无形变。
 
 const float M_E = 2.718281828459045;
 
@@ -122,25 +114,6 @@ void main() {
 
     float dist = -combinedD;
 
-    // === 按压涟漪（仅交互时激活，幅度极柔）===
-    if (u_rippleTime >= 0.0) {
-        float timeSincePress = u_time - u_rippleTime;
-        vec2 rippleVec = localP * 0.5 + 0.5 - u_rippleCenter;
-        float rippleDist = length(rippleVec);
-        float rippleWave = sin(rippleDist * 30.0 - timeSincePress * 8.0)
-                         * exp(-timeSincePress * 3.0)
-                         * exp(-rippleDist * 4.0) * 0.008;
-        dist += rippleWave;
-    }
-
-    // === 悬停流动（仅交互时激活，几乎不可见的微扰）===
-    if (u_flowSpeed > 0.0) {
-        vec2 flowP = localP * 3.0 + u_time * u_flowSpeed * 0.5;
-        float flow = sin(flowP.x * 2.7 + flowP.y * 1.3)
-                   * sin(flowP.y * 3.1 - flowP.x * 0.7) * 0.001 * u_flowSpeed;
-        dist += flow;
-    }
-
     // 仅模糊模式的折射强度为零，直接复用局部坐标，跳过幂函数。
     vec2 sampleP = u_fPower == 0.0
                  ? localP
@@ -162,10 +135,7 @@ void main() {
     float domeLight = mix(0.93, 1.07, convex);
     color.rgb *= domeLight;
 
-    // 3. 玻璃色调柔和混合（保留底层亮度结构）
-    color.rgb = mix(color.rgb, u_tintColor * (0.5 + 0.5 * color.rgb), u_tintStrength);
-
-    // 4. 极细白色边框线（约 0.5–1 px 边缘反光）
+    // 3. 极细白色边框线（约 0.5–1 px 边缘反光）
     float fw = max(edgeWidth, 0.0003);
     // 边缘覆盖率随画质调整，但光学描边维持约一个原生像素。
     float borderFw = clamp(fwidth(combinedD), 0.0003, 0.003);
@@ -173,7 +143,7 @@ void main() {
     // 方向性高光由共享覆盖层提供，此处仅保留柔和提亮，避免形成重复亮边。
     color.rgb += vec3(1.0) * borderLine * 0.12;
 
-    // 5. 干净锐利的 alpha 抗锯齿
+    // 4. 干净锐利的 alpha 抗锯齿
     float alpha = smoothstep(-fw, fw, dist);
     color.a = alpha * u_opacity;
 

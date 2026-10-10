@@ -1,5 +1,5 @@
 #include "widgets/musiccard.h"
-#include "widgets/desktopwidget.h"
+#include "app/fontsettings.h"
 #include "rendering/responsivelayout.h"
 #include <QPainter>
 #include <QPainterPath>
@@ -60,10 +60,10 @@ void paint(QPainter& painter, const QRectF& bounds, const MediaSnapshot& media)
     painter.restore();
     const auto text = [&](const QRectF& area, const QString& value, qreal ratio,
                           const QColor& color, QFont::Weight weight = QFont::Normal) {
-        QFont font(DesktopWidget::pingFangFontFamily());
+        QFont font(AppFonts::family());
         font.setPixelSize(qMax(1, qRound(metrics.size(ratio))));
         font.setWeight(weight);
-        DesktopWidget::applyFontSmoothing(font);
+        AppFonts::applySmoothing(font);
         painter.setFont(font);
         painter.setPen(color);
         ResponsiveLayout::drawSingleLine(painter, area, Qt::AlignLeft | Qt::AlignVCenter,

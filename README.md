@@ -29,21 +29,30 @@
 
 | 目录或文件 | 职责 |
 | --- | --- |
-| `src/app` | 启动、单实例管理、配置迁移与合并写入 |
-| `src/widgets/desktopwidget.cpp` | 独立卡片生命周期、托盘、桌面放置、保存与恢复 |
-| `src/widgets/desktopwidget_paint.cpp` | 电量、天气、时钟、词典的内容绘制 |
-| `src/widgets/desktopwidget_data.cpp` | 天气、词典请求、回复解析和地区搜索 |
+| `src/app` | 启动、配置管理、统一字体注册与抗锯齿策略 |
+| `src/widgets/desktopwidget.cpp` | 卡片生命周期、数据服务连接与全局显示设置同步 |
+| `src/widgets/desktopwidget_placement.cpp` | 桌面放置、网格与自由吸附 |
+| `src/widgets/desktopwidget_storage.cpp` | 布局保存、迁移与恢复 |
+| `src/widgets/desktopwidget_tray.cpp` / `desktopwidget_interaction.cpp` | 托盘与卡片交互分别实现 |
+| `src/widgets/desktopwidget_preview.cpp` / `desktopwidget_paint.cpp` | 预览图像生成、内容绘制分派 |
+| `src/widgets/cards` | 电量、天气、时钟和词典各自的绘制实现 |
+| `src/widgets/data` | 天气与词典各自的请求调度和回复解析 |
+| `src/widgets/desktopwidget_power.cpp` | 电量轮询与共享外设任务的结果交付 |
 | `src/widgets/desktopwidget_settings.cpp` | 全局设置、自启动和关于窗口 |
-| `src/widgets/cardmetrics.h` | 共用参考尺寸与布局比例 |
+| `src/widgets/widgetgeometry.*` / `cardmetrics.h` | 共用变体、尺寸、网格换算与布局比例 |
 | `src/widgets/musiccard.*` | 音乐卡片布局、绘制和按钮命中区域 |
+| `src/platform/powerdevices.*` | Windows 电源状态、设备发现与蓝牙查询 |
+| `src/network/cardrequest.*` | 共用请求头、传输超时与请求总时限 |
 | `src/media/systemmediasession.*` | 共享系统媒体快照、后台轮询与播放控制 |
-| `src/ui` | 启动向导、共用缩放选择器、图库与菜单 |
+| `src/ui` | 启动向导、缩放选择器、城市搜索、放置提示、图库与菜单 |
 | `src/rendering` | 玻璃管线、背景捕获、窗口层级、字体覆盖率与诊断 |
 | `tests` | 功能、渲染、DPI、生命周期与中文注释审查 |
 
 原 `BatteryWidget` 已改名为 `DesktopWidget`，反映多种独立卡片的实际职责。配置中的类型名与已有布局保持兼容，新增音乐类型保存为 `music`。
 
 媒体会话操作在串行工作线程中执行，不阻塞界面。结果通过 Qt 回调交付；图库和桌面共用一个媒体服务，状态未变化时不触发重绘。GL 字体纹理随所属上下文释放，图像缓存有内存上限。
+
+ClearType 保留逐通道覆盖率混合，字体与背景处理共用像素传输状态保护。大高斯核按实际采样数编译并缓存最多四个程序变体，编译失败时使用原始完整采样程序；各档位 FBO 分辨率、高斯核、采样密度、迭代次数及折射效果保持不变。模糊通道共用顶点绑定和视口，背景纹理复用原有存储与过滤设置。像素上传与回读共用状态保护，外设快照相同时跳过重绘。验证记录见 [代码清理与渲染优化记录](tests/cleanup-performance-2026-10-11.md)。
 
 ```mermaid
 flowchart LR

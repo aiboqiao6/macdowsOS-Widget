@@ -2,6 +2,7 @@
 
 #include "qtglassflowscene.h"
 #include "renderdiagnostics.h"
+#include "rendering/glpixeltransfer.h"
 
 #include <QFile>
 #include <QImage>
@@ -11,7 +12,6 @@
 #include <QHideEvent>
 #include <QTimer>
 #include <QVector2D>
-#include <QVector3D>
 #include <QtMath>
 #include <QDebug>
 #include <QOpenGLContext>
@@ -20,46 +20,6 @@
 #include <cmath>
 
 namespace {
-// 保护像素传输状态，防止 CPU 指针被当作 PBO 偏移，或把图像行填充误读为像素。
-class PixelTransferScope final {
-public:
-    PixelTransferScope(QOpenGLFunctions* gl, bool upload, int rowLength = 0)
-        : m_gl(gl), m_bufferTarget(upload ? GL_PIXEL_UNPACK_BUFFER : GL_PIXEL_PACK_BUFFER) {
-        const GLenum states[] = {
-            GLenum(upload ? GL_UNPACK_ALIGNMENT : GL_PACK_ALIGNMENT),
-            GLenum(upload ? GL_UNPACK_ROW_LENGTH : GL_PACK_ROW_LENGTH),
-            GLenum(upload ? GL_UNPACK_SKIP_PIXELS : GL_PACK_SKIP_PIXELS),
-            GLenum(upload ? GL_UNPACK_SKIP_ROWS : GL_PACK_SKIP_ROWS)
-        };
-        for (int i = 0; i < 4; ++i) {
-            m_states[i] = states[i];
-            m_gl->glGetIntegerv(m_states[i], &m_values[i]);
-            m_gl->glPixelStorei(m_states[i], i == 0 ? 4 : (i == 1 ? rowLength : 0));
-        }
-        m_gl->glGetIntegerv(upload ? GL_PIXEL_UNPACK_BUFFER_BINDING : GL_PIXEL_PACK_BUFFER_BINDING,
-                           &m_buffer);
-        m_gl->glBindBuffer(m_bufferTarget, 0);
-        if (RenderDiagnostics::enabled()
-            && (m_buffer || m_values[0] != 4 || m_values[1] || m_values[2] || m_values[3])) {
-            RenderDiagnostics::write(QString("gl.transfer-state/0x%1/%2")
-                .arg(quintptr(QOpenGLContext::currentContext()), 0, 16).arg(upload ? "upload" : "read"),
-                QString("inheritedPbo=%1 alignment=%2 rowLength=%3 skipPixels=%4 skipRows=%5 usedRowLength=%6")
-                    .arg(m_buffer).arg(m_values[0]).arg(m_values[1]).arg(m_values[2]).arg(m_values[3]).arg(rowLength), 1000);
-        }
-    }
-    ~PixelTransferScope() {
-        m_gl->glBindBuffer(m_bufferTarget, GLuint(m_buffer));
-        for (int i = 0; i < 4; ++i)
-            m_gl->glPixelStorei(m_states[i], m_values[i]);
-    }
-private:
-    QOpenGLFunctions* m_gl;
-    GLenum m_bufferTarget;
-    GLint m_buffer = 0;
-    GLenum m_states[4];
-    GLint m_values[4];
-};
-
 static const char *kBlitVertSrc =
     "#version 120\n"
     "attribute vec2 a_position;\n"
@@ -152,6 +112,9 @@ void QtGlassFlowScene::cleanupGL()
         m_bgTexture = 0;
     }
     delete m_blitShader;
+    m_blurPrograms.clear();
+    m_failedBlurPrograms.clear();
+    m_uploadedKernelProgram = nullptr;
     delete m_blurShader;
     delete m_glassShader;
     m_blitShader = nullptr;
@@ -420,7 +383,7 @@ void QtGlassFlowScene::initQuad()
     m_quadInitialized = true;
 }
 
-void QtGlassFlowScene::drawFullscreenQuad(QOpenGLShaderProgram *program)
+void QtGlassFlowScene::bindFullscreenQuad(QOpenGLShaderProgram *program)
 {
     m_quadVbo.bind();
     constexpr int stride = 4 * sizeof(float);
@@ -428,10 +391,51 @@ void QtGlassFlowScene::drawFullscreenQuad(QOpenGLShaderProgram *program)
     program->enableAttributeArray(1);
     program->setAttributeBuffer(0, GL_FLOAT, 0, 2, stride);
     program->setAttributeBuffer(1, GL_FLOAT, 2 * sizeof(float), 2, stride);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
+}
+
+void QtGlassFlowScene::releaseFullscreenQuad(QOpenGLShaderProgram* program)
+{
     program->disableAttributeArray(0);
     program->disableAttributeArray(1);
     m_quadVbo.release();
+}
+
+void QtGlassFlowScene::drawFullscreenQuad(QOpenGLShaderProgram* program)
+{
+    bindFullscreenQuad(program);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    releaseFullscreenQuad(program);
+}
+
+QOpenGLShaderProgram* QtGlassFlowScene::blurProgram(int sampleCount)
+{
+    // 小核沿用通用程序，固定采样变体用于有实测收益的较大高斯核。
+    if (sampleCount < 16)
+        return m_blurShader;
+    if (auto* cached = m_blurPrograms.object(sampleCount))
+        return cached;
+    if (m_failedBlurPrograms.contains(sampleCount))
+        return m_blurShader;
+    QFile fragmentFile(QStringLiteral(":/qtglassflow/shaders/blur_fragment.glsl"));
+    if (!fragmentFile.open(QIODevice::ReadOnly))
+        return m_blurShader;
+    QByteArray fragment = fragmentFile.readAll();
+    fragment.replace("#version 120", "#version 120\n#define BLUR_SAMPLE_COUNT " + QByteArray::number(sampleCount));
+    auto* program = new QOpenGLShaderProgram;
+    const bool compiled = program->addShaderFromSourceFile(QOpenGLShader::Vertex,
+        QStringLiteral(":/qtglassflow/shaders/blur_vertex.glsl"))
+        && program->addShaderFromSourceCode(QOpenGLShader::Fragment, fragment);
+    program->bindAttributeLocation("a_position", 0);
+    program->bindAttributeLocation("a_texcoord", 1);
+    if (!compiled || !program->link()) {
+        // 旧驱动不接受固定循环变体时继续使用原始程序，不改变画质参数。
+        RenderDiagnostics::write("gl.blur-specialization.failed", program->log(), 10000);
+        m_failedBlurPrograms.insert(sampleCount);
+        delete program;
+        return m_blurShader;
+    }
+    m_blurPrograms.insert(sampleCount, program);
+    return program;
 }
 
 void QtGlassFlowScene::initializeGL()
@@ -488,7 +492,6 @@ void QtGlassFlowScene::initializeGL()
     }
     // 由 syncTimerCadence 统一管理定时器，避免静态组件意外以零间隔循环重绘。
     syncTimerCadence();
-    m_clock.start();
     reportGlErrors("initialize");
 }
 
@@ -611,10 +614,12 @@ void QtGlassFlowScene::loadBackgroundTexture()
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.width(), image.height(), 0,
                      uploadFormat, uploadType, image.constBits());
     }
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    if (!sameSize) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
     reportGlErrors("texture-upload");
     glBindTexture(GL_TEXTURE_2D, GLuint(textureBinding));
     glActiveTexture(GLenum(activeTexture));
@@ -651,8 +656,6 @@ void QtGlassFlowScene::runBlurPass()
 {
     if (!m_sceneFbo || !m_blurPingFbo || !m_blurPongFbo)
         return;
-    m_blurShader->bind();
-    m_blurShader->setUniformValue("u_resolution", QVector2D(float(m_sceneFbo->width()), float(m_sceneFbo->height())));
     // 高画质逐像素覆盖高斯核，并利用线性过滤合并相邻采样；低画质降低密度与 FBO 分辨率。
     const float sigma = qBound(0.01f, m_blurRadius * m_renderScale * 1.95f, 42.0f);
     const int stride = m_renderScale < .7f ? 4 : m_renderScale < .9f ? 3
@@ -678,46 +681,43 @@ void QtGlassFlowScene::runBlurPass()
             sample.setY(sample.y() / total);
         m_blurKernelCenterWeight = 1.0f / total;
     }
-    m_blurShader->setUniformValue("u_centerWeight", m_blurKernelCenterWeight);
-    m_blurShader->setUniformValue("u_sampleCount", int(m_blurKernelSamples.size()));
-    if (!m_blurKernelSamples.isEmpty())
-        m_blurShader->setUniformValueArray("u_samples", m_blurKernelSamples.constData(),
-                                           int(m_blurKernelSamples.size()));
-    m_blurShader->setUniformValue("u_texture", 0);
+    auto* program = blurProgram(int(m_blurKernelSamples.size()));
+    program->bind();
+    program->setUniformValue("u_resolution", QVector2D(float(m_sceneFbo->width()), float(m_sceneFbo->height())));
+    // 连续背景帧只更换纹理内容；核参数未变化时不重复向驱动提交权重表。
+    if (m_uploadedKernelProgram != program || m_uploadedKernelSigma != m_blurKernelSigma
+        || m_uploadedKernelStride != m_blurKernelStride) {
+        program->setUniformValue("u_centerWeight", m_blurKernelCenterWeight);
+        program->setUniformValue("u_sampleCount", int(m_blurKernelSamples.size()));
+        if (!m_blurKernelSamples.isEmpty())
+            program->setUniformValueArray("u_samples", m_blurKernelSamples.constData(),
+                                         int(m_blurKernelSamples.size()));
+        m_uploadedKernelProgram = program;
+        m_uploadedKernelSigma = m_blurKernelSigma;
+        m_uploadedKernelStride = m_blurKernelStride;
+    }
+    program->setUniformValue("u_texture", 0);
     glActiveTexture(GL_TEXTURE0);
     glDisable(GL_BLEND);
+    bindFullscreenQuad(program);
+    // 同尺寸的水平、垂直通道共用视口和顶点绑定，目标 FBO 直接切换。
+    glViewport(0, 0, m_sceneFbo->width(), m_sceneFbo->height());
     GLuint source = m_sceneFbo->texture();
     for (int i = 0; i < m_blurIterations; ++i) {
         m_blurPingFbo->bind();
-        glViewport(0, 0, m_blurPingFbo->width(), m_blurPingFbo->height());
         glBindTexture(GL_TEXTURE_2D, source);
-        m_blurShader->setUniformValue("u_direction", QVector2D(1, 0));
-        drawFullscreenQuad(m_blurShader);
-        m_blurPingFbo->release();
+        program->setUniformValue("u_direction", QVector2D(1, 0));
+        glDrawArrays(GL_TRIANGLES, 0, 6);
 
         m_blurPongFbo->bind();
-        glViewport(0, 0, m_blurPongFbo->width(), m_blurPongFbo->height());
         glBindTexture(GL_TEXTURE_2D, m_blurPingFbo->texture());
-        m_blurShader->setUniformValue("u_direction", QVector2D(0, 1));
-        drawFullscreenQuad(m_blurShader);
-        m_blurPongFbo->release();
+        program->setUniformValue("u_direction", QVector2D(0, 1));
+        glDrawArrays(GL_TRIANGLES, 0, 6);
         source = m_blurPongFbo->texture();
     }
     glBindTexture(GL_TEXTURE_2D, 0);
-    m_blurShader->release();
-}
-
-void QtGlassFlowScene::blitTextureToScreen(GLuint texture)
-{
-    glDisable(GL_BLEND);
-    m_blitShader->bind();
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, texture);
-    m_blitShader->setUniformValue("u_texture", 0);
-    m_blitShader->setUniformValue("u_flipY", false);
-    drawFullscreenQuad(m_blitShader);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    m_blitShader->release();
+    releaseFullscreenQuad(program);
+    program->release();
 }
 
 QPointF QtGlassFlowScene::widgetToNdc(const QPointF &point) const
@@ -794,14 +794,7 @@ void QtGlassFlowScene::renderGlassObject(int index)
     m_glassShader->setUniformValue("u_noise", dither);
     m_glassShader->setUniformValue("u_edgeAaScale",
                                    qBound(0.85f, 0.65f + m_renderScale * 0.45f, 1.30f));
-    m_glassShader->setUniformValue("u_time", float(m_clock.elapsed()) * .001f);
-    m_glassShader->setUniformValue("u_tintColor", QVector3D(0, 0, 0));
-    m_glassShader->setUniformValue("u_tintStrength", 0.0f);
     m_glassShader->setUniformValue("u_opacity", m_glassOpacity);
-    m_glassShader->setUniformValue("u_rippleTime", -1.0f);
-    m_glassShader->setUniformValue("u_rippleCenter", QVector2D(.5f, .5f));
-    m_glassShader->setUniformValue("u_flowSpeed", 0.0f);
-    m_glassShader->setUniformValue("u_deformAmount", 0.0f);
 
     QVector<QVector2D> centers, halves;
     QVector<float> powers, strengths;

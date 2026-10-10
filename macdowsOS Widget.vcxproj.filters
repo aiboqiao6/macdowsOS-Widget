@@ -1,6 +1,31 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
+    <ClCompile Include="src/widgets/desktopwidget_interaction.cpp"><Filter>src\widgets</Filter></ClCompile>
+    <ClCompile Include="src/widgets/desktopwidget_preview.cpp"><Filter>src\widgets</Filter></ClCompile>
+    <ClCompile Include="src/widgets/desktopwidget_storage.cpp"><Filter>src\widgets</Filter></ClCompile>
+    <ClCompile Include="src/widgets/desktopwidget_placement.cpp"><Filter>src\widgets</Filter></ClCompile>
+    <ClCompile Include="src/widgets/desktopwidget_tray.cpp"><Filter>src\widgets</Filter></ClCompile>
+    <ClInclude Include="src/widgets/widgetgeometry.h"><Filter>src\widgets</Filter></ClInclude>
+    <ClCompile Include="src/widgets/widgetgeometry.cpp"><Filter>src\widgets</Filter></ClCompile>
+    <ClInclude Include="src/ui/gridplacementoverlay.h"><Filter>src\ui</Filter></ClInclude>
+    <ClCompile Include="src/ui/gridplacementoverlay.cpp"><Filter>src\ui</Filter></ClCompile>
+    <ClInclude Include="src/rendering/glpixeltransfer.h"><Filter>src\rendering</Filter></ClInclude>
+    <ClCompile Include="src/network/cardrequest.cpp"><Filter>src\network</Filter></ClCompile>
+    <ClInclude Include="src/network/cardrequest.h"><Filter>src\network</Filter></ClInclude>
+    <ClCompile Include="src/widgets/data/dictionarydata.cpp"><Filter>src\widgets\data</Filter></ClCompile>
+    <ClCompile Include="src/widgets/data/weatherdata.cpp"><Filter>src\widgets\data</Filter></ClCompile>
+    <ClCompile Include="src/ui/weathercitydialog.cpp"><Filter>src\ui</Filter></ClCompile>
+    <ClInclude Include="src/ui/weathercitydialog.h"><Filter>src\ui</Filter></ClInclude>
+    <ClCompile Include="src/platform/powerdevices.cpp"><Filter>src\platform</Filter></ClCompile>
+    <ClInclude Include="src/platform/powerdevices.h"><Filter>src\platform</Filter></ClInclude>
+    <ClCompile Include="src/widgets/desktopwidget_power.cpp"><Filter>src\widgets</Filter></ClCompile>
+    <ClCompile Include="src/app/fontsettings.cpp"><Filter>src\app</Filter></ClCompile>
+    <ClInclude Include="src/app/fontsettings.h"><Filter>src\app</Filter></ClInclude>
+    <ClCompile Include="src/widgets/cards/dictionarycard.cpp"><Filter>src\widgets\cards</Filter></ClCompile>
+    <ClCompile Include="src/widgets/cards/clockcard.cpp"><Filter>src\widgets\cards</Filter></ClCompile>
+    <ClCompile Include="src/widgets/cards/weathercard.cpp"><Filter>src\widgets\cards</Filter></ClCompile>
+    <ClCompile Include="src/widgets/cards/batterycard.cpp"><Filter>src\widgets\cards</Filter></ClCompile>
     <Filter Include="docs" />
     <Filter Include="src" />
     <Filter Include="src\app" />
@@ -9,6 +34,10 @@
     <Filter Include="src\ui" />
     <Filter Include="src\widgets" />
     <Filter Include="src\media" />
+    <Filter Include="src\platform" />
+    <Filter Include="src\network" />
+    <Filter Include="src\widgets\cards" />
+    <Filter Include="src\widgets\data" />
     <Filter Include="resources" />
   </ItemGroup>
   <ItemGroup>
@@ -21,7 +50,6 @@
     <ClInclude Include="src/rendering/cleartypetext.h"><Filter>src\rendering</Filter></ClInclude>
     <QtMoc Include="src/media/systemmediasession.h"><Filter>src\media</Filter></QtMoc>
     <ClCompile Include="src/widgets/desktopwidget_paint.cpp"><Filter>src\widgets</Filter></ClCompile>
-    <ClCompile Include="src/widgets/desktopwidget_data.cpp"><Filter>src\widgets</Filter></ClCompile>
     <ClCompile Include="src/widgets/desktopwidget_settings.cpp"><Filter>src\widgets</Filter></ClCompile>
     <ClInclude Include="src/widgets/cardmetrics.h"><Filter>src\widgets</Filter></ClInclude>
     <ClInclude Include="src/widgets/weatherformat.h"><Filter>src\widgets</Filter></ClInclude>

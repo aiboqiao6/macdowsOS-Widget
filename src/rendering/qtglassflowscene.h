@@ -9,6 +9,8 @@
 #include <QOpenGLBuffer>
 #include <QOpenGLFramebufferObject>
 #include <QVector>
+#include <QCache>
+#include <QSet>
 #include <QPointF>
 #include <QSizeF>
 #include <QString>
@@ -117,13 +119,15 @@ private:
     void initQuad();
     void cleanupGL();
     void reportGlErrors(const char* stage);
+    void bindFullscreenQuad(QOpenGLShaderProgram* program);
+    void releaseFullscreenQuad(QOpenGLShaderProgram* program);
     void drawFullscreenQuad(QOpenGLShaderProgram *prog);
+    QOpenGLShaderProgram* blurProgram(int sampleCount);
     void createFBOs(int w, int h);
     void destroyFBOs();
     void loadBackgroundTexture();
     void renderBackgroundToFbo();
     void runBlurPass();
-    void blitTextureToScreen(GLuint tex);
     void renderGlassObject(int index);
     void updateConnections();
     void syncTimerCadence();
@@ -138,6 +142,9 @@ private:
     QOpenGLFramebufferObject *m_blurPongFbo;
     QOpenGLShaderProgram *m_blitShader;
     QOpenGLShaderProgram *m_blurShader;
+    // 按采样数缓存最多四个程序，必须在所属上下文中清空。
+    QCache<int, QOpenGLShaderProgram> m_blurPrograms{4};
+    QSet<int> m_failedBlurPrograms;
     QOpenGLShaderProgram *m_glassShader;
     QOpenGLBuffer m_quadVbo;
     bool m_quadInitialized;
@@ -180,6 +187,9 @@ private:
     int m_blurKernelStride = 0;
     QVector<QVector2D> m_blurKernelSamples;
     float m_blurKernelCenterWeight = 1.0f;
+    QOpenGLShaderProgram* m_uploadedKernelProgram = nullptr;
+    float m_uploadedKernelSigma = -1.0f;
+    int m_uploadedKernelStride = 0;
 
     QTimer *m_timer;
     int m_refreshInterval;
@@ -187,7 +197,6 @@ private:
     bool m_animationEnabled;
     bool m_continuousRendering = false;
     bool m_renderingSuspended = false;
-    QElapsedTimer m_clock;
     QElapsedTimer m_diagnosticsClock;
     quint64 m_diagnosticsFrames = 0;
     int m_hoveredIndex;

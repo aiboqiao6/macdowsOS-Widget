@@ -44,3 +44,20 @@ python -X utf8 tests\review_comments.py
 - `systemMediaReadsAndControlsOwnSession` 创建测试专用 Windows 媒体会话，验证标题、艺术家、时间线、暂停与切歌；不播放音频，不控制用户已有会话。系统没有发布测试会话或选择其他播放源时跳过该用例。
 
 可通过 `QT_SCREEN_SCALE_FACTORS` 为独立测试进程指定 1、1.25、1.5、1.75、2 等 DPR，检查不同像素密度。必须对照测试输出确认实际 DPR；部分 Qt 配置对数值 1 沿用系统缩放，此时可用 `QT_SCALE_FACTOR` 校准。两个变量都只影响测试进程，不修改 Windows 显示设置。此次验证记录见 [review-2026-10-11.md](review-2026-10-11.md)。
+
+`specializedBlurMatchesFallbackAndBoundsCache` 在五档画质、四种模糊半径下比较固定采样程序与回退程序的全部像素，并检查程序缓存上限和上下文资源释放。它随完整回归运行。
+
+`renderingPipelineParityAndTiming` 是手动基准，不设置输出路径时跳过。测量原生帧缓冲中的玻璃、每帧更新模糊缓存、八段彩色半透明文字三种情况；每帧等待 GPU 完成，预热十帧后记录四十八帧的中位数和 P95。使用相同机器、DPR、构建配置对照两个版本，并交替重复运行，减少驱动预热和系统负载影响。
+
+```bat
+set WIDGET_PIPELINE_OUTPUT=artifacts\pipeline-before
+release\widget_regression.exe renderingPipelineParityAndTiming -o pipeline-before.txt,txt
+rem 使用修改前构建生成基线，再构建修改后版本执行以下命令。
+set WIDGET_PIPELINE_BASELINE=artifacts\pipeline-before
+set WIDGET_PIPELINE_OUTPUT=artifacts\pipeline-after
+release\widget_regression.exe renderingPipelineParityAndTiming -o pipeline-after.txt,txt
+set WIDGET_PIPELINE_OUTPUT=
+set WIDGET_PIPELINE_BASELINE=
+```
+
+画质比较覆盖 0.60、0.80、1.00、1.25、1.50 五档；玻璃、模糊和文字路径均要求逐像素零差异。图像保存在指定目录，可直接用于修改前后视觉检查。结果记录见 [cleanup-performance-2026-10-11.md](cleanup-performance-2026-10-11.md)。

@@ -2,6 +2,7 @@
 
 #include "rendering/liquidglasswidget.h"
 #include "rendering/nativewindows.h"
+#include "platform/powerdevices.h"
 
 #include <QPoint>
 #include <QString>
@@ -78,11 +79,7 @@ protected:
 
 private:
     friend class WidgetRegression;
-    struct ConnectedDevice {
-        QString name;
-        int level = -1;       // 负一表示系统未提供电量。
-        int iconKind = 4;     // 图标类型：1 鼠标，2 键盘，3 音频，4 通用设备。
-    };
+    using ConnectedDevice = PowerDevices::Device;
     struct WeatherHour {
         QString time;
         QString temperature;
@@ -99,9 +96,12 @@ private:
         bool night = false;
     };
 
+    void paintBatteryCard(QPainter& painter, const QRectF& card) const;
+    void paintWeatherCard(QPainter& painter, const QRectF& card) const;
+    void paintClockCard(QPainter& painter, const QRectF& card) const;
+    void paintDictionaryCard(QPainter& painter, const QRectF& card) const;
     void refreshBattery();
     void refreshConnectedDevices();
-    static QVector<ConnectedDevice> queryConnectedDevices();
     void drawBatteryIcon(QPainter& painter, const QRectF& rect, int level, bool charging) const;
     void drawDeviceRing(QPainter& painter, const QPointF& center, qreal radius,
                          int level, int iconKind, bool connected,

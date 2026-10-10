@@ -207,6 +207,28 @@ public:
     }
 };
 
+// 固定内容用于跨版本逐像素比较，避免系统捕获、网络和时钟影响测量。
+class PipelineProbe : public QtGlassFlowScene {
+public:
+    bool withText = false;
+    void paintOverlay(QPainter& painter) override {
+        if (!withText)
+            return;
+        QFont font(DesktopWidget::pingFangFontFamily());
+        font.setPixelSize(22);
+        DesktopWidget::applyFontSmoothing(font);
+        painter.setFont(font);
+        for (int row = 0; row < 8; ++row) {
+            painter.setPen(QColor(245 - row * 17, 150 + row * 10, 220, 255 - row * 18));
+            painter.setOpacity(1.0 - row * .07);
+            ResponsiveLayout::drawSingleLine(painter, QRectF(20, 12 + row * 32, 330, 30),
+                Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("清晰音乐 Aa 123 — %1").arg(row));
+        }
+        painter.setOpacity(1);
+        painter.fillRect(QRectF(30, 280, 200, 8), Qt::red);
+    }
+};
+
 static void mouse(QWidget& widget, QEvent::Type type, QPoint local, QPoint global,
                   Qt::MouseButton button, Qt::MouseButtons buttons)
 {
@@ -270,6 +292,113 @@ class WidgetRegression : public QObject {
     Q_OBJECT
     QTemporaryDir settings;
 private slots:
+    void specializedBlurMatchesFallbackAndBoundsCache() {
+        PipelineProbe scene;
+        scene.resize(240, 180);
+        scene.setNoiseAmount(0);
+        scene.addGlassObject(QPointF(0, 0), QSizeF(240, 180));
+        scene.setGlassObjectCornerRadius(0, 24);
+        QImage pattern(360, 270, QImage::Format_RGB32);
+        for (int y = 0; y < pattern.height(); ++y)
+            for (int x = 0; x < pattern.width(); ++x)
+                pattern.setPixel(x, y, qRgb((x * 13) % 256, (y * 7) % 256, (x * y) % 256));
+        scene.setBackgroundImage(pattern);
+        scene.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&scene));
+        for (float quality : {.6f, .8f, 1.f, 1.25f, 1.5f}) {
+            scene.setRenderScale(quality);
+            for (float radius : {0.f, 2.f, 8.f, 30.f}) {
+                scene.setBlurRadius(radius);
+                const QImage specialized = scene.grabFramebuffer();
+                const int count = int(scene.m_blurKernelSamples.size());
+                QCOMPARE(bool(scene.m_blurPrograms.object(count)), count >= 16);
+                QVERIFY(scene.m_blurPrograms.size() <= 4);
+                scene.makeCurrent();
+                scene.m_blurPrograms.remove(count);
+                scene.m_uploadedKernelProgram = nullptr;
+                // 模拟驱动拒绝变体编译，确认完整高斯采样的回退路径保持画面。
+                scene.m_failedBlurPrograms.insert(count);
+                scene.m_blurCacheDirty = true;
+                scene.doneCurrent();
+                const QImage fallback = scene.grabFramebuffer();
+                QCOMPARE(specialized, fallback);
+                QVERIFY(!scene.m_blurPrograms.object(count));
+                scene.m_failedBlurPrograms.remove(count);
+            }
+        }
+        scene.hide();
+        scene.makeCurrent();
+        scene.cleanupGL();
+        QVERIFY(scene.m_blurPrograms.isEmpty());
+        QVERIFY(scene.m_failedBlurPrograms.isEmpty());
+    }
+
+    void renderingPipelineParityAndTiming() {
+        const QString output = qEnvironmentVariable("WIDGET_PIPELINE_OUTPUT");
+        if (output.isEmpty())
+            QSKIP("Set WIDGET_PIPELINE_OUTPUT to capture a rendering baseline or comparison");
+        QVERIFY(QDir().mkpath(output));
+        PipelineProbe scene;
+        scene.resize(400, 310);
+        scene.setNoiseAmount(0);
+        scene.setBlurRadius(8);
+        scene.addGlassObject(QPointF(0, 0), QSizeF(400, 310));
+        scene.setGlassObjectCornerRadius(0, 34);
+        QImage background(600, 465, QImage::Format_RGB32);
+        for (int y = 0; y < background.height(); ++y)
+            for (int x = 0; x < background.width(); ++x)
+                background.setPixel(x, y, qRgb((x * 7 + y) % 256, (y * 3) % 256, (x + y * 5) % 256));
+        scene.setBackgroundImage(background);
+        scene.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&scene));
+        for (float quality : {.6f, .8f, 1.f, 1.25f, 1.5f}) {
+            scene.setRenderScale(quality);
+            for (int mode = 0; mode < 3; ++mode) {
+                scene.withText = mode == 2;
+                const QString name = QStringLiteral("pipeline-%1-%2").arg(quality).arg(mode);
+                scene.makeCurrent();
+                auto* gl = scene.context()->extraFunctions();
+                QList<double> durations;
+                // 每次完成 GPU 工作再计时；模式一强制背景变化，其他模式复用模糊缓存。
+                for (int frame = 0; frame < 58; ++frame) {
+                    if (mode == 1)
+                        scene.m_blurCacheDirty = true;
+                    QElapsedTimer timer;
+                    timer.start();
+                    scene.paintGL();
+                    gl->glFinish();
+                    if (frame >= 10)
+                        durations.append(timer.nsecsElapsed() / 1e6);
+                }
+                scene.doneCurrent();
+                std::sort(durations.begin(), durations.end());
+                qInfo() << name << "DPR" << scene.devicePixelRatioF()
+                        << "median_ms" << durations[durations.size() / 2]
+                        << "p95_ms" << durations[qFloor(durations.size() * .95)];
+                const QImage frame = scene.grabFramebuffer().convertToFormat(QImage::Format_RGBA8888);
+                QVERIFY(frame.save(output + '/' + name + ".png"));
+                const QString baselinePath = qEnvironmentVariable("WIDGET_PIPELINE_BASELINE");
+                if (!baselinePath.isEmpty()) {
+                    const QImage baseline = QImage(baselinePath + '/' + name + ".png")
+                        .convertToFormat(QImage::Format_RGBA8888);
+                    QCOMPARE(frame.size(), baseline.size());
+                    int maxDelta = 0;
+                    qint64 totalDelta = 0;
+                    for (int y = 0; y < frame.height(); ++y)
+                        for (int x = 0; x < frame.width() * 4; ++x) {
+                            const int delta = qAbs(int(frame.constScanLine(y)[x]) - baseline.constScanLine(y)[x]);
+                            maxDelta = qMax(maxDelta, delta);
+                            totalDelta += delta;
+                        }
+                    qInfo() << name << "max_channel_delta" << maxDelta
+                            << "mean_channel_delta" << totalDelta / double(frame.sizeInBytes());
+                    // 保留原有字体混合顺序，所有路径均要求逐像素一致。
+                    QVERIFY2(maxDelta == 0, qPrintable(name));
+                }
+            }
+        }
+    }
+
     void initTestCase() {
         QCoreApplication::setOrganizationName("macdowsOS-regression");
         QCoreApplication::setApplicationName("widget-regression");

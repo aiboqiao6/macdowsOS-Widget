@@ -115,12 +115,36 @@
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="src/widgets/desktopwidget_interaction.cpp" />
+    <ClCompile Include="src/widgets/desktopwidget_preview.cpp" />
+    <ClCompile Include="src/widgets/desktopwidget_storage.cpp" />
+    <ClCompile Include="src/widgets/desktopwidget_placement.cpp" />
+    <ClCompile Include="src/widgets/desktopwidget_tray.cpp" />
+    <ClInclude Include="src/widgets/widgetgeometry.h" />
+    <ClCompile Include="src/widgets/widgetgeometry.cpp" />
+    <ClInclude Include="src/ui/gridplacementoverlay.h" />
+    <ClCompile Include="src/ui/gridplacementoverlay.cpp" />
+    <ClInclude Include="src/rendering/glpixeltransfer.h" />
+    <ClCompile Include="src/network/cardrequest.cpp" />
+    <ClInclude Include="src/network/cardrequest.h" />
+    <ClCompile Include="src/widgets/data/dictionarydata.cpp" />
+    <ClCompile Include="src/widgets/data/weatherdata.cpp" />
+    <ClCompile Include="src/ui/weathercitydialog.cpp" />
+    <ClInclude Include="src/ui/weathercitydialog.h" />
+    <ClCompile Include="src/platform/powerdevices.cpp" />
+    <ClInclude Include="src/platform/powerdevices.h" />
+    <ClCompile Include="src/widgets/desktopwidget_power.cpp" />
+    <ClCompile Include="src/app/fontsettings.cpp" />
+    <ClInclude Include="src/app/fontsettings.h" />
+    <ClCompile Include="src/widgets/cards/dictionarycard.cpp" />
+    <ClCompile Include="src/widgets/cards/clockcard.cpp" />
+    <ClCompile Include="src/widgets/cards/weathercard.cpp" />
+    <ClCompile Include="src/widgets/cards/batterycard.cpp" />
     <ClCompile Include="src/ui/scaleselector.cpp" />
     <ClCompile Include="src/media/systemmediasession.cpp" />
     <ClCompile Include="src/widgets/musiccard.cpp" />
     <ClCompile Include="src/rendering/cleartypetext.cpp" />
     <ClCompile Include="src/widgets/desktopwidget_paint.cpp" />
-    <ClCompile Include="src/widgets/desktopwidget_data.cpp" />
     <ClCompile Include="src/widgets/desktopwidget_settings.cpp" />
     <ClCompile Include="src/app/main.cpp" />
     <ClCompile Include="src/ui/firstrunwizard.cpp" />

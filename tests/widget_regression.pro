@@ -5,28 +5,60 @@ TEMPLATE = app
 TARGET = widget_regression
 DEFINES += NOMINMAX
 INCLUDEPATH += ../src
-SOURCES += widget_regression.cpp \
-    ../src/widgets/desktopwidget.cpp \
-    ../src/ui/firstrunwizard.cpp \
-    ../src/ui/widgetlibrarydialog.cpp \
-    ../src/ui/liquidglassmenu.cpp \
-    ../src/rendering/liquidglasswidget.cpp \
-    ../src/rendering/nativewindows.cpp \
-    ../src/rendering/renderdiagnostics.cpp \
-    ../src/rendering/desktopcapture.cpp \
-    ../src/rendering/qtglassflowscene.cpp
-HEADERS += ../src/config.h \
-    ../src/rendering/renderdiagnostics.h \
-    ../src/ui/widgetlibrarydialog.h \
-    ../src/rendering/qtglassflowscene.h
 RESOURCES += ../resources.qrc ../src/rendering/shaders.qrc
 win32-msvc {
     QMAKE_CXXFLAGS += /utf-8
     LIBS += -lBthprops -lOle32 -lPropsys -lUser32 -lGdi32 -lPsapi
 }
 
-SOURCES += ../src/ui/scaleselector.cpp ../src/media/systemmediasession.cpp ../src/widgets/musiccard.cpp ../src/rendering/cleartypetext.cpp
-HEADERS += ../src/media/systemmediasession.h ../src/ui/scaleselector.h ../src/widgets/musiccard.h ../src/rendering/cleartypetext.h
-
-SOURCES += ../src/widgets/desktopwidget_paint.cpp ../src/widgets/desktopwidget_data.cpp ../src/widgets/desktopwidget_settings.cpp
-HEADERS += ../src/widgets/cardmetrics.h ../src/widgets/weatherformat.h
+SOURCES += ../src/app/fontsettings.cpp \
+    ../src/media/systemmediasession.cpp \
+    ../src/network/cardrequest.cpp \
+    ../src/platform/powerdevices.cpp \
+    ../src/rendering/cleartypetext.cpp \
+    ../src/rendering/desktopcapture.cpp \
+    ../src/rendering/liquidglasswidget.cpp \
+    ../src/rendering/nativewindows.cpp \
+    ../src/rendering/qtglassflowscene.cpp \
+    ../src/rendering/renderdiagnostics.cpp \
+    ../src/ui/firstrunwizard.cpp \
+    ../src/ui/gridplacementoverlay.cpp \
+    ../src/ui/liquidglassmenu.cpp \
+    ../src/ui/scaleselector.cpp \
+    ../src/ui/weathercitydialog.cpp \
+    ../src/ui/widgetlibrarydialog.cpp \
+    ../src/widgets/cards/batterycard.cpp \
+    ../src/widgets/cards/clockcard.cpp \
+    ../src/widgets/cards/dictionarycard.cpp \
+    ../src/widgets/cards/weathercard.cpp \
+    ../src/widgets/data/dictionarydata.cpp \
+    ../src/widgets/data/weatherdata.cpp \
+    ../src/widgets/desktopwidget.cpp \
+    ../src/widgets/desktopwidget_paint.cpp \
+    ../src/widgets/desktopwidget_power.cpp \
+    ../src/widgets/desktopwidget_settings.cpp \
+    ../src/widgets/musiccard.cpp \
+    widget_regression.cpp
+HEADERS += ../src/app/fontsettings.h \
+    ../src/config.h \
+    ../src/media/systemmediasession.h \
+    ../src/network/cardrequest.h \
+    ../src/platform/powerdevices.h \
+    ../src/rendering/cleartypetext.h \
+    ../src/rendering/glpixeltransfer.h \
+    ../src/rendering/qtglassflowscene.h \
+    ../src/rendering/renderdiagnostics.h \
+    ../src/ui/gridplacementoverlay.h \
+    ../src/ui/scaleselector.h \
+    ../src/ui/weathercitydialog.h \
+    ../src/ui/widgetlibrarydialog.h \
+    ../src/widgets/cardmetrics.h \
+    ../src/widgets/musiccard.h \
+    ../src/widgets/weatherformat.h
+SOURCES += ../src/widgets/widgetgeometry.cpp
+HEADERS += ../src/widgets/widgetgeometry.h
+SOURCES += ../src/widgets/desktopwidget_tray.cpp
+SOURCES += ../src/widgets/desktopwidget_placement.cpp
+SOURCES += ../src/widgets/desktopwidget_storage.cpp
+SOURCES += ../src/widgets/desktopwidget_preview.cpp
+SOURCES += ../src/widgets/desktopwidget_interaction.cpp

@@ -28,6 +28,7 @@ public:
     void clear();
     bool paint(QPainter& painter, const QPointF& baseline, const QString& text);
 private:
+    void clearMasks();
     struct Mask {
         QImage pixels;
         QPoint offset;
