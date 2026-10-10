@@ -515,28 +515,18 @@ private slots:
     void settingsAndWizardShareScaleSelector() {
         DesktopWidget widget(nullptr, DesktopWidget::CardKind::Clock, false);
         bool checked = false;
-        bool percentagesSynced = false;
+        bool effectOptionsRemoved = false;
         QTimer::singleShot(0, &widget, [&] {
             auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
             if (!dialog) return;
             auto* slider = dialog->findChild<QSlider*>("scaleSlider");
             auto* selector = slider ? dynamic_cast<ScaleSelector*>(slider->parentWidget()) : nullptr;
             if (selector) {
-                const auto spins = dialog->findChildren<QSpinBox*>();
-                if (spins.size() == 2) {
-                    auto* blur = spins[0]->parentWidget()->findChild<QSlider*>();
-                    auto* opacity = spins[1]->parentWidget()->findChild<QSlider*>();
-                    if (blur && opacity) {
-                        blur->setValue(72);
-                        percentagesSynced = spins[0]->value() == 72;
-                        spins[0]->setValue(64);
-                        percentagesSynced &= blur->value() == 64;
-                        opacity->setValue(0);
-                        percentagesSynced &= opacity->value() == 5 && spins[1]->value() == 5;
-                        spins[1]->setValue(83);
-                        percentagesSynced &= opacity->value() == 83;
-                    }
-                }
+                effectOptionsRemoved = dialog->findChildren<QSpinBox*>().isEmpty()
+                    && dialog->findChildren<QSlider*>().size() == 1;
+                for (const QLabel* label : dialog->findChildren<QLabel*>())
+                    effectOptionsRemoved &= label->text() != QStringLiteral("模糊程度")
+                        && label->text() != QStringLiteral("透明度");
                 slider->setValue(125);
                 checked = selector->previewSize() == DesktopWidget::cardSize(
                     DesktopWidget::CardKind::Battery, 0, 1.25, dialog->screen()->availableGeometry());
@@ -545,13 +535,69 @@ private slots:
         });
         widget.showSettingsDialog();
         QVERIFY(checked);
-        QVERIFY(percentagesSynced);
+        QVERIFY(effectOptionsRemoved);
         QCOMPARE(widget.m_widgetScale, 1.25);
         QCOMPARE(AppSettings().value("appearance/scale").toDouble(), 1.25);
-        QCOMPARE(widget.materialBlurStrength(), 64);
-        QVERIFY(qAbs(widget.glassOpacity() - 0.83) < 0.001);
-        QCOMPARE(AppSettings().value("appearance/blurStrength").toInt(), 64);
-        QVERIFY(qAbs(AppSettings().value("appearance/opacity").toDouble() - 0.83) < 0.001);
+        QCOMPARE(widget.glassOpacity(), 1.0f);
+        QVERIFY(!AppSettings().contains("appearance/blurStrength"));
+        QVERIFY(!AppSettings().contains("appearance/opacity"));
+    }
+
+    void unifiedGlassPreservesBackgroundWithoutMasks() {
+        AppSettings().setValue("appearance/liveBackdrop", false);
+        DesktopWidget card(nullptr, DesktopWidget::CardKind::Weather, false,
+                           QStringLiteral("unified-glass"), 1, true);
+        FirstRunWizard wizard;
+        WidgetLibraryDialog library;
+        QFont font(DesktopWidget::pingFangFontFamily());
+        LiquidGlassMenu menu(font);
+        menu.addGlassAction(QStringLiteral("统一液态玻璃"), LiquidGlassMenu::Icon::Add);
+        menu.popup(QGuiApplication::primaryScreen()->availableGeometry().topLeft() + QPoint(80, 80));
+        QVERIFY(QTest::qWaitForWindowExposed(&menu));
+        auto* menuSurface = menu.findChild<QtGlassFlowScene*>();
+        QVERIFY(menuSurface);
+        for (QtGlassFlowScene* surface : QList<QtGlassFlowScene*>{&card, &wizard, &library, menuSurface}) {
+            QCOMPARE(surface->m_fPower, LiquidGlassStyle::kRefractionPower);
+            QCOMPARE(surface->m_blurRadius, LiquidGlassStyle::kBlurRadius);
+            QCOMPARE(surface->m_blurIterations, LiquidGlassStyle::kBlurIterations);
+            QCOMPARE(surface->m_noiseAmount, LiquidGlassStyle::kNoiseAmount);
+            QCOMPARE(surface->glassOpacity(), 1.0f);
+            QCOMPARE(surface->m_objects.first().powerFactor, LiquidGlassStyle::kShapePower);
+        }
+        // 恒色背景在无控件区域应保留原色，暗色遮罩、色调或明暗渐变都会触发失败。
+        const QColor backdrop(205, 155, 95);
+        const auto setBackdrop = [&](QtGlassFlowScene& surface) {
+            QImage background(surface.size() * surface.devicePixelRatioF(), QImage::Format_RGB32);
+            background.fill(backdrop);
+            surface.setBackgroundImage(background);
+            surface.setNoiseAmount(0);
+            surface.update();
+        };
+        setBackdrop(*menuSurface);
+        QTest::qWait(40);
+        const QImage menuFrame = menuSurface->grabFramebuffer();
+        const QColor menuPixel = menuFrame.pixelColor(menuFrame.width() / 2,
+            qRound(4 * menuSurface->devicePixelRatioF()));
+        QVERIFY(qAbs(menuPixel.red() - backdrop.red()) <= 2);
+        QVERIFY(qAbs(menuPixel.green() - backdrop.green()) <= 2);
+        QVERIFY(qAbs(menuPixel.blue() - backdrop.blue()) <= 2);
+        QVERIFY(menuFrame.save(QStringLiteral("artifacts/unified-glass-menu.png")));
+        menu.hide();
+        wizard.setDesktopCaptureEnabled(false);
+        wizard.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&wizard));
+        setBackdrop(wizard);
+        QTest::qWait(40);
+        const QImage wizardFrame = wizard.grabFramebuffer();
+        for (qreal y : {.25, .5, .75}) {
+            const QColor pixel = wizardFrame.pixelColor(wizardFrame.width() / 2,
+                qRound(wizardFrame.height() * y));
+            QVERIFY(qAbs(pixel.red() - backdrop.red()) <= 2);
+            QVERIFY(qAbs(pixel.green() - backdrop.green()) <= 2);
+            QVERIFY(qAbs(pixel.blue() - backdrop.blue()) <= 2);
+        }
+        QVERIFY(wizardFrame.save(QStringLiteral("artifacts/unified-glass-wizard.png")));
+        QVERIFY(wizard.grab().save(QStringLiteral("artifacts/unified-glass-wizard-window.png")));
     }
 
     void sceneDragStopsOnReleaseAndObjectHide() {
@@ -704,8 +750,8 @@ private slots:
             AppSettings defaults;
             QCOMPARE(defaults.value("appearance/scale").toDouble(), 1.0);
             QCOMPARE(defaults.value("performance/renderScale").toDouble(), 0.60);
-            QCOMPARE(defaults.value("appearance/blurStrength").toInt(), 50);
-            QCOMPARE(defaults.value("appearance/opacity").toDouble(), 1.0);
+            QVERIFY(!defaults.value("appearance/blurStrength").isValid());
+            QVERIFY(!defaults.value("appearance/opacity").isValid());
         }
         QVERIFY(!QFile::exists(AppSettings::filePath()));
 
@@ -717,7 +763,7 @@ private slots:
         oldFile.write(QJsonDocument(QJsonObject{
                           {"version", 4}, {"scale", 0.85}, {"widgets", oldWidgets},
                           {"settings", QJsonObject{{"appearance", QJsonObject{
-                              {"systemBlur", true}, {"blurStrength", 65}}},
+                              {"systemBlur", true}, {"blurStrength", 65}, {"opacity", 0.2}}},
                               {"performance", QJsonObject{{"renderBackend", 2}}}}}}).toJson());
         oldFile.close();
         QSettings().setValue("appearance/scale", 0.85);
@@ -737,8 +783,8 @@ private slots:
         const QJsonObject appearance = root.value("settings").toObject()
                                            .value("appearance").toObject();
         QCOMPARE(appearance.value("scale").toDouble(), 0.85);
-        QCOMPARE(appearance.value("opacity").toDouble(), 0.65);
-        QCOMPARE(appearance.value("blurStrength").toInt(), 65);
+        QVERIFY(!appearance.contains("opacity"));
+        QVERIFY(!appearance.contains("blurStrength"));
         QVERIFY(!appearance.contains("systemBlur"));
         QVERIFY(!root.value("settings").toObject().value("performance").toObject()
                      .contains("renderBackend"));
@@ -750,8 +796,8 @@ private slots:
         QFile layoutSaved(AppSettings::filePath());
         QVERIFY(layoutSaved.open(QIODevice::ReadOnly));
         root = QJsonDocument::fromJson(layoutSaved.readAll()).object();
-        QCOMPARE(root.value("settings").toObject().value("appearance").toObject()
-                     .value("opacity").toDouble(), 0.65);
+        QVERIFY(!root.value("settings").toObject().value("appearance").toObject()
+                     .contains("opacity"));
     }
 
     void responsiveLayoutUsesFontMetricsAndDeviceScale() {
@@ -1442,8 +1488,8 @@ private slots:
         QCOMPARE(saved.value("appearance/scale").toDouble(), 1.0);
         QCOMPARE(saved.value("performance/renderScale").toDouble(), 0.60);
         QCOMPARE(saved.value("appearance/liveBackdrop").toBool(), true);
-        QCOMPARE(saved.value("appearance/blurStrength").toInt(), 50);
-        QCOMPARE(saved.value("appearance/opacity").toDouble(), 1.0);
+        QVERIFY(!saved.contains("appearance/blurStrength"));
+        QVERIFY(!saved.contains("appearance/opacity"));
         QCOMPARE(saved.value("appearance/fontSmoothing").toInt(), 4);
         QCOMPARE(saved.value("interaction/mouseThrough").toBool(), false);
         QCOMPARE(saved.value("interaction/lowPowerRefresh").toBool(), false);
@@ -2569,7 +2615,6 @@ private slots:
         QFETCH(int, lowerKind);
         QFETCH(int, upperKind);
         AppSettings().setValue("appearance/scale", 0.4);
-        AppSettings().setValue("appearance/opacity", 1.0);
         ColorWindow background;
         background.color = QColor(14, 22, 32);
         background.setGeometry(QRect(QGuiApplication::primaryScreen()->availableGeometry().center()
@@ -2823,12 +2868,10 @@ private slots:
 
     void libraryHonorsGlobalLiveBackdropSetting() {
         AppSettings().setValue(QStringLiteral("appearance/liveBackdrop"), false);
-        AppSettings().setValue(QStringLiteral("appearance/blurStrength"), 72);
-        AppSettings().setValue(QStringLiteral("appearance/opacity"), 0.80);
         WidgetLibraryDialog staticLibrary;
         QVERIFY(!staticLibrary.liveBackdropEnabled());
-        QCOMPARE(staticLibrary.materialBlurStrength(), 72);
-        QCOMPARE(staticLibrary.glassOpacity(), 0.80);
+        QCOMPARE(staticLibrary.m_blurRadius, LiquidGlassStyle::kBlurRadius);
+        QCOMPARE(staticLibrary.glassOpacity(), 1.0f);
         staticLibrary.prepareBackdrop();
         staticLibrary.show();
         QVERIFY(QTest::qWaitForWindowExposed(&staticLibrary));
@@ -3286,10 +3329,10 @@ private slots:
         owner.applyScale(1.25);
         QCOMPARE(owner.m_library, shared);
         QCOMPARE(shared->m_interfaceScale, 1.25);
-        owner.syncGroupSettings(1.25, 72, 0.80, false, false, false,
+        owner.syncGroupSettings(1.25, false, false, false,
                                 1.25, 2);
-        QCOMPARE(shared->materialBlurStrength(), 72);
-        QCOMPARE(shared->glassOpacity(), 0.80);
+        QCOMPARE(shared->m_blurRadius, LiquidGlassStyle::kBlurRadius);
+        QCOMPARE(shared->glassOpacity(), 1.0f);
         QCOMPARE(shared->renderScale(), 1.25f);
         QCOMPARE(shared->findChild<QFrame*>("widgetTile")->size(), QSize(413, 330));
         QVERIFY2(shared->styleSheet().contains("border-radius:34px"),
@@ -3409,7 +3452,7 @@ private slots:
         QVERIFY2(partialAlpha > 0, "rounded GPU silhouette contains no antialiased coverage pixels");
     }
 
-    void materialBlurStrengthSoftensBackdrop() {
+    void gaussianRadiusSoftensBackdrop() {
         TestGlass glass;
         glass.setFixedSize(384, 256);
         glass.setDesktopCaptureEnabled(false);
@@ -3427,7 +3470,8 @@ private slots:
             int widths[3] = {};
             int index = 0;
             for (int strength : {0, 50, 100}) {
-                glass.setMaterialBlurStrength(strength);
+                glass.setBlurRadius(0.5f + strength / 100.0f * 9.5f);
+                glass.setBlurIterations(1 + qRound(strength / 100.0f * 2.0f));
                 glass.setRefractionPower(0); // 单独测量模糊，排除镜头折射干扰。
                 QTest::qWait(60);
                 const QImage frame = glass.grabFramebuffer();

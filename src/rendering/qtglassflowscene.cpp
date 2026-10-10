@@ -58,9 +58,11 @@ QtGlassFlowScene::QtGlassFlowScene(QWidget *parent)
       // 渲染器内部默认使用原生分辨率，应用可根据保存的画质设置覆盖。
       m_renderScale(1.0f), m_connectionsDirty(true),
       m_refractionA(0.7f), m_refractionB(2.3f), m_refractionC(5.2f),
-      m_refractionD(6.9f), m_fPower(1.0f), m_blurRadius(2.0f),
-      m_blurIterations(2), m_noiseAmount(0.06f), m_attractionDist(160.0f),
-      m_globalPower(3.0f), m_timer(nullptr), m_refreshInterval(16),
+      m_refractionD(6.9f), m_fPower(LiquidGlassStyle::kRefractionPower),
+      m_blurRadius(LiquidGlassStyle::kBlurRadius),
+      m_blurIterations(LiquidGlassStyle::kBlurIterations),
+      m_noiseAmount(LiquidGlassStyle::kNoiseAmount), m_attractionDist(0.0f),
+      m_globalPower(LiquidGlassStyle::kShapePower), m_timer(nullptr), m_refreshInterval(16),
       m_externalInteraction(false),
       m_animationEnabled(false),
       m_dragIndex(-1)

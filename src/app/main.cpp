@@ -86,13 +86,11 @@ int main(int argc, char* argv[])
     }
     {
         const AppSettings saved;
-        RenderDiagnostics::write("render.settings", QString("renderScale=%1 liveBackdrop=%2 lowPower=%3 mouseThrough=%4 opacity=%5 blur=%6 fontSmoothing=%7")
+        RenderDiagnostics::write("render.settings", QString("renderScale=%1 liveBackdrop=%2 lowPower=%3 mouseThrough=%4 material=liquidGlass fontSmoothing=%5")
             .arg(saved.value("performance/renderScale").toDouble())
             .arg(saved.value("appearance/liveBackdrop").toBool())
             .arg(saved.value("interaction/lowPowerRefresh").toBool())
             .arg(saved.value("interaction/mouseThrough").toBool())
-            .arg(saved.value("appearance/opacity").toDouble())
-            .arg(saved.value("appearance/blurStrength").toInt())
             .arg(saved.value("appearance/fontSmoothing").toInt()));
         DesktopWidget::setGlobalFontSmoothing(qBound(0,
             saved.value(QStringLiteral("appearance/fontSmoothing"), 4).toInt(), 4));

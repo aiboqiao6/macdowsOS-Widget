@@ -17,6 +17,7 @@
 #include <QElapsedTimer>
 #include <QImage>
 #include "rendering/cleartypetext.h"
+#include "rendering/liquidglassstyle.h"
 
 class QPainter;
 class QTimer;
@@ -37,7 +38,7 @@ public:
         bool visible;
 
         GlassObject()
-            : powerFactor(3.0f), cornerRadius(0.0f), visible(true) {}
+            : powerFactor(LiquidGlassStyle::kShapePower), cornerRadius(0.0f), visible(true) {}
     };
 
     struct Connection {
@@ -50,7 +51,7 @@ public:
     ~QtGlassFlowScene() override;
 
     int addGlassObject(const QPointF &pos, const QSizeF &size,
-                       float power = 3.0f);
+                       float power = LiquidGlassStyle::kShapePower);
     void setGlassObjectGeometry(int index, const QPointF &pos,
                                 const QSizeF &size);
     void setGlassObjectCornerRadius(int index, float radius);

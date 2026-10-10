@@ -129,8 +129,7 @@ private:
     QRectF drawWeatherIcon(QPainter& painter, const QRectF& rect, bool night,
                            int weatherCode = -1) const;
     void arrangeGroup();
-    void syncGroupSettings(qreal scale, int blurStrength,
-                           qreal opacity, bool mouseThrough, bool lowPower,
+    void syncGroupSettings(qreal scale, bool mouseThrough, bool lowPower,
                            bool liveBackdrop, qreal renderQuality, int fontSmoothing);
     void moveToGroupPosition();
     void showWidgetLibrary();

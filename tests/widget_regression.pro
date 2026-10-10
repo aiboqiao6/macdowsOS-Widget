@@ -53,6 +53,7 @@ HEADERS += ../src/app/fontsettings.h \
     ../src/platform/powerdevices.h \
     ../src/rendering/cleartypetext.h \
     ../src/rendering/glpixeltransfer.h \
+    ../src/rendering/liquidglassstyle.h \
     ../src/rendering/qtglassflowscene.h \
     ../src/rendering/renderdiagnostics.h \
     ../src/ui/gridplacementoverlay.h \

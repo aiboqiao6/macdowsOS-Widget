@@ -11,6 +11,7 @@
     <ClInclude Include="src/ui/gridplacementoverlay.h"><Filter>src\ui</Filter></ClInclude>
     <ClCompile Include="src/ui/gridplacementoverlay.cpp"><Filter>src\ui</Filter></ClCompile>
     <ClInclude Include="src/rendering/glpixeltransfer.h"><Filter>src\rendering</Filter></ClInclude>
+    <ClInclude Include="src/rendering/liquidglassstyle.h"><Filter>src\rendering</Filter></ClInclude>
     <ClCompile Include="src/network/cardrequest.cpp"><Filter>src\network</Filter></ClCompile>
     <ClInclude Include="src/network/cardrequest.h"><Filter>src\network</Filter></ClInclude>
     <ClCompile Include="src/widgets/data/dictionarydata.cpp"><Filter>src\widgets\data</Filter></ClCompile>

@@ -26,8 +26,10 @@ public:
             return; // 只读操作不能创建首次运行标记。
 
         const QJsonObject saved = m_root.value(QStringLiteral("settings")).toObject();
-        m_removeLegacyBlur = saved.value(QStringLiteral("appearance"))
-                                 .toObject().contains(QStringLiteral("systemBlur"));
+        const QJsonObject appearance = saved.value(QStringLiteral("appearance")).toObject();
+        m_removeLegacyMaterial = appearance.contains(QStringLiteral("systemBlur"))
+            || appearance.contains(QStringLiteral("blurStrength"))
+            || appearance.contains(QStringLiteral("opacity"));
         m_removeLegacyBackend = saved.value(QStringLiteral("performance"))
                                     .toObject().contains(QStringLiteral("renderBackend"));
         QSettings legacy;
@@ -62,6 +64,8 @@ public:
 
     QVariant value(const QString& key, const QVariant& fallback = {}) const
     {
+        if (isRetiredMaterialKey(key))
+            return fallback;
         if (m_updates.contains(key))
             return m_updates.value(key);
         const QJsonObject saved = m_root.value(QStringLiteral("settings")).toObject();
@@ -73,12 +77,16 @@ public:
 
     bool contains(const QString& key) const
     {
+        if (isRetiredMaterialKey(key))
+            return false;
         return m_updates.contains(key)
                || hasKey(m_root.value(QStringLiteral("settings")).toObject(), key);
     }
 
     void setValue(const QString& key, const QVariant& value)
     {
+        if (isRetiredMaterialKey(key))
+            return;
         if (contains(key) && this->value(key) == value)
             return;
         m_updates.insert(key, value);
@@ -93,7 +101,7 @@ public:
 
     bool sync()
     {
-        if (m_updates.isEmpty() && !m_removeLegacyBlur && !m_removeLegacyBackend)
+        if (m_updates.isEmpty() && !m_removeLegacyMaterial && !m_removeLegacyBackend)
             return true;
         const QString path = filePath();
         if (!QDir().mkpath(QFileInfo(path).absolutePath()))
@@ -109,9 +117,11 @@ public:
         QJsonObject saved = root.value(QStringLiteral("settings")).toObject();
         for (auto it = m_updates.cbegin(); it != m_updates.cend(); ++it)
             putValue(saved, it.key(), QJsonValue::fromVariant(it.value()));
-        if (m_removeLegacyBlur) {
+        if (m_removeLegacyMaterial) {
             QJsonObject appearance = saved.value(QStringLiteral("appearance")).toObject();
             appearance.remove(QStringLiteral("systemBlur"));
+            appearance.remove(QStringLiteral("blurStrength"));
+            appearance.remove(QStringLiteral("opacity"));
             saved.insert(QStringLiteral("appearance"), appearance);
         }
         if (m_removeLegacyBackend) {
@@ -132,18 +142,23 @@ public:
             return false;
         m_root = root;
         m_updates.clear();
-        m_removeLegacyBlur = false;
+        m_removeLegacyMaterial = false;
         m_removeLegacyBackend = false;
         return true;
     }
 
 private:
+    static bool isRetiredMaterialKey(const QString& key)
+    {
+        return key == QStringLiteral("appearance/systemBlur")
+            || key == QStringLiteral("appearance/blurStrength")
+            || key == QStringLiteral("appearance/opacity");
+    }
+
     static const QHash<QString, QVariant>& defaults()
     {
         static const QHash<QString, QVariant> values = {
             {QStringLiteral("appearance/scale"), 1.0},
-            {QStringLiteral("appearance/blurStrength"), 50},
-            {QStringLiteral("appearance/opacity"), 1.0},
             {QStringLiteral("appearance/liveBackdrop"), true},
             {QStringLiteral("appearance/fontSmoothing"), 4},
             {QStringLiteral("interaction/mouseThrough"), false},
@@ -184,6 +199,6 @@ private:
 
     QJsonObject m_root;
     QHash<QString, QVariant> m_updates;
-    bool m_removeLegacyBlur = false;
+    bool m_removeLegacyMaterial = false;
     bool m_removeLegacyBackend = false;
 };

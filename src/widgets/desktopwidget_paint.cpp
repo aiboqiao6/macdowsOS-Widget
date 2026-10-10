@@ -21,8 +21,6 @@ void DesktopWidget::paintOverlay(QPainter& painter)
     cardClip.addRoundedRect(card, radius, radius);
     painter.setClipPath(cardClip, Qt::IntersectClip);
 
-    paintGlassSurfaceFrame(painter, card, radius);
-
     switch (m_cardKind) {
     case CardKind::Battery: paintBatteryCard(painter, card); break;
     case CardKind::Weather: paintWeatherCard(painter, card); break;

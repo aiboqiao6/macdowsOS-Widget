@@ -3,7 +3,6 @@
 #include "rendering/responsivelayout.h"
 #include <QPainter>
 #include <QPainterPath>
-#include <QLinearGradient>
 
 namespace MusicCard {
 Layout layout(const QRectF& bounds)
@@ -32,10 +31,6 @@ void paint(QPainter& painter, const QRectF& bounds, const MediaSnapshot& media)
     const ResponsiveLayout::Metrics metrics(bounds);
     painter.save();
     painter.setPen(Qt::NoPen);
-    QLinearGradient tint(bounds.topLeft(), bounds.bottomRight());
-    tint.setColorAt(0, QColor(137, 73, 190, 65));
-    tint.setColorAt(1, QColor(25, 74, 106, 30));
-    painter.fillRect(bounds, tint);
     QPainterPath artworkClip;
     artworkClip.addRoundedRect(regions.artwork, metrics.size(.04), metrics.size(.04));
     painter.save();

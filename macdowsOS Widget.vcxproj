@@ -125,6 +125,7 @@
     <ClInclude Include="src/ui/gridplacementoverlay.h" />
     <ClCompile Include="src/ui/gridplacementoverlay.cpp" />
     <ClInclude Include="src/rendering/glpixeltransfer.h" />
+    <ClInclude Include="src/rendering/liquidglassstyle.h" />
     <ClCompile Include="src/network/cardrequest.cpp" />
     <ClInclude Include="src/network/cardrequest.h" />
     <ClCompile Include="src/widgets/data/dictionarydata.cpp" />

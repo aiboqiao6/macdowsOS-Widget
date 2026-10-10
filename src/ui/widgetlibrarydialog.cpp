@@ -20,7 +20,6 @@
 #include <QMouseEvent>
 #include <QOperatingSystemVersion>
 #include <QPainter>
-#include <QPainterPath>
 #include <QPixmap>
 #include <QPropertyAnimation>
 #include <QPushButton>
@@ -357,8 +356,6 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     setGlassRadius(26.0 * m_interfaceScale);
     setRenderScale(float(qBound<qreal>(0.5,
         settings.value(QStringLiteral("performance/renderScale"), 0.60).toDouble(), 1.5)));
-    setMaterialBlurStrength(settings.value(QStringLiteral("appearance/blurStrength"), 50).toInt());
-    setGlassOpacity(settings.value(QStringLiteral("appearance/opacity"), 1.0).toDouble());
     Qt::WindowFlags flags = windowFlags();
     flags.setFlag(Qt::WindowStaysOnBottomHint, false);
     flags.setFlag(Qt::WindowStaysOnTopHint, true);
@@ -980,19 +977,13 @@ void WidgetLibraryDialog::paintOverlay(QPainter& painter)
 {
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, true);
-    // 子框架可能超出 GL 圆角轮廓，因此由覆盖层按同一圆角绘制底色。
-    QPainterPath silhouette;
-    silhouette.addRoundedRect(QRectF(rect()), 26.0 * m_interfaceScale, 26.0 * m_interfaceScale);
-    const auto panelTint = [&](QWidget* panel, const QColor& color) {
+    // 内容分区只绘制分隔线，材质与边缘反光统一由玻璃渲染器提供。
+    const auto panelArea = [&](QWidget* panel) {
         if (!panel || !panel->isVisible()) return QRectF();
-        const QRectF area(panel->mapTo(this, QPoint()), panel->size());
-        QPainterPath panelPath;
-        panelPath.addRect(area);
-        painter.fillPath(silhouette.intersected(panelPath), color);
-        return area;
+        return QRectF(panel->mapTo(this, QPoint()), panel->size());
     };
-    const QRectF sidebar = panelTint(m_sidebar, QColor(238, 245, 251, 36));
-    const QRectF footer = panelTint(m_footer, QColor(235, 243, 251, 42));
+    const QRectF sidebar = panelArea(m_sidebar);
+    const QRectF footer = panelArea(m_footer);
     if (!sidebar.isEmpty()) {
         painter.setPen(QColor(255, 255, 255, 74));
         painter.drawLine(sidebar.topRight(), sidebar.bottomRight());
@@ -1001,19 +992,6 @@ void WidgetLibraryDialog::paintOverlay(QPainter& painter)
         painter.setPen(QColor(255, 255, 255, 76));
         painter.drawLine(footer.topLeft(), footer.topRight());
     }
-    const qreal edge = qMax<qreal>(0.5, 0.7 * m_interfaceScale);
-    const QRectF bounds = QRectF(rect()).adjusted(edge, edge, -edge, -edge);
-    QLinearGradient rim(bounds.topLeft(), bounds.bottomRight());
-    rim.setColorAt(0.0, QColor(255, 255, 255, 172));
-    rim.setColorAt(.24, QColor(255, 255, 255, 60));
-    rim.setColorAt(.62, QColor(200, 220, 242, 38));
-    rim.setColorAt(1.0, QColor(255, 255, 255, 130));
-    painter.setBrush(Qt::NoBrush);
-    painter.setPen(QPen(QBrush(rim), 1.2 * m_interfaceScale));
-    painter.drawRoundedRect(bounds, windowScaled(26), windowScaled(26));
-    painter.setPen(QPen(QColor(255, 255, 255, 55), m_interfaceScale));
-    painter.drawLine(QPointF(windowScaled(28), 1.4 * m_interfaceScale),
-                     QPointF(width() - windowScaled(28), 1.4 * m_interfaceScale));
     painter.restore();
 }
 

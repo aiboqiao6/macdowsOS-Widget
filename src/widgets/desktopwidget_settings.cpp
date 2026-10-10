@@ -18,32 +18,7 @@
 #include <QScreen>
 #include <QScrollArea>
 #include <QSignalBlocker>
-#include <QSlider>
-#include <QSpinBox>
 #include <QVBoxLayout>
-
-namespace {
-QSlider* addPercentRow(QFormLayout* form, const QString& label, int minimum, int value)
-{
-    auto* row = new QWidget(form->parentWidget());
-    auto* layout = new QHBoxLayout(row);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(8);
-    auto* slider = new QSlider(Qt::Horizontal, row);
-    slider->setRange(minimum, 100);
-    slider->setValue(value);
-    auto* spin = new QSpinBox(row);
-    spin->setRange(minimum, 100);
-    spin->setSuffix(QStringLiteral("%"));
-    spin->setValue(slider->value());
-    layout->addWidget(slider, 1);
-    layout->addWidget(spin);
-    QObject::connect(slider, &QSlider::valueChanged, spin, &QSpinBox::setValue);
-    QObject::connect(spin, qOverload<int>(&QSpinBox::valueChanged), slider, &QSlider::setValue);
-    form->addRow(label, row);
-    return slider;
-}
-}
 
 void DesktopWidget::showSettingsDialog()
 {
@@ -61,7 +36,7 @@ void DesktopWidget::showSettingsDialog()
     auto* layout = new QVBoxLayout(&dialog);
     layout->setContentsMargins(24, 20, 24, 18);
     layout->setSpacing(14);
-    auto* title = new QLabel(QStringLiteral("显示、材质与启动"), &dialog);
+    auto* title = new QLabel(QStringLiteral("显示与启动"), &dialog);
     title->setStyleSheet(QStringLiteral("font-size:18px; font-weight:600;"));
     layout->addWidget(title);
 
@@ -126,9 +101,6 @@ void DesktopWidget::showSettingsDialog()
             AppSettings().value(QStringLiteral("weather/location"), m_weatherLocation).toString());
     });
 
-    auto* blurSlider = addPercentRow(form, QStringLiteral("模糊程度"), 0, materialBlurStrength());
-    auto* opacitySlider = addPercentRow(form, QStringLiteral("透明度"), 5, qRound(glassOpacity() * 100.0));
-
     auto* mouseThrough = new QCheckBox(QStringLiteral("鼠标穿透（组件不接收点击）"), &dialog);
     mouseThrough->setChecked(mouseThroughEnabled());
     form->addRow(QString(), mouseThrough);
@@ -163,8 +135,6 @@ void DesktopWidget::showSettingsDialog()
     if (dialog.exec() == QDialog::Accepted) {
         setStartupEnabled(startup->isChecked());
         syncGroupSettings(scaleSelector->percent() / 100.0,
-                          blurSlider->value(),
-                          opacitySlider->value() / 100.0,
                           mouseThrough->isChecked(),
                           lowPower->isChecked() && mouseThrough->isChecked(),
                           liveBackdrop->isChecked(),

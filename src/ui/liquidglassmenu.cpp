@@ -6,7 +6,6 @@
 #include <QAction>
 #include <QGuiApplication>
 #include <QPainter>
-#include <QPainterPath>
 #include <QScreen>
 #include "app/appsettings.h"
 #include <QShowEvent>
@@ -58,7 +57,7 @@ public:
         setAttribute(Qt::WA_TransparentForMouseEvents);
         setFocusPolicy(Qt::NoFocus);
         setAnimationEnabled(false);
-        m_object = addGlassObject({}, QSizeF(menu->size()), 3.8f);
+        m_object = addGlassObject({}, QSizeF(menu->size()));
         setGlassObjectCornerRadius(m_object, float(kRadius));
     }
     void fit(const QRect& bounds)
@@ -99,13 +98,7 @@ void LiquidGlassMenu::createSurface()
     if (m_surface)
         return;
     m_surface = new LiquidGlassMenuSurface(this);
-    AppSettings settings;
     m_surface->setRenderScale(m_renderScale);
-    const float blur = qBound(0, settings.value(QStringLiteral("appearance/blurStrength"), 50).toInt(), 100) / 100.f;
-    m_surface->setBlurRadius(0.5f + blur * 9.5f);
-    m_surface->setBlurIterations(1 + qRound(blur * 2));
-    m_surface->setRefractionPower(1.32f);
-    m_surface->setNoiseAmount(.008f);
 }
 
 LiquidGlassMenu::~LiquidGlassMenu()
@@ -271,23 +264,6 @@ void LiquidGlassMenu::paintContents(QPainter& painter)
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setRenderHint(QPainter::TextAntialiasing,
         !(font().styleStrategy() & QFont::NoAntialias));
-    const QRectF bounds = QRectF(rect()).adjusted(.6, .6, -.6, -.6);
-    QPainterPath shape;
-    shape.addRoundedRect(bounds, kRadius, kRadius);
-    // 低强度暗色遮罩保障亮背景上的文字对比度，同时保留实际折射与模糊。
-    QLinearGradient tint(bounds.topLeft(), bounds.bottomLeft());
-    tint.setColorAt(0, QColor(24, 33, 50, 145));
-    tint.setColorAt(1, QColor(16, 23, 38, 174));
-    painter.fillPath(shape, tint);
-    QLinearGradient rim(bounds.topLeft(), bounds.bottomRight());
-    rim.setColorAt(0, QColor(255, 255, 255, 112));
-    rim.setColorAt(.5, QColor(235, 245, 255, 24));
-    rim.setColorAt(1, QColor(245, 250, 255, 66));
-    painter.setBrush(Qt::NoBrush);
-    QPen edge(QBrush(rim), 1);
-    edge.setCosmetic(true);
-    painter.setPen(edge);
-    painter.drawPath(shape);
     painter.setFont(font());
     for (const QAction* action : actions()) {
         const QRectF item = actionGeometry(const_cast<QAction*>(action));

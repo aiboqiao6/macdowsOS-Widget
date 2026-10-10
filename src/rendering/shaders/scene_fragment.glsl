@@ -95,7 +95,10 @@ void main() {
     }
 
     // 数学边缘外保留一像素过渡，避免小数 DPI 下二值裁剪导致锯齿。
-    float edgeWidth = max(fwidth(combinedD) * u_edgeAaScale, 0.0003);
+    // 在丢弃片元前计算导数，避免轮廓边缘的非一致分支导致法线不稳定。
+    vec2 surfaceGradient = vec2(dFdx(combinedD), dFdy(combinedD));
+    float distanceWidth = abs(surfaceGradient.x) + abs(surfaceGradient.y);
+    float edgeWidth = max(distanceWidth * u_edgeAaScale, 0.0003);
     if (combinedD > edgeWidth)
         discard;
 
@@ -120,7 +123,7 @@ void main() {
     vec2 targetNDC = sampleP * u_objHalfSize + u_objCenter;
     vec2 texCoord = clamp(targetNDC * 0.5 + 0.5, 0.0, 1.0);
 
-    // === 苹果液态玻璃材质 ===
+    // 统一液态玻璃材质：保留背景原色，仅在轮廓处产生光学反光。
 
     // 1. 干净的单次模糊采样 + 极微噪声（消色带）
     vec4 color = texture2D(u_blurredTex, texCoord);
@@ -129,20 +132,17 @@ void main() {
         color += noiseVal * u_noise;
     }
 
-    // 2. 凸面玻璃渐变（穹顶光照：上略亮，下略暗）
-    float convex = 0.5 + 0.5 * localP.y;
-    float domeLight = mix(0.93, 1.07, convex);
-    color.rgb *= domeLight;
-
-    // 3. 极细白色边框线（约 0.5–1 px 边缘反光）
+    // 2. 极细白色边框线（约 0.5–1 px 边缘反光）
     float fw = max(edgeWidth, 0.0003);
     // 边缘覆盖率随画质调整，但光学描边维持约一个原生像素。
-    float borderFw = clamp(fwidth(combinedD), 0.0003, 0.003);
+    float borderFw = clamp(distanceWidth, 0.0003, 0.003);
     float borderLine = smoothstep(borderFw * 2.5, borderFw * 0.5, dist);
-    // 方向性高光由共享覆盖层提供，此处仅保留柔和提亮，避免形成重复亮边。
-    color.rgb += vec3(1.0) * borderLine * 0.12;
+    // 由距离场法线生成统一的方向性反光，所有窗口均无需额外高光遮罩。
+    vec2 normal = normalize(surfaceGradient + vec2(0.000001));
+    float reflection = pow(abs(dot(normal, normalize(vec2(-0.6, 0.8)))), 3.0);
+    color.rgb += vec3(borderLine * (0.07 + reflection * 0.18));
 
-    // 4. 干净锐利的 alpha 抗锯齿
+    // 3. 干净锐利的 alpha 抗锯齿
     float alpha = smoothstep(-fw, fw, dist);
     color.a = alpha * u_opacity;
 

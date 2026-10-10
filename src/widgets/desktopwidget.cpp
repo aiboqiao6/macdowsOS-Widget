@@ -51,7 +51,6 @@ DesktopWidget::DesktopWidget(QWidget* parent, CardKind kind, bool ownsTray,
         : qMax(4, qRound(kGridBaseGap * m_widgetScale));
     setFixedSize(gridWidgetSize(m_cardKind, m_cardVariant, initialCell, initialGap));
     setGlassRadius(34.0 * m_widgetScale);
-    configureGlass(3.8f, 1.32f, 4.5f, 3, 0.008f);
     // 预览构造跳过网络、外设轮询和桌面捕获；音乐绘制复用共享会话。
     if (previewOnly) {
         setDesktopCaptureEnabled(false);
@@ -65,18 +64,14 @@ DesktopWidget::DesktopWidget(QWidget* parent, CardKind kind, bool ownsTray,
     const bool savedLiveBackdrop = settings.value(QStringLiteral("appearance/liveBackdrop"), true).toBool();
     const int savedFontSmoothing = qBound(0,
         settings.value(QStringLiteral("appearance/fontSmoothing"), 4).toInt(), 4);
-    const int savedBlurStrength = settings.value(QStringLiteral("appearance/blurStrength"), 50).toInt();
-    const qreal savedOpacity = settings.value(QStringLiteral("appearance/opacity"), 1.0).toDouble();
     const qreal savedRenderQuality = qBound<qreal>(0.5,
         settings.value(QStringLiteral("performance/renderScale"), 0.60).toDouble(), 1.5);
     setRenderScale(float(savedRenderQuality));
-    setMaterialBlurStrength(savedBlurStrength);
     setMouseThroughEnabled(savedMouseThrough);
     setLowPowerRefreshEnabled(savedLowPowerRefresh);
     setLiveBackdropEnabled(savedLiveBackdrop);
     if (savedFontSmoothing != globalFontSmoothing())
         setGlobalFontSmoothing(savedFontSmoothing);
-    setGlassOpacity(savedOpacity);
     setToolTip(m_cardKind == CardKind::Battery ? QStringLiteral("电量 · 拖动移动组件")
                : (m_cardKind == CardKind::Weather ? QStringLiteral("天气 · 拖动移动组件")
                   : (m_cardKind == CardKind::Clock ? QStringLiteral("时钟 · 拖动移动组件")
@@ -151,12 +146,6 @@ DesktopWidget::DesktopWidget(QWidget* parent, CardKind kind, bool ownsTray,
         const qreal scale = qBound<qreal>(0.40, current.value(QStringLiteral("appearance/scale"), 1.0).toDouble(), 2.0);
         if (!qFuzzyCompare(scale, m_widgetScale))
             applyScale(scale);
-        const int blurStrength = qBound(0, current.value(QStringLiteral("appearance/blurStrength"), 50).toInt(), 100);
-        if (blurStrength != materialBlurStrength())
-            setMaterialBlurStrength(blurStrength);
-        const qreal opacity = qBound<qreal>(0.05, current.value(QStringLiteral("appearance/opacity"), 1.0).toDouble(), 1.0);
-        if (!qFuzzyCompare(opacity, glassOpacity()))
-            setGlassOpacity(opacity);
         const bool through = current.value(QStringLiteral("interaction/mouseThrough"), false).toBool();
         if (through != mouseThroughEnabled())
             setMouseThroughEnabled(through);
@@ -227,8 +216,7 @@ void DesktopWidget::hideEvent(QHideEvent* event)
         widget->updateTrayVisibilityLabel();
 }
 
-void DesktopWidget::syncGroupSettings(qreal scale, int blurStrength,
-                                      qreal opacity, bool mouseThrough, bool lowPower,
+void DesktopWidget::syncGroupSettings(qreal scale, bool mouseThrough, bool lowPower,
                                       bool liveBackdrop, qreal renderQuality, int fontSmoothing)
 {
     AppSettings settings;
@@ -241,8 +229,6 @@ void DesktopWidget::syncGroupSettings(qreal scale, int blurStrength,
     for (DesktopWidget* widget : s_instances) {
         if (!qFuzzyCompare(widget->m_widgetScale, scale))
             widget->applyScale(scale);
-        widget->setMaterialBlurStrength(blurStrength);
-        widget->setGlassOpacity(opacity);
         widget->setMouseThroughEnabled(mouseThrough);
         widget->setLowPowerRefreshEnabled(lowPower);
         widget->setLiveBackdropEnabled(liveBackdrop);
@@ -251,8 +237,6 @@ void DesktopWidget::syncGroupSettings(qreal scale, int blurStrength,
             widget->m_library->setInterfaceScale(scale);
             widget->m_library->setLiveBackdropEnabled(liveBackdrop);
             widget->m_library->setRenderScale(float(renderQuality));
-            widget->m_library->setMaterialBlurStrength(blurStrength);
-            widget->m_library->setGlassOpacity(opacity);
         }
     }
     saveAllConfigurations();

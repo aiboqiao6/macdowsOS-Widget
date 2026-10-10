@@ -35,17 +35,6 @@ public:
 
     void setGlassMargins(int horizontal, int vertical = -1);
     void setGlassRadius(qreal radius);
-    void configureGlass(float powerFactor = 3.8f,
-                        float refractionPower = 1.32f,
-                        float blurRadius = 4.5f,
-                        int blurIterations = 3,
-                        float noiseAmount = 0.012f);
-
-    void setMaterialBlurStrength(int percent);
-    int materialBlurStrength() const { return m_blurStrength; }
-    void setGlassOpacity(qreal opacity);
-    qreal glassOpacity() const { return m_glassOpacity; }
-
     // 启用鼠标穿透；独立的托盘与设置窗口继续接收输入。
     void setMouseThroughEnabled(bool enabled);
     bool mouseThroughEnabled() const { return m_mouseThrough; }
@@ -57,10 +46,6 @@ public:
 
     // 画质变化时同时失效 FBO 与桌面裁剪缓存，使新分辨率立即生效。
     void setRenderScale(float scale);
-
-    // 共享卡片高光边缘；具体组件只负责内部图标和文字。
-    void paintGlassSurfaceFrame(QPainter& painter, const QRectF& rect,
-                                qreal radius) const;
 
     void moveToDesktopCorner(int margin = 26);
     void captureDesktopBackdrop();
@@ -103,7 +88,6 @@ private:
     void updateWindowMask();
     bool rebuildWallpaperCanvas(QScreen* screen);
     QImage wallpaperBackdrop(const QRect& area, qreal scale);
-    void updateMaterialParameters();
     void updateRefreshRate();
     bool hasOverlappingDesktopWidget() const;
     void refreshBackdropTopology();
@@ -126,8 +110,6 @@ private:
     bool m_mouseThrough = false;
     bool m_lowPowerRefresh = false;
     bool m_liveBackdropEnabled = false;
-    int m_blurStrength = 55;
-    qreal m_glassOpacity = 1.0;
     bool m_desktopCaptureEnabled = true;
     bool m_desktopLayerEnabled = true;
     int m_glassObjectIndex = -1;

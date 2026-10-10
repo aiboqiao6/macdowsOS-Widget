@@ -39,6 +39,8 @@ python -X utf8 tests\review_comments.py
 - `previewDoesNotStartServicesOrCreateConfiguration` 检查普通图库预览不启动卡片后台任务、不提前创建配置。
 - `scalePreviewAnimatesWithoutBlockingControls` 检查中间尺寸、界面定时器延迟和向导表面尺寸稳定。
 - `settingsAndWizardShareScaleSelector` 检查设置复用缩放控件并保存连续比例。
+- `unifiedGlassPreservesBackgroundWithoutMasks` 检查菜单、向导、图库和卡片共用固定材质，并以恒色背景验证菜单与向导没有暗色遮罩或整面明暗渐变。
+- `settingsJsonMigratesAndPreservesLayout` 同时验证旧模糊、透明度和系统模糊配置被清理，已有布局与其他偏好保持有效。
 - `firstRunWizardShowsActualSizeWithoutResizingSurface` 对照浮动预览与真实桌面尺寸。
 - `musicCardsRenderStatesAndRestoreConfiguration` 检查音乐布局、播放/暂停状态和配置恢复。
 - `systemMediaReadsAndControlsOwnSession` 创建测试专用 Windows 媒体会话，验证标题、艺术家、时间线、暂停与切歌；不播放音频，不控制用户已有会话。系统没有发布测试会话或选择其他播放源时跳过该用例。
@@ -61,3 +63,5 @@ set WIDGET_PIPELINE_BASELINE=
 ```
 
 画质比较覆盖 0.60、0.80、1.00、1.25、1.50 五档；玻璃、模糊和文字路径均要求逐像素零差异。图像保存在指定目录，可直接用于修改前后视觉检查。结果记录见 [cleanup-performance-2026-10-11.md](cleanup-performance-2026-10-11.md)。
+
+统一液态玻璃样式有意移除了旧的明暗渐变与额外高光，因此跨样式版本的旧图不能用作零差异基线；同一样式下的管线优化和回退程序仍要求逐像素一致。

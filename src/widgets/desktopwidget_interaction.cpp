@@ -65,8 +65,6 @@ void DesktopWidget::showWidgetLibrary()
     m_library->setInterfaceScale(m_widgetScale);
     m_library->setLiveBackdropEnabled(liveBackdropEnabled());
     m_library->setRenderScale(renderScale());
-    m_library->setMaterialBlurStrength(materialBlurStrength());
-    m_library->setGlassOpacity(glassOpacity());
     if (!m_library->isVisible()) {
         m_library->prepareBackdrop();
         m_library->show();

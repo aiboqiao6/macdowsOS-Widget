@@ -14,9 +14,7 @@
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
-#include <QLinearGradient>
 #include <QMouseEvent>
-#include <QPainter>
 #include <QParallelAnimationGroup>
 #include <QPropertyAnimation>
 #include <QPushButton>
@@ -40,14 +38,6 @@ FirstRunWizard::FirstRunWizard(QWidget* parent)
     setGlassMargins(0);
     setGlassRadius(28);
     setRenderScale(initialSettings.value(QStringLiteral("performance/renderScale")).toFloat());
-    const float blur = qBound(0, initialSettings.value(
-        QStringLiteral("appearance/blurStrength")).toInt(), 100) / 100.0f;
-    setBlurRadius(0.5f + blur * 9.5f);
-    setBlurIterations(1 + qRound(blur * 2.0f));
-    setNoiseAmount(0.008f);
-    setRefractionPower(1.32f);
-    QtGlassFlowScene::setGlassOpacity(
-        initialSettings.value(QStringLiteral("appearance/opacity")).toFloat());
 
     Qt::WindowFlags flags = windowFlags();
     flags.setFlag(Qt::WindowStaysOnBottomHint, false);
@@ -68,7 +58,7 @@ FirstRunWizard::FirstRunWizard(QWidget* parent)
     setStyleSheet(QStringLiteral(
         "FirstRunWizard { background:transparent; }"
         "QWidget#wizardPage, QWidget#pageHost, QLabel { background:transparent; color:#f7fbff; }"
-        "QFrame#settingsPanel { background:rgba(32,54,78,90); border:1px solid rgba(180,211,237,120); border-radius:20px; }"
+        "QFrame#settingsPanel { background:transparent; border:1px solid rgba(180,211,237,120); border-radius:20px; }"
         "QComboBox { color:#ffffff; background:rgba(41,66,94,120); border:1px solid #8da8c0; border-radius:10px; padding:5px 14px; font-size:16px; }"
         "QComboBox::drop-down { border:0; width:28px; }"
         "QComboBox QAbstractItemView { color:#ffffff; background:#263d52; selection-background-color:#467ba7; }"
@@ -347,26 +337,4 @@ void FirstRunWizard::mouseMoveEvent(QMouseEvent* event)
 void FirstRunWizard::mouseReleaseEvent(QMouseEvent* event)
 {
     event->accept();
-}
-
-void FirstRunWizard::paintOverlay(QPainter& painter)
-{
-    painter.save();
-    painter.setRenderHint(QPainter::Antialiasing, true);
-    const QRectF bounds = QRectF(rect()).adjusted(0.7, 0.7, -0.7, -0.7);
-    painter.setPen(Qt::NoPen);
-    QLinearGradient veil(bounds.topLeft(), bounds.bottomLeft());
-    veil.setColorAt(0.0, QColor(10, 23, 38, 78));
-    veil.setColorAt(0.55, QColor(10, 24, 41, 100));
-    veil.setColorAt(1.0, QColor(8, 18, 33, 86));
-    painter.setBrush(veil);
-    painter.drawRoundedRect(bounds, 28, 28);
-    QLinearGradient rim(bounds.topLeft(), bounds.bottomRight());
-    rim.setColorAt(0.0, QColor(255, 255, 255, 190));
-    rim.setColorAt(0.5, QColor(210, 231, 250, 58));
-    rim.setColorAt(1.0, QColor(255, 255, 255, 125));
-    painter.setBrush(Qt::NoBrush);
-    painter.setPen(QPen(QBrush(rim), 1.2));
-    painter.drawRoundedRect(bounds, 28, 28);
-    painter.restore();
 }

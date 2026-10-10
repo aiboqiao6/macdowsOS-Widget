@@ -12,7 +12,6 @@
 #include <QHideEvent>
 #include <QFileInfo>
 #include <QList>
-#include <QLinearGradient>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -71,11 +70,10 @@ LiquidGlassWidget::LiquidGlassWidget(QWidget* parent)
     setMouseTracking(true);
     setFixedSize(390, 238);
 
-    configureGlass();
     m_glassObjectIndex = addGlassObject(QPointF(m_glassMarginsX, m_glassMarginsY),
                                         QSizeF(width() - m_glassMarginsX * 2,
                                                height() - m_glassMarginsY * 2),
-                                        3.8f);
+                                        LiquidGlassStyle::kShapePower);
     setGlassObjectCornerRadius(m_glassObjectIndex, float(m_glassRadius));
     updateWindowMask();
 
@@ -270,33 +268,6 @@ void LiquidGlassWidget::compositeGlassWindows(QImage& image, const QRect& area,
 #endif
 }
 
-void LiquidGlassWidget::setMaterialBlurStrength(int percent)
-{
-    m_blurStrength = qBound(0, percent, 100);
-    AppSettings settings;
-    settings.setValue(QStringLiteral("appearance/blurStrength"), m_blurStrength);
-    updateMaterialParameters();
-    update();
-}
-
-void LiquidGlassWidget::updateMaterialParameters()
-{
-    const qreal amount = m_blurStrength / 100.0;
-    setBlurRadius(float(0.5 + amount * 9.5));
-    setBlurIterations(1 + qRound(amount * 2.0));
-    setNoiseAmount(0.008f);
-    setRefractionPower(1.32f);
-}
-
-void LiquidGlassWidget::setGlassOpacity(qreal opacity)
-{
-    m_glassOpacity = qBound<qreal>(0.05, opacity, 1.0);
-    AppSettings settings;
-    settings.setValue(QStringLiteral("appearance/opacity"), m_glassOpacity);
-    QtGlassFlowScene::setGlassOpacity(float(m_glassOpacity));
-    update();
-}
-
 void LiquidGlassWidget::setMouseThroughEnabled(bool enabled)
 {
     if (m_mouseThrough == enabled)
@@ -472,53 +443,6 @@ void LiquidGlassWidget::setGlassRadius(qreal radius)
         setGlassObjectCornerRadius(m_glassObjectIndex, float(m_glassRadius));
     updateWindowMask();
     update();
-}
-
-void LiquidGlassWidget::configureGlass(float powerFactor, float refractionPower,
-                                       float blurRadius, int blurIterations,
-                                       float noiseAmount)
-{
-    setPowerFactor(powerFactor);
-    setRefractionPower(refractionPower);
-    setBlurRadius(blurRadius);
-    setBlurIterations(blurIterations);
-    setNoiseAmount(noiseAmount);
-    setAttractionDistance(0.0f);
-}
-
-void LiquidGlassWidget::paintGlassSurfaceFrame(QPainter& painter, const QRectF& card,
-                                                qreal radius) const
-{
-    // 共享边缘绘制与内容无关；模糊、裁剪和圆角由玻璃基类负责。
-    painter.save();
-    painter.setRenderHint(QPainter::Antialiasing, true);
-    painter.setBrush(Qt::NoBrush);
-    // 着色器已提供透明边缘，只增加一层方向性高光，避免形成重复亮边。
-    QLinearGradient rim(card.topLeft(), card.bottomRight());
-    rim.setColorAt(0.00, QColor(255, 255, 255, 105));
-    rim.setColorAt(0.22, QColor(245, 250, 255, 54));
-    rim.setColorAt(0.52, QColor(220, 232, 246, 18));
-    rim.setColorAt(0.78, QColor(224, 238, 252, 28));
-    rim.setColorAt(1.00, QColor(255, 255, 255, 62));
-    QPen edge(QBrush(rim), 1.0);
-    edge.setCosmetic(true);
-    painter.setPen(edge);
-    painter.drawRoundedRect(card.adjusted(.75, .75, -.75, -.75),
-                      qMax<qreal>(0.0, radius - .75),
-                      qMax<qreal>(0.0, radius - .75));
-
-    painter.save();
-    QPainterPath tintPath;
-    tintPath.addRoundedRect(card, radius, radius);
-    painter.setClipPath(tintPath);
-    QLinearGradient gloss(card.topLeft(),
-                          QPointF(card.left(), card.top() + card.height() * .40));
-    gloss.setColorAt(0.0, QColor(255, 255, 255, 22));
-    gloss.setColorAt(0.30, QColor(255, 255, 255, 5));
-    gloss.setColorAt(1.0, QColor(255, 255, 255, 0));
-    painter.fillRect(card, gloss);
-    painter.restore();
-    painter.restore();
 }
 
 void LiquidGlassWidget::updateGlassObjectGeometry()

@@ -35,10 +35,7 @@ QImage DesktopWidget::renderPreview(CardKind kind, int variant, const QSize& siz
     image.fill(Qt::transparent);
     QPainter painter(&image);
     painter.setRenderHint(QPainter::Antialiasing);
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(36, 54, 76, 150));
-    const qreal previewRadius = 34.0 * preview.m_widgetScale;
-    painter.drawRoundedRect(QRectF(QPointF(), QSizeF(renderSize)), previewRadius, previewRadius);
+    // 预览仅绘制内容，透明区域复用图库的统一玻璃，不叠加独立色调。
     preview.paintOverlay(painter);
     painter.end();
     return image;

@@ -27,7 +27,6 @@ protected:
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
-    void paintOverlay(QPainter& painter) override;
     bool wallpaperOnlyWhenIdle() const override { return !liveBackdropEnabled(); }
 
 private:
