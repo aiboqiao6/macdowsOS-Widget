@@ -19,7 +19,11 @@ void DesktopWidget::applyScale(qreal scale)
     m_widgetScale = qBound<qreal>(0.40, scale, 2.0);
     AppSettings settings;
     settings.setValue(QStringLiteral("appearance/scale"), m_widgetScale);
-    setGlassRadius(34.0 * m_widgetScale);
+    if (m_library) {
+        settings.sync();
+        m_library->updateScreenLayout();
+    }
+    setGlassRadius(LiquidGlassStyle::kCardCornerRadius * m_widgetScale);
     const int cell = qMax(1, qRound(kGridBaseCell * m_widgetScale));
     QScreen* currentScreen = QGuiApplication::screenAt(geometry().center());
     if (!currentScreen)
@@ -38,8 +42,6 @@ void DesktopWidget::applyScale(qreal scale)
         }
     }
     updateCardGeometry();
-    if (m_library)
-        m_library->setInterfaceScale(m_widgetScale);
     captureDesktopBackdrop();
     update();
 }
@@ -49,7 +51,7 @@ void DesktopWidget::updateCardGeometry()
     // 每个窗口仅包含一个完整玻璃对象；基类管理圆角与背景，本类负责选定卡片内容。
     setGlassObjectVisible(0, true);
     setGlassObjectGeometry(0, QPointF(0, 0), QSizeF(width(), height()));
-    setGlassObjectCornerRadius(0, float(34.0 * m_widgetScale));
+    setGlassObjectCornerRadius(0, float(LiquidGlassStyle::kCardCornerRadius * m_widgetScale));
 }
 
 void DesktopWidget::moveToGroupPosition()
@@ -208,27 +210,26 @@ QRect DesktopWidget::nearbyWidgetRect(CardKind kind, int variant,
             {beside.left() - gap - size.width(), beside.bottom() + gap + 1},
             {beside.right() + gap + 1, beside.bottom() + gap + 1}
         };
-        for (int index = 0; index < 12; ++index) {
-            const QPoint position = candidates[index];
+        const auto consider = [&](const QPoint& position, int index) {
             if (!overlapping) {
                 const int dx = qAbs(position.x() - requestedTopLeft.x());
                 const int dy = qAbs(position.y() - requestedTopLeft.y());
                 if (index < 4) {
                     if (!besideEdge || dx > threshold)
-                        continue;
+                        return;
                 } else if (index < 8) {
                     if (!aboveOrBelow || dy > threshold)
-                        continue;
+                        return;
                 } else if (besideEdge || aboveOrBelow
                            || dx > threshold || dy > threshold) {
-                    continue;
+                    return;
                 }
             }
             const QRect candidate(position, size);
             if (!area.contains(candidate))
-                continue;
+                return;
             if (overlapsVisibleWidget(candidate, ignored))
-                continue;
+                return;
             const qint64 dx = qint64(position.x()) - requestedTopLeft.x();
             const qint64 dy = qint64(position.y()) - requestedTopLeft.y();
             const qint64 distance = dx * dx + dy * dy;
@@ -236,6 +237,23 @@ QRect DesktopWidget::nearbyWidgetRect(CardKind kind, int variant,
                 bestDistance = distance;
                 best = candidate;
             }
+        };
+        for (int index = 0; index < 12; ++index)
+            consider(candidates[index], index);
+
+        // 大卡片的边缘按单格步进，允许半幅交错，候选仍须通过边界和碰撞检查。
+        const int pitch = cell + gap;
+        for (int row = 1 - gridRowSpan(kind, variant);
+             row < gridRowSpan(neighbor->m_cardKind, neighbor->m_cardVariant); ++row) {
+            const int y = beside.top() + row * pitch;
+            consider(QPoint(beside.left() - gap - size.width(), y), 0);
+            consider(QPoint(beside.right() + gap + 1, y), 0);
+        }
+        for (int column = 1 - gridColumnSpan(kind, variant);
+             column < gridColumnSpan(neighbor->m_cardKind, neighbor->m_cardVariant); ++column) {
+            const int x = beside.left() + column * pitch;
+            consider(QPoint(x, beside.top() - gap - size.height()), 4);
+            consider(QPoint(x, beside.bottom() + gap + 1), 4);
         }
     }
     if (best.isValid())

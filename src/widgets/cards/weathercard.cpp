@@ -202,12 +202,12 @@ void DesktopWidget::paintWeatherCard(QPainter& painter, const QRectF& card) cons
                         Qt::AlignLeft | Qt::AlignVCenter, temp);
         const qreal summaryWidth = w * .37;
         const qreal summaryLeft = content.right() - summaryWidth;
-        const qreal iconSize = unit * .14;
-        const qreal conditionWidth = iconSize * 1.35;
+        const qreal iconSize = unit * (darkModeEnabled() ? .10 : .14);
+        const qreal conditionWidth = iconSize * (darkModeEnabled() ? 1.0 : 1.35);
         const QRectF conditionColumn(content.right() - conditionWidth,
                                      content.top(), conditionWidth, h * .27);
         const QRectF summaryIcon(conditionColumn.center().x() - iconSize * .5,
-                                 content.top() - unit * .050,
+                                 content.top() + unit * (darkModeEnabled() ? .020 : -.050),
                                  iconSize, iconSize);
         const QRectF paintedSummaryIcon = drawWeatherIcon(
             painter, summaryIcon, m_weatherNight, m_weatherCode);
@@ -217,11 +217,11 @@ void DesktopWidget::paintWeatherCard(QPainter& painter, const QRectF& card) cons
         const qreal conditionTextTop = paintedSummaryIcon.bottom()
                                        + unit * kWeatherConditionGapRatio;
         const QRectF conditionText(
-            conditionColumn.left(), conditionTextTop,
-            conditionColumn.width(),
+            summaryLeft, conditionTextTop,
+            summaryWidth,
             qMax<qreal>(0.0, conditionColumn.bottom() - conditionTextTop));
         ResponsiveLayout::drawSingleLine(
-            painter, conditionText, Qt::AlignCenter,
+            painter, conditionText, Qt::AlignRight | Qt::AlignVCenter,
             elided(description, painter.font(), conditionText.width()));
         drawHighLow(QRectF(summaryLeft, content.top() + h * .28,
                            summaryWidth, h * .15),
@@ -241,7 +241,7 @@ void DesktopWidget::paintWeatherCard(QPainter& painter, const QRectF& card) cons
                 ResponsiveLayout::drawSingleLine(painter, QRectF(cell.left(), cell.top(), cell.width(),
                                        stripHeight * .18),
                                 Qt::AlignCenter, hour.time);
-                const qreal icon = unit * .14;
+                const qreal icon = unit * (darkModeEnabled() ? .125 : .14);
                 drawWeatherIcon(painter, QRectF(cell.center().x() - icon * .5,
                                           cell.top() + stripHeight * .24,
                                           icon, icon * .84),

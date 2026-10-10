@@ -5,6 +5,7 @@ varying vec2 v_texcoord;
 
 // === 背景与几何 ===
 uniform sampler2D u_blurredTex;
+uniform float u_curvature;
 uniform vec2 u_objCenter;     // 标准化设备坐标，范围为负一到一。
 uniform vec2 u_objHalfSize;   // 标准化设备坐标下的半尺寸。
 uniform vec2 u_objHalfSizePx; // 原生像素半尺寸。
@@ -12,15 +13,12 @@ uniform float u_cornerRadiusPx;
 uniform float u_powerFactor;
 
 // === 折射参数 ===
-uniform float u_a;
-uniform float u_b;
-uniform float u_c;
-uniform float u_d;
 uniform float u_fPower;
 
 // === 材质参数 ===
 uniform float u_noise;        // 按画质限制在一个颜色量化单位内，最高档关闭。
 uniform float u_edgeAaScale;  // 随画质变化的解析边缘覆盖率。
+uniform bool u_darkMode;
 
 // === 平滑并集桥接 ===
 uniform int u_numConnections;
@@ -30,8 +28,6 @@ uniform float u_connPowerB[8];
 uniform float u_connStrength[8];
 
 uniform float u_opacity;
-
-const float M_E = 2.718281828459045;
 
 // 超椭圆 SDF —— 形状基础
 float sdSuperellipse(vec2 p, float n, float r) {
@@ -48,11 +44,6 @@ float sdRoundedBox(vec2 p, vec2 halfSize, float radius) {
     float r = clamp(radius, 0.0, min(halfSize.x, halfSize.y));
     vec2 q = abs(p) - halfSize + vec2(r);
     return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - r;
-}
-
-// 折射强度曲线
-float refractionF(float x) {
-    return 1.0 - u_b * pow(u_c * M_E, -u_d * x - u_a);
 }
 
 // 交错梯度抖动避免低频正弦哈希产生可见的方格或摩尔纹。
@@ -116,33 +107,49 @@ void main() {
 
     float dist = -combinedD;
 
-    // 仅模糊模式的折射强度为零，直接复用局部坐标，跳过幂函数。
-    vec2 sampleP = u_fPower == 0.0
-                 ? localP
-                 : localP * pow(refractionF(dist), u_fPower);
+    // 距离场梯度换算为原生像素，宽卡片和小数 DPI 使用同一曲面厚度。
+    float gradientLength = max(length(surfaceGradient), 0.000001);
+    vec2 normal = surfaceGradient / gradientLength;
+    float depthScale = u_cornerRadiusPx > 0.0 && u_numConnections == 0
+        ? min(u_objHalfSizePx.x, u_objHalfSizePx.y) : 1.0 / gradientLength;
+    float depthPx = max(dist * depthScale, 0.0);
+    // 窄边缘径向折射形成凸面透镜；厚度由圆角决定，不随面板面积无界增长。
+    float lensDecayPx = max(u_cornerRadiusPx * 0.15,
+                            min(u_objHalfSizePx.x, u_objHalfSizePx.y) * 0.035);
+    float rimCurve = exp(-depthPx / max(lensDecayPx, 1.0));
+    float amplitude = mix(0.018, 0.44, u_curvature) * u_fPower;
+    vec2 sampleP = localP * (1.0 - amplitude * rimCurve);
     vec2 targetNDC = sampleP * u_objHalfSize + u_objCenter;
     vec2 texCoord = clamp(targetNDC * 0.5 + 0.5, 0.0, 1.0);
 
-    // 统一液态玻璃材质：保留背景原色，仅在轮廓处产生光学反光。
-
-    // 1. 干净的单次模糊采样 + 极微噪声（消色带）
+    // 统一的柔化透光避免清晰原图与模糊图混合后出现双重边缘。
     vec4 color = texture2D(u_blurredTex, texCoord);
+    if (u_fPower != 0.0) {
+        // 固定的环境反射压缩背景明暗，保留色彩差异，形成参考玻璃的灰阶与厚度。
+        float luminance = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
+        if (u_darkMode) {
+            // 深色透光压低灰白反射，仍保留壁纸色彩与边缘折射。
+            color.rgb = clamp(color.rgb * 0.630 - vec3(luminance * 0.347)
+                              + vec3(0.015, 0.017, 0.021), 0.0, 1.0);
+        } else {
+            color.rgb = clamp(color.rgb * 0.94 - vec3(luminance * 0.35)
+                              + vec3(0.129, 0.147, 0.159), 0.0, 1.0);
+        }
+    }
     if (u_noise > 0.0) {
         vec4 noiseVal = vec4(vec3(rand(gl_FragCoord.xy) - 0.5), 0.0);
         color += noiseVal * u_noise;
     }
 
-    // 2. 极细白色边框线（约 0.5–1 px 边缘反光）
+    // 方向性反光只占原生像素轮廓，不在整个玻璃表面叠加明暗遮罩。
     float fw = max(edgeWidth, 0.0003);
-    // 边缘覆盖率随画质调整，但光学描边维持约一个原生像素。
-    float borderFw = clamp(distanceWidth, 0.0003, 0.003);
-    float borderLine = smoothstep(borderFw * 2.5, borderFw * 0.5, dist);
-    // 由距离场法线生成统一的方向性反光，所有窗口均无需额外高光遮罩。
-    vec2 normal = normalize(surfaceGradient + vec2(0.000001));
-    float reflection = pow(abs(dot(normal, normalize(vec2(-0.6, 0.8)))), 3.0);
-    color.rgb += vec3(borderLine * (0.07 + reflection * 0.18));
+    float borderLine = 1.0 - smoothstep(0.35, 2.3, depthPx);
+    float directionalLight = dot(normal, normalize(vec2(-0.6, 0.8)));
+    color.rgb *= 1.0 - borderLine * max(-directionalLight, 0.0) * (u_darkMode ? 0.20 : 0.12);
+    color.rgb += vec3(borderLine * ((u_darkMode ? 0.012 : 0.025)
+                                  + max(directionalLight, 0.0) * (u_darkMode ? 0.09 : 0.18)));
 
-    // 3. 干净锐利的 alpha 抗锯齿
+    // 解析覆盖率保持圆角透明边缘平滑。
     float alpha = smoothstep(-fw, fw, dist);
     color.a = alpha * u_opacity;
 

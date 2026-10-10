@@ -64,6 +64,8 @@ public:
     bool glassRenderingEnabled() const { return m_glassRenderingEnabled; }
     void setGlassOpacity(float opacity);
     float glassOpacity() const { return m_glassOpacity; }
+    void setDarkModeEnabled(bool enabled);
+    bool darkModeEnabled() const { return m_darkModeEnabled; }
     void setRefreshInterval(int intervalMs);
     int refreshInterval() const { return m_refreshInterval; }
     // 由宿主处理窗口拖动时，仍可启用交互刷新节奏。
@@ -154,6 +156,7 @@ private:
     bool m_bgDirty;
     bool m_glassRenderingEnabled;
     float m_glassOpacity;
+    bool m_darkModeEnabled = false;
     bool m_blurCacheDirty;
     float m_renderScale;
 
@@ -161,10 +164,6 @@ private:
     QVector<Connection> m_connections;
     bool m_connectionsDirty;
 
-    float m_refractionA;
-    float m_refractionB;
-    float m_refractionC;
-    float m_refractionD;
     float m_fPower;
     float m_blurRadius;
     int m_blurIterations;

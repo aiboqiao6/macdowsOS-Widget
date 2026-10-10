@@ -363,10 +363,12 @@ void LiquidGlassWidget::updateRefreshRate()
     // 低频刷新只应用于鼠标穿透卡片，保留可交互组件的响应速度。
     const bool lowPower = m_lowPowerRefresh && m_mouseThrough;
     const int displayInterval = activeDisplayInterval();
+    const int sampleInterval = qMax(1, displayInterval / 2);
+    const bool staticBackdrop = m_unchangedCaptures >= qMax(3, 350 / sampleInterval);
     setRefreshInterval(lowPower ? 250 : displayInterval);
-    // 实时背景与内容动画独立，静止时也保持显示器刷新节奏。
+    // 捕获变化会主动请求绘制，实时背景无需在交换帧回调中无限循环重绘。
     const bool desktopDrag = desktopDragActive();
-    setContinuousRenderingEnabled(m_liveBackdropEnabled && !desktopDrag);
+    setContinuousRenderingEnabled(false);
     if (m_backdropTimer) {
         const bool dragging = m_dragging && !lowPower;
         const bool live = !wallpaperOnlyWhenIdle() && !desktopDrag;
@@ -375,7 +377,7 @@ void LiquidGlassWidget::updateRefreshRate()
                                                         : Qt::VeryCoarseTimer);
         const int interval = dragging ? displayInterval
                            : (lowPower ? 250
-                           : (live ? displayInterval
+                           : (live ? (staticBackdrop ? qMax(displayInterval, 100) : sampleInterval)
                                    : kWallpaperIdleIntervalMs));
         if (m_backdropTimer->interval() != interval)
             m_backdropTimer->setInterval(interval);
@@ -663,7 +665,7 @@ bool LiquidGlassWidget::captureCompositedBackdrop(QScreen* screen)
     if (m_capturesInFlight >= (live && !m_dragging ? 2 : 1))
         return true;
     // 粗略定时器允许提前触发，容忍该误差可避免隔次跳过空闲刷新。
-    const int maxAge = live && !m_dragging ? 0
+    const int maxAge = live && !m_dragging ? qMax(1, m_backdropTimer->interval() * 94 / 100)
                      : (m_dragging ? 14 : qMax(1, m_backdropTimer->interval() * 94 / 100));
     if (m_compositeCaptureClock.isValid() && m_compositeCaptureClock.elapsed() < maxAge
         && m_lastCompositeGeometry == geometry())
@@ -693,16 +695,12 @@ bool LiquidGlassWidget::captureCompositedBackdrop(QScreen* screen)
                 m_compositeArea = area;
                 m_unchangedCaptures = 0;
             } else
-                m_unchangedCaptures = qMin(8, m_unchangedCaptures + 1);
+                m_unchangedCaptures = qMin(512, m_unchangedCaptures + 1);
             updateRefreshRate();
             m_lastCompositeGeometry = geometry();
-            ++s_surfaceRevision;
             updateCompositeCrop();
         }
-        // 交付结果后立即提交下一次捕获，避免排队定时器额外损失一帧。
-        if (m_liveBackdropEnabled && !(m_lowPowerRefresh && m_mouseThrough)
-            && !desktopDragActive())
-            captureDesktopBackdrop();
+        // 下一次捕获由定时器调度，静止背景退回低频探测，不在回调内忙循环。
     }, m_dragging ? 1 : 0);
     return true;
 }

@@ -270,8 +270,9 @@ NativeWindows::HiddenWindows NativeWindows::hideApplicationWindows(
                 && !(extendedStyle & WS_EX_APPWINDOW)))
             return TRUE;
 
-        // 只将带标题或显式应用标记的顶层窗口视为用户应用，避免隐藏提示和输入覆盖层。
-        if (!(style & WS_CAPTION) && !(extendedStyle & WS_EX_APPWINDOW))
+        // 无边框应用可能没有标题栏样式；非工具顶层窗口的标题或系统菜单也可标识应用。
+        if (!(style & (WS_CAPTION | WS_SYSMENU)) && !(extendedStyle & WS_EX_APPWINDOW)
+            && GetWindowTextLengthW(window) == 0)
             return TRUE;
 
         DWORD cloaked = 0;

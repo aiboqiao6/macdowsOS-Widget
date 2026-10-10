@@ -49,6 +49,12 @@ void DesktopWidget::showSettingsDialog()
     auto* form = new QFormLayout(settingsBody);
     form->setLabelAlignment(Qt::AlignLeft);
     form->setFormAlignment(Qt::AlignTop);
+    auto* colorMode = new QComboBox(&dialog);
+    colorMode->setObjectName(QStringLiteral("colorMode"));
+    colorMode->addItem(QStringLiteral("亮色"), false);
+    colorMode->addItem(QStringLiteral("暗色"), true);
+    colorMode->setCurrentIndex(colorMode->findData(darkModeEnabled()));
+    form->addRow(QStringLiteral("外观模式"), colorMode);
     auto* scaleSelector = new ScaleSelector(qRound(m_widgetScale * 100), &dialog);
     form->addRow(QStringLiteral("显示大小"), scaleSelector);
 
@@ -133,6 +139,7 @@ void DesktopWidget::showSettingsDialog()
     dialog.resize(QSize(640, 740).boundedTo(available));
 
     if (dialog.exec() == QDialog::Accepted) {
+        setGlobalDarkMode(colorMode->currentData().toBool());
         setStartupEnabled(startup->isChecked());
         syncGroupSettings(scaleSelector->percent() / 100.0,
                           mouseThrough->isChecked(),

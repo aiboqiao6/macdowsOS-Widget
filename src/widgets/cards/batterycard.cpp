@@ -87,7 +87,8 @@ void DesktopWidget::drawDeviceRing(QPainter& painter, const QPointF& center, qre
                       radius * 2.0, radius * 2.0);
     const ResponsiveLayout::Metrics metrics(ring);
     const qreal stroke = metrics.stroke(painter, .0525)
-                       * qMax<qreal>(0.1, strokeMultiplier);
+                       * qMax<qreal>(0.1, strokeMultiplier)
+                       * (darkModeEnabled() ? 1.65 : 1.0);
 
     QPen track(QColor(238, 242, 250, connected ? 38 : 24), stroke,
                Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
@@ -123,7 +124,7 @@ void DesktopWidget::drawDeviceRing(QPainter& painter, const QPointF& center, qre
                            radius * .38, radius * .74);
         painter.setPen(QPen(QColor(226, 232, 244, connected ? 165 : 55), stroke * .18,
                       Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-        painter.setBrush(QColor(226, 232, 244, connected ? 138 : 45));
+        painter.setBrush(QColor(226, 232, 244, connected ? (darkModeEnabled() ? 175 : 138) : 45));
         painter.drawRoundedRect(mouse, radius * .18, radius * .18);
         painter.drawLine(QPointF(center.x(), mouse.top() + radius * .08),
                    QPointF(center.x(), mouse.top() + radius * .29));
@@ -158,7 +159,7 @@ void DesktopWidget::drawDeviceRing(QPainter& painter, const QPointF& center, qre
         painter.setFont(displayFont(qMax(1, qRound(radius * .44)), QFont::Normal));
         painter.setPen(QColor(235, 240, 250, connected ? 182 : 66));
         ResponsiveLayout::drawSingleLine(painter, QRectF(center.x() - radius * .72,
-                                 center.y() + radius * 1.55,
+                                 center.y() + radius * (darkModeEnabled() ? 1.40 : 1.55),
                                  radius * 1.44, radius * .85),
                        Qt::AlignHCenter | Qt::AlignTop,
                        !connected ? QStringLiteral("—")
@@ -198,7 +199,7 @@ void DesktopWidget::paintBatteryCard(QPainter& painter, const QRectF& card) cons
             const qreal sideInset = card.width() * .145;
             const qreal firstX = card.left() + sideInset;
             const qreal spacing = (card.width() - sideInset * 2.0) / 3.0;
-            const qreal ringY = card.top() + card.height() * .42;
+            const qreal ringY = card.top() + card.height() * (darkModeEnabled() ? .405 : .42);
             drawDeviceRing(painter, QPointF(firstX, ringY), ringRadius,
                            m_hasBattery ? m_batteryLevel : -1, 0, m_hasBattery);
             for (int slot = 0; slot < 3; ++slot) {
@@ -286,34 +287,34 @@ void DesktopWidget::paintBatteryCard(QPainter& painter, const QRectF& card) cons
                 Qt::AlignRight | Qt::AlignVCenter,
                 level >= 0 ? QString::number(qBound(0, level, 100)) + QChar('%')
                            : QStringLiteral("—"));
-            painter.setPen(QPen(QColor(255, 255, 255, 235),
-                          rowMetrics.stroke(painter, .019), Qt::SolidLine,
-                          Qt::RoundCap, Qt::RoundJoin));
+            const qreal height = s * .173;
+            const qreal stroke = qMin(height * .18, rowMetrics.stroke(painter, .014));
+            const QRectF bounds(area.right() - s * .769,
+                                area.center().y() - height * .5, s * .404, height);
+            const QRectF body = bounds.adjusted(stroke * .5, stroke * .5,
+                                                -height * .24 - stroke * .5, -stroke * .5);
+            const qreal radius = height * .20;
+            painter.setPen(QPen(QColor(255, 255, 255, 220), stroke));
             painter.setBrush(Qt::NoBrush);
-            const QRectF batteryRect(area.right() - s * .769,
-                                     area.center().y() - s * .077,
-                                     s * .346, s * .154);
-            painter.drawRoundedRect(batteryRect, s * .038, s * .038);
+            painter.drawRoundedRect(body, radius, radius);
             if (level >= 0) {
                 painter.setPen(Qt::NoPen);
                 painter.setBrush(QColor(255, 255, 255, 235));
-                const qreal inset = s * .038;
-                const qreal fillWidth = (batteryRect.width() - inset * 2.0)
-                    * qBound(0, level, 100) / 100.0;
-                if (fillWidth > 0.0)
-                    painter.drawRoundedRect(QRectF(batteryRect.left() + inset,
-                                             batteryRect.top() + s * .029,
-                                             fillWidth,
-                                             batteryRect.height() - s * .058),
-                                      s * .019, s * .019);
+                const qreal inset = stroke * 1.5;
+                QRectF fill = body.adjusted(inset, inset, -inset, -inset);
+                fill.setWidth(fill.width() * qBound(0, level, 100) / 100.0);
+                if (fill.width() > 0.0 && fill.height() > 0.0) {
+                    const qreal fillRadius = qMin(radius * .5, fill.width() * .5);
+                    painter.drawRoundedRect(fill, fillRadius, fillRadius);
+                }
             }
-            painter.setPen(QPen(QColor(255, 255, 255, 235),
-                          rowMetrics.stroke(painter, .019), Qt::SolidLine,
-                          Qt::RoundCap, Qt::RoundJoin));
-            painter.drawLine(QPointF(area.right() - s * .385,
-                               area.center().y() - s * .029),
-                       QPointF(area.right() - s * .327,
-                               area.center().y() - s * .029));
+            // 端子使用垂直居中的短胶囊，与外壳保留间隙，避免看起来像悬浮的减号。
+            const QRectF terminal(bounds.right() - height * .14,
+                                  bounds.center().y() - height * .18,
+                                  height * .14, height * .36);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(255, 255, 255, 180));
+            painter.drawRoundedRect(terminal, terminal.width() * .5, terminal.width() * .5);
         };
         // 六行等高，只有真实设备填充内容，剩余行保持空白。
         const qreal rowHeight = content.height() / kBatteryListRows;

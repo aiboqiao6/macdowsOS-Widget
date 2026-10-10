@@ -24,7 +24,16 @@ void DesktopWidget::applyFontSmoothing(QFont& font) { AppFonts::applySmoothing(f
 void DesktopWidget::setGlobalFontSmoothing(int level)
 {
     if (AppFonts::setSmoothing(level))
-        WidgetLibraryDialog::refreshFontRendering();
+        WidgetLibraryDialog::refreshPreviews();
+}
+
+void DesktopWidget::setGlobalDarkMode(bool enabled)
+{
+    AppSettings().setValue(QStringLiteral("appearance/darkMode"), enabled);
+    for (QWidget* widget : QApplication::allWidgets())
+        if (auto* surface = qobject_cast<QtGlassFlowScene*>(widget))
+            surface->setDarkModeEnabled(enabled);
+    WidgetLibraryDialog::refreshPreviews();
 }
 
 QList<DesktopWidget*> DesktopWidget::s_instances;
@@ -50,7 +59,7 @@ DesktopWidget::DesktopWidget(QWidget* parent, CardKind kind, bool ownsTray,
         ? gridGapForArea(initialScreen->availableGeometry(), m_widgetScale)
         : qMax(4, qRound(kGridBaseGap * m_widgetScale));
     setFixedSize(gridWidgetSize(m_cardKind, m_cardVariant, initialCell, initialGap));
-    setGlassRadius(34.0 * m_widgetScale);
+    setGlassRadius(LiquidGlassStyle::kCardCornerRadius * m_widgetScale);
     // 预览构造跳过网络、外设轮询和桌面捕获；音乐绘制复用共享会话。
     if (previewOnly) {
         setDesktopCaptureEnabled(false);
@@ -155,6 +164,9 @@ DesktopWidget::DesktopWidget(QWidget* parent, CardKind kind, bool ownsTray,
         const bool liveBackdrop = current.value(QStringLiteral("appearance/liveBackdrop"), true).toBool();
         if (liveBackdrop != liveBackdropEnabled())
             setLiveBackdropEnabled(liveBackdrop);
+        const bool darkMode = current.value(QStringLiteral("appearance/darkMode"), false).toBool();
+        if (darkMode != darkModeEnabled())
+            setGlobalDarkMode(darkMode);
         const int fontSmoothing = qBound(0,
             current.value(QStringLiteral("appearance/fontSmoothing"), 4).toInt(), 4);
         if (fontSmoothing != globalFontSmoothing())
@@ -179,8 +191,6 @@ DesktopWidget::~DesktopWidget()
 {
     NativeWindows::restoreApplicationWindows(m_dragHiddenWindows);
     m_dragHiddenWindows.clear();
-    NativeWindows::restoreApplicationWindows(m_libraryDragHiddenWindows);
-    m_libraryDragHiddenWindows.clear();
     delete m_library;
     s_instances.removeAll(this);
 }
@@ -234,7 +244,7 @@ void DesktopWidget::syncGroupSettings(qreal scale, bool mouseThrough, bool lowPo
         widget->setLiveBackdropEnabled(liveBackdrop);
         widget->setRenderScale(float(renderQuality));
         if (widget->m_library) {
-            widget->m_library->setInterfaceScale(scale);
+            widget->m_library->updateScreenLayout();
             widget->m_library->setLiveBackdropEnabled(liveBackdrop);
             widget->m_library->setRenderScale(float(renderQuality));
         }

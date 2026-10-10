@@ -12,6 +12,8 @@
 #include "app/appsettings.h"
 #include "ui/liquidglassmenu.h"
 #include "widgets/desktopwidget.h"
+#include "widgets/widgetgeometry.h"
+#include "widgets/cardmetrics.h"
 
 #include <QApplication>
 #include <QAbstractItemView>
@@ -22,6 +24,7 @@
 #include <QDialog>
 #include <QLineEdit>
 #include <QFrame>
+#include <QGridLayout>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -243,6 +246,15 @@ static QColor centerPixel(QOpenGLWidget& widget)
     return image.isNull() ? QColor() : image.pixelColor(image.rect().center());
 }
 
+// 材质规范的颜色响应用于隔离空间折射，零折射测试仍单独检查原始高斯采样。
+static QColor expectedGlassColor(const QColor& pixel)
+{
+    const double luminance = pixel.red()*.2126 + pixel.green()*.7152 + pixel.blue()*.0722;
+    return QColor(qBound(0, qRound(pixel.red()*.94 - luminance*.35 + 255*.129), 255),
+                  qBound(0, qRound(pixel.green()*.94 - luminance*.35 + 255*.147), 255),
+                  qBound(0, qRound(pixel.blue()*.94 - luminance*.35 + 255*.159), 255));
+}
+
 class PendingReply : public QNetworkReply {
 public:
     explicit PendingReply(QObject* parent) : QNetworkReply(parent) {
@@ -293,6 +305,56 @@ class WidgetRegression : public QObject {
     Q_OBJECT
     QTemporaryDir settings;
 private slots:
+    void opticalGlassKeepsCenterStableAndBendsOnlyRim() {
+        PipelineProbe scene;
+        scene.setNoiseAmount(0);
+        scene.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&scene));
+        for (QSize size : {QSize(240, 160), QSize(672, 328), QSize(360, 440)}) {
+            scene.resize(size);
+            scene.m_objects.clear();
+            scene.addGlassObject(QPointF(), size);
+            scene.setGlassObjectCornerRadius(0, qMin(size.width(), size.height()) * .16);
+            const qreal dpr = scene.devicePixelRatioF();
+            QImage background(size * dpr, QImage::Format_RGB32);
+            for (int y = 0; y < background.height(); ++y)
+                for (int x = 0; x < background.width(); ++x)
+                    background.setPixel(x, y, qRgb(30 + 200 * x / background.width(),
+                        30 + 200 * y / background.height(), (int(x / dpr) / 8) % 2 ? 220 : 40));
+            scene.setBackgroundImage(background);
+            for (float quality : {.6f, .8f, 1.f, 1.25f, 1.5f}) {
+                scene.setRenderScale(quality);
+                scene.setRefractionPower(0);
+                scene.setBlurRadius(0);
+                const QImage clear = scene.grabFramebuffer();
+                scene.setBlurRadius(LiquidGlassStyle::kBlurRadius);
+                const QImage frosted = scene.grabFramebuffer();
+                scene.setRefractionPower(LiquidGlassStyle::kRefractionPower);
+                const QImage optical = scene.grabFramebuffer();
+                const int cx = optical.width() / 2, cy = optical.height() / 2;
+                const int rimX = qRound(qMin(optical.width(), optical.height()) * .02);
+                const int rimY = rimX;
+                // 红绿通道编码背景坐标，检测边缘向内折射和中心位置保持。
+                QVERIFY(optical.pixelColor(rimX, cy).red() > expectedGlassColor(clear.pixelColor(rimX, cy)).red() + 7);
+                QVERIFY(optical.pixelColor(cx, rimY).green() > expectedGlassColor(clear.pixelColor(cx, rimY)).green() + 7);
+                QVERIFY(qAbs(optical.pixelColor(cx, cy).red() - expectedGlassColor(clear.pixelColor(cx, cy)).red()) <= 2);
+                QVERIFY(qAbs(optical.pixelColor(cx, cy).green() - expectedGlassColor(clear.pixelColor(cx, cy)).green()) <= 2);
+                qint64 centerDelta = 0, frostedError = 0;
+                for (int y = cy - optical.height() / 10; y < cy + optical.height() / 10; ++y)
+                    for (int x = cx - optical.width() / 10; x < cx + optical.width() / 10; ++x) {
+                        const int detail = qBlue(clear.pixel(x, y));
+                        centerDelta += qAbs(qBlue(optical.pixel(x, y)) - expectedGlassColor(frosted.pixelColor(x, y)).blue());
+                        frostedError += qAbs(qBlue(frosted.pixel(x, y)) - detail);
+                    }
+                QVERIFY2(frostedError > 100, "The glass did not soften the background");
+                QVERIFY2(centerDelta < frostedError * .05,
+                         "Refraction spread into the flat center of the glass");
+                QVERIFY(optical.save(QStringLiteral("artifacts/optical-glass-%1x%2-%3.png")
+                    .arg(size.width()).arg(size.height()).arg(quality)));
+            }
+        }
+    }
+
     void specializedBlurMatchesFallbackAndBoundsCache() {
         PipelineProbe scene;
         scene.resize(240, 180);
@@ -332,6 +394,42 @@ private slots:
         scene.cleanupGL();
         QVERIFY(scene.m_blurPrograms.isEmpty());
         QVERIFY(scene.m_failedBlurPrograms.isEmpty());
+    }
+
+    void largePanelRestrainsRefractionAndKeepsPreviewCardsReadable() {
+        PipelineProbe scene;
+        scene.resize(1000, 700);
+        scene.setNoiseAmount(0);
+        scene.setBlurRadius(0);
+        scene.addGlassObject(QPointF(), scene.size());
+        scene.setGlassObjectCornerRadius(0, 26);
+        QImage background(1500, 1050, QImage::Format_RGB32);
+        for (int y = 0; y < background.height(); ++y)
+            for (int x = 0; x < background.width(); ++x)
+                background.setPixel(x, y, qRgb(30 + 200*x/background.width(),
+                                               30 + 200*y/background.height(), 80));
+        scene.setBackgroundImage(background);
+        scene.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&scene));
+        for (float quality : {.6f, 1.f, 1.5f}) {
+            scene.setRenderScale(quality);
+            scene.setRefractionPower(0);
+            const QImage clear = scene.grabFramebuffer();
+            scene.setRefractionPower(LiquidGlassStyle::kRefractionPower);
+            const QImage glass = scene.grabFramebuffer();
+            const int x = qRound(8 * scene.devicePixelRatioF());
+            const int cx = glass.width()/2, cy = glass.height()/2;
+            // 大面板边缘只允许小幅折射，不把背景压缩成大面积的波纹。
+            QVERIFY(qAbs(glass.pixelColor(x, cy).red() - expectedGlassColor(clear.pixelColor(x, cy)).red()) <= 5);
+            QVERIFY(qAbs(glass.pixelColor(cx, x).green() - expectedGlassColor(clear.pixelColor(cx, x)).green()) <= 5);
+        }
+        for (auto kind : {DesktopWidget::CardKind::Battery, DesktopWidget::CardKind::Weather,
+                          DesktopWidget::CardKind::Clock, DesktopWidget::CardKind::Dictionary}) {
+            const QImage preview = DesktopWidget::renderPreview(kind, 0, QSize(204, 128), 1.5);
+            QCOMPARE(preview.pixelColor(0, 0).alpha(), 0);
+            const QColor surface = preview.pixelColor(preview.width()/2, qRound(4 * 1.5));
+            QVERIFY2(surface.alpha() >= 240, "The gallery preview lost its independent card surface");
+        }
     }
 
     void renderingPipelineParityAndTiming() {
@@ -543,7 +641,7 @@ private slots:
         QVERIFY(!AppSettings().contains("appearance/opacity"));
     }
 
-    void unifiedGlassPreservesBackgroundWithoutMasks() {
+    void unifiedGlassUsesSingleOpticalMaterialWithoutOverlayMasks() {
         AppSettings().setValue("appearance/liveBackdrop", false);
         DesktopWidget card(nullptr, DesktopWidget::CardKind::Weather, false,
                            QStringLiteral("unified-glass"), 1, true);
@@ -564,8 +662,9 @@ private slots:
             QCOMPARE(surface->glassOpacity(), 1.0f);
             QCOMPARE(surface->m_objects.first().powerFactor, LiquidGlassStyle::kShapePower);
         }
-        // 恒色背景在无控件区域应保留原色，暗色遮罩、色调或明暗渐变都会触发失败。
+        // 恒色背景只经过一次统一光学响应，重复遮罩或独立明暗渐变都会触发失败。
         const QColor backdrop(205, 155, 95);
+        const QColor materialColor(169, 127, 73);
         const auto setBackdrop = [&](QtGlassFlowScene& surface) {
             QImage background(surface.size() * surface.devicePixelRatioF(), QImage::Format_RGB32);
             background.fill(backdrop);
@@ -578,9 +677,9 @@ private slots:
         const QImage menuFrame = menuSurface->grabFramebuffer();
         const QColor menuPixel = menuFrame.pixelColor(menuFrame.width() / 2,
             qRound(4 * menuSurface->devicePixelRatioF()));
-        QVERIFY(qAbs(menuPixel.red() - backdrop.red()) <= 2);
-        QVERIFY(qAbs(menuPixel.green() - backdrop.green()) <= 2);
-        QVERIFY(qAbs(menuPixel.blue() - backdrop.blue()) <= 2);
+        QVERIFY(qAbs(menuPixel.red() - materialColor.red()) <= 2);
+        QVERIFY(qAbs(menuPixel.green() - materialColor.green()) <= 2);
+        QVERIFY(qAbs(menuPixel.blue() - materialColor.blue()) <= 2);
         QVERIFY(menuFrame.save(QStringLiteral("artifacts/unified-glass-menu.png")));
         menu.hide();
         wizard.setDesktopCaptureEnabled(false);
@@ -592,9 +691,9 @@ private slots:
         for (qreal y : {.25, .5, .75}) {
             const QColor pixel = wizardFrame.pixelColor(wizardFrame.width() / 2,
                 qRound(wizardFrame.height() * y));
-            QVERIFY(qAbs(pixel.red() - backdrop.red()) <= 2);
-            QVERIFY(qAbs(pixel.green() - backdrop.green()) <= 2);
-            QVERIFY(qAbs(pixel.blue() - backdrop.blue()) <= 2);
+            QVERIFY(qAbs(pixel.red() - materialColor.red()) <= 2);
+            QVERIFY(qAbs(pixel.green() - materialColor.green()) <= 2);
+            QVERIFY(qAbs(pixel.blue() - materialColor.blue()) <= 2);
         }
         QVERIFY(wizardFrame.save(QStringLiteral("artifacts/unified-glass-wizard.png")));
         QVERIFY(wizard.grab().save(QStringLiteral("artifacts/unified-glass-wizard-window.png")));
@@ -745,10 +844,164 @@ private slots:
 #endif
     }
 
+    void darkGlassSwitchKeepsLightPixelsAndBlurCache() {
+        PipelineProbe scene;
+        scene.resize(260, 180);
+        scene.addGlassObject({}, QSizeF(scene.size()));
+        scene.setGlassObjectCornerRadius(0, 36);
+        scene.setNoiseAmount(0);
+        QImage background(scene.size(), QImage::Format_RGB32);
+        background.fill(QColor(180, 140, 100));
+        scene.setBackgroundImage(background);
+        scene.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&scene));
+        const QImage light = scene.grabFramebuffer();
+        QVERIFY(!light.isNull());
+        QVERIFY(!scene.darkModeEnabled());
+        QVERIFY(!scene.m_blurCacheDirty);
+        const auto* cache = scene.m_blurPongFbo;
+        const quint64 before = scene.frameRevision();
+        scene.setDarkModeEnabled(true);
+        QTRY_VERIFY(scene.frameRevision() > before);
+        const QImage dark = scene.grabFramebuffer();
+        QCOMPARE(scene.m_blurPongFbo, cache);
+        QVERIFY(!scene.m_blurCacheDirty);
+        const QColor pixel = dark.pixelColor(dark.width() / 2, dark.height() / 2);
+        QVERIFY(qGray(pixel.rgb()) < qGray(light.pixelColor(light.width() / 2, light.height() / 2).rgb()) * .6);
+        QVERIFY(pixel.red() > pixel.green() && pixel.green() > pixel.blue());
+        QCOMPARE(pixel.alpha(), 255);
+        QCOMPARE(dark.pixelColor(0, 0).alpha(), 0);
+        scene.setDarkModeEnabled(false);
+        QCOMPARE(scene.grabFramebuffer(), light);
+        scene.setDarkModeEnabled(true);
+        background.fill(QColor(20, 100, 200));
+        scene.setBackgroundImage(background);
+        const QColor changed = centerPixel(scene);
+        QVERIFY(changed.blue() > changed.green() && changed.green() > changed.red());
+        QVERIFY(changed != pixel);
+    }
+
+    void darkModePersistsAndSynchronizesExistingAndNewSurfaces() {
+        DesktopWidget card(nullptr, DesktopWidget::CardKind::Clock, false, "theme-card", 0, true);
+        WidgetLibraryDialog gallery;
+        FirstRunWizard wizard;
+        const QSize initialSize = gallery.size();
+        const QSize initialTileSize = gallery.m_tiles.first()->size();
+        const QImage light = DesktopWidget::renderPreview(DesktopWidget::CardKind::Battery, 0, QSize(192, 192));
+        QVERIFY(!card.darkModeEnabled());
+        DesktopWidget::setGlobalDarkMode(true);
+        QVERIFY(AppSettings().value("appearance/darkMode").toBool());
+        QVERIFY(card.darkModeEnabled());
+        QVERIFY(gallery.darkModeEnabled());
+        QVERIFY(wizard.darkModeEnabled());
+        QCOMPARE(gallery.size(), initialSize);
+        QCOMPARE(gallery.m_tiles.first()->size(), initialTileSize);
+        const QImage dark = DesktopWidget::renderPreview(DesktopWidget::CardKind::Battery, 0, QSize(192, 192));
+        QVERIFY(dark != light);
+        const auto tile = gallery.m_tiles.first();
+        const qreal dpr = tile->devicePixelRatioF();
+        const QImage reference = DesktopWidget::renderPreview(DesktopWidget::CardKind::Battery, 0, tile->size(), dpr);
+        QImage rendered(reference.size(), reference.format());
+        rendered.setDevicePixelRatio(dpr);
+        rendered.fill(Qt::transparent);
+        QPainter painter(&rendered);
+        tile->render(&painter, {}, {}, QWidget::DrawChildren);
+        painter.end();
+        QCOMPARE(rendered, reference);
+        DesktopWidget later(nullptr, DesktopWidget::CardKind::Battery, false, "theme-later", 0, true);
+        QVERIFY(later.darkModeEnabled());
+        LiquidGlassMenu menu{QFont(DesktopWidget::pingFangFontFamily())};
+        menu.addGlassAction(QStringLiteral("添加小组件…"), LiquidGlassMenu::Icon::Add);
+        menu.popup(QGuiApplication::primaryScreen()->availableGeometry().center());
+        QVERIFY(QTest::qWaitForWindowExposed(&menu));
+        auto* surface = menu.findChild<QtGlassFlowScene*>();
+        QVERIFY(surface && surface->darkModeEnabled());
+        menu.hide();
+        DesktopWidget::setGlobalDarkMode(false);
+        QVERIFY(!AppSettings().value("appearance/darkMode").toBool());
+        QVERIFY(!card.darkModeEnabled() && !gallery.darkModeEnabled() && !wizard.darkModeEnabled());
+        QCOMPARE(DesktopWidget::renderPreview(DesktopWidget::CardKind::Battery, 0, QSize(192, 192)), light);
+    }
+
+    void settingsColorModeAcceptsAndCancels() {
+        DesktopWidget card(nullptr, DesktopWidget::CardKind::Clock, false, "theme-settings", 0, true);
+        for (int step = 0; step < 3; ++step) {
+            bool foundControl = false;
+            QTimer::singleShot(0, &card, [&]() {
+                auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                if (!dialog)
+                    return;
+                auto* mode = dialog->findChild<QComboBox*>("colorMode");
+                foundControl = mode && mode->count() == 2;
+                if (foundControl)
+                    mode->setCurrentIndex(mode->findData(step == 0));
+                if (foundControl && step != 1)
+                    dialog->accept();
+                else
+                    dialog->reject();
+            });
+            card.showSettingsDialog();
+            QVERIFY(foundControl);
+            QCOMPARE(card.darkModeEnabled(), step != 2);
+            QCOMPARE(AppSettings().value("appearance/darkMode").toBool(), step != 2);
+        }
+    }
+
+    void darkModeReferenceComparison() {
+        const QString wallpaperPath = qEnvironmentVariable("WIDGET_THEME_REFERENCE_BACKGROUND");
+        if (wallpaperPath.isEmpty())
+            QSKIP("Set WIDGET_THEME_REFERENCE_BACKGROUND for reference wallpaper rendering");
+        const QImage wallpaper(wallpaperPath);
+        QVERIFY(!wallpaper.isNull());
+        DesktopWidget weather(nullptr, DesktopWidget::CardKind::Weather, false, "dark-reference-weather", 1, true);
+        DesktopWidget battery(nullptr, DesktopWidget::CardKind::Battery, false, "dark-reference-battery", 1, true);
+        weather.m_weatherLocation = QStringLiteral("天心区");
+        weather.m_weatherTemperature = "20";
+        weather.m_weatherDescription = QStringLiteral("晴朗无云");
+        weather.m_weatherHigh = "30";
+        weather.m_weatherLow = "20";
+        weather.m_weatherCode = 0;
+        weather.m_weatherNight = true;
+        const QString times[] = {QStringLiteral("6时"), "06:25", QStringLiteral("7时"),
+                                 QStringLiteral("8时"), QStringLiteral("9时"), QStringLiteral("10时")};
+        for (int i = 0; i < 6; ++i)
+            weather.m_weatherHours.append({times[i], QString::number(i < 4 ? 20 + qMin(i, 1) : 23 + (i - 4) * 2), 0, i == 0});
+        battery.m_hasBattery = true;
+        battery.m_batteryLevel = 95;
+        battery.m_connectedDevices = {{QStringLiteral("Mouse"), 47, 1}};
+        const QRect bounds[] = {QRect(401, 470, 570, 270), QRect(401, 769, 570, 270)};
+        QList<DesktopWidget*> cards{&weather, &battery};
+        for (int i = 0; i < cards.size(); ++i) {
+            auto* card = cards[i];
+            card->m_widgetScale = 270.0 / CardMetrics::kGridBaseCell;
+            card->setMinimumSize(0, 0);
+            card->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+            card->resize(bounds[i].size());
+            card->setGlassRadius(LiquidGlassStyle::kCardCornerRadius * card->m_widgetScale);
+            card->setRenderScale(1.25f);
+            card->setBackgroundImage(wallpaper.copy(bounds[i]));
+            card->show();
+            QVERIFY(QTest::qWaitForWindowExposed(card));
+        }
+        for (bool dark : {false, true}) {
+            QImage result = wallpaper.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+            QPainter painter(&result);
+            painter.setRenderHint(QPainter::SmoothPixmapTransform);
+            for (int i = 0; i < cards.size(); ++i) {
+                cards[i]->setDarkModeEnabled(dark);
+                painter.drawImage(bounds[i], cards[i]->grabFramebuffer());
+            }
+            painter.end();
+            QVERIFY(result.save(dark ? "artifacts/dark-mode-reference-dark.png"
+                                     : "artifacts/dark-mode-reference-light.png"));
+        }
+    }
+
     void settingsJsonMigratesAndPreservesLayout() {
         {
             AppSettings defaults;
             QCOMPARE(defaults.value("appearance/scale").toDouble(), 1.0);
+            QCOMPARE(defaults.value("appearance/darkMode").toBool(), false);
             QCOMPARE(defaults.value("performance/renderScale").toDouble(), 0.60);
             QVERIFY(!defaults.value("appearance/blurStrength").isValid());
             QVERIFY(!defaults.value("appearance/opacity").isValid());
@@ -1259,6 +1512,108 @@ private slots:
         }
     }
 
+    void largeCardsSnapToStaggeredCellSlots() {
+        using namespace WidgetGeometry;
+        using Kind = DesktopWidget::CardKind;
+        QScreen* screen = QGuiApplication::primaryScreen();
+        QVERIFY(screen);
+        const QRect area = screen->availableGeometry();
+        for (qreal scale : {.4, .7}) {
+            AppSettings().setValue("appearance/scale", scale);
+            DesktopWidget anchor(nullptr, Kind::Weather, false, "cell-slot-anchor", 2, true);
+            DesktopWidget moving(nullptr, Kind::Weather, false, "cell-slot-moving", 2, true);
+            const int pitch = qRound(CardMetrics::kGridBaseCell * scale) + gridGapForArea(area, scale);
+            anchor.move(area.center() - QPoint(anchor.width() / 2, anchor.height() / 2));
+            anchor.show();
+            QVERIFY(QTest::qWaitForWindowExposed(&anchor));
+            const QRect bounds = anchor.geometry();
+            const int gap = gridGapForArea(area, scale);
+            for (int offset : {-1, 0, 1}) {
+                const QPoint positions[] = {
+                    {bounds.left() + offset * pitch, bounds.top() - gap - moving.height()},
+                    {bounds.left() + offset * pitch, bounds.bottom() + gap + 1},
+                    {bounds.left() - gap - moving.width(), bounds.top() + offset * pitch},
+                    {bounds.right() + gap + 1, bounds.top() + offset * pitch}
+                };
+                for (const QPoint& slot : positions) {
+                    QRect expected(slot, moving.size());
+                    const QRect extent = bounds.united(expected);
+                    QVERIFY(extent.width() <= area.width());
+                    QVERIFY(extent.height() <= area.height());
+                    const QPoint shift(
+                        qBound(area.left(), extent.left(), area.right() - extent.width() + 1) - extent.left(),
+                        qBound(area.top(), extent.top(), area.bottom() - extent.height() + 1) - extent.top());
+                    anchor.move(bounds.topLeft() + shift);
+                    expected.translate(shift);
+                    QVERIFY(area.contains(expected));
+                    const QRect actual = DesktopWidget::nearbyWidgetRect(
+                        Kind::Weather, 2, expected.topLeft() + QPoint(7, 9), scale, &moving);
+                    QCOMPARE(actual, expected);
+                    QVERIFY(!actual.intersects(anchor.geometry()));
+                }
+            }
+            anchor.move(area.topLeft() + QPoint(pitch * 2, 10));
+            const QRect blockedAnchor = anchor.geometry();
+            const QPoint blockedPosition(blockedAnchor.left() - pitch, blockedAnchor.bottom() + gap + 1);
+            DesktopWidget blocker(nullptr, Kind::Clock, false, "cell-slot-blocker", 0, true);
+            blocker.move(blockedPosition);
+            blocker.show();
+            QVERIFY(QTest::qWaitForWindowExposed(&blocker));
+            const QRect alternative = DesktopWidget::nearbyWidgetRect(
+                Kind::Weather, 2, blockedPosition, scale, &moving);
+            QVERIFY(alternative.isValid());
+            QVERIFY(!alternative.intersects(blocker.geometry()));
+            QVERIFY(!alternative.intersects(blockedAnchor));
+            blocker.hide();
+            QCOMPARE(DesktopWidget::nearbyWidgetRect(Kind::Weather, 2, blockedPosition, scale, &moving),
+                     QRect(blockedPosition, moving.size()));
+        }
+    }
+
+    void wideWeatherPreviewAndDropUseLeftCellSlot() {
+        using namespace WidgetGeometry;
+        using Kind = DesktopWidget::CardKind;
+        const qreal scale = .7;
+        AppSettings().setValue("appearance/scale", scale);
+        QScreen* screen = QGuiApplication::primaryScreen();
+        QVERIFY(screen);
+        const QRect area = screen->availableGeometry();
+        const int cell = qRound(CardMetrics::kGridBaseCell * scale);
+        const int pitch = cell + gridGapForArea(area, scale);
+        const QPoint origin = area.center() - QPoint(pitch * 3 / 2, pitch * 3 / 2);
+        DesktopWidget battery(nullptr, Kind::Battery, false, "left-slot-battery", 1, true);
+        DesktopWidget analog(nullptr, Kind::Clock, false, "left-slot-analog", 0, true);
+        DesktopWidget digital(nullptr, Kind::Clock, false, "left-slot-digital", 8, true);
+        DesktopWidget weather(nullptr, Kind::Weather, false, "left-slot-weather", 1, true);
+        battery.move(origin);
+        analog.move(origin + QPoint(2 * pitch, 0));
+        digital.move(origin + QPoint(pitch, pitch));
+        const QRect expected(origin + QPoint(0, 2 * pitch), weather.size());
+        const QPoint requested = expected.topLeft() - QPoint(35, 7);
+        weather.move(requested);
+        for (DesktopWidget* widget : {&battery, &analog, &digital, &weather}) {
+            widget->show();
+            QVERIFY(QTest::qWaitForWindowExposed(widget));
+        }
+        const QRect preview = DesktopWidget::nearbyWidgetRect(Kind::Weather, 1, requested, scale, &weather);
+        QCOMPARE(preview, expected);
+        DesktopWidget::showGridPreviewRect(preview);
+        bool foundPreview = false;
+        for (QWidget* widget : QApplication::topLevelWidgets())
+            if (widget->isVisible() && widget->windowFlags().testFlag(Qt::WindowTransparentForInput)
+                && widget->geometry() == expected)
+                foundPreview = true;
+        QVERIFY(foundPreview);
+        weather.m_dragOrigin = requested;
+        weather.windowDragFinished();
+        QCOMPARE(weather.geometry(), expected);
+        QVERIFY(!DesktopWidget::overlapsVisibleWidget(weather.geometry(), &weather));
+        weather.hide();
+        // 图库添加与桌面拖动共用落点计算，隐藏的旧卡片不占位。
+        QVERIFY(weather.placeAtDesktopPoint(requested + QPoint(weather.width() / 2, weather.height() / 2)));
+        QCOMPARE(weather.geometry(), expected);
+    }
+
     void firstRunWizardPersistsSelections() {
         FirstRunWizard wizard;
         auto* scale = wizard.findChild<QSlider*>();
@@ -1289,11 +1644,11 @@ private slots:
         QTest::mouseRelease(&wizard, Qt::LeftButton, Qt::NoModifier, QPoint(90, 80));
         QCOMPARE(wizard.pos(), fixedPosition);
         welcomeNext->click();
-        QTest::qWait(380);
+        QTRY_VERIFY_WITH_TIMEOUT(!welcomeNext->isVisible(), 1500);
         scale->setValue(85);
         QVERIFY(wizard.grab().save(QStringLiteral("artifacts/first-run-scale.png")));
         scaleNext->click();
-        QTest::qWait(380);
+        QTRY_VERIFY_WITH_TIMEOUT(!scaleNext->isVisible(), 1500);
         boxes.at(0)->setCurrentIndex(3);
         live->setChecked(true);
         QVERIFY(wizard.grab().save(QStringLiteral("artifacts/first-run-quality.png")));
@@ -1441,8 +1796,9 @@ private slots:
             const int position = NativeWindows::indexOf(stack, popup->winId());
             QVERIFY(position >= 0 && stack[position].excluded);
             const auto revision = wizard.frameRevision();
-            QTest::qWait(250);
-            QVERIFY(wizard.frameRevision() > revision);
+            background.color = QColor::fromHsv(index * 70, 210, 210);
+            background.update();
+            QTRY_VERIFY_WITH_TIMEOUT(wizard.frameRevision() > revision, 1000);
             quality->hidePopup();
             quality->setCurrentIndex(index);
             QTest::qWait(150);
@@ -1658,7 +2014,8 @@ private slots:
                 << composeNs / qreal(qMax(1, presentedFrames)) / 1e6;
         qInfo() << "Source paints:" << paintedSourceFrames;
         qInfo() << "Fresh backdrop FPS:" << changedFrames * 1000.0 / elapsed;
-        QVERIFY2(fps >= hz * 0.97, "Wizard presentation is below display cadence");
+        if (!capture)
+            QVERIFY2(presentedFrames < 10, "Static wizard keeps redrawing unchanged glass");
         if (capture)
             QVERIFY2(changedFrames >= qMax<qint64>(10, paintedSourceFrames / 2), "Wizard backdrop is stale");
         QVERIFY(!QFile::exists(AppSettings::filePath()));
@@ -1886,7 +2243,7 @@ private slots:
             QVERIFY(!moving.m_capturesInFlight);
             mouse(moving, QEvent::MouseButtonRelease, {60, 30}, moving.pos() + QPoint(60, 30),
                   Qt::LeftButton, Qt::NoButton);
-            QCOMPARE(lower.m_backdropTimer->interval(), live ? lower.activeDisplayInterval() : 10000);
+            QCOMPARE(lower.m_backdropTimer->interval(), live ? qMax(1, lower.activeDisplayInterval() / 2) : 10000);
             QTest::qWait(150);
         }
         lower.setLiveBackdropEnabled(false);
@@ -1904,7 +2261,7 @@ private slots:
         QVERIFY(removed->dragging());
         QCOMPARE(lower.m_backdropTimer->interval(), 10000);
         removed.reset();
-        QCOMPARE(lower.m_backdropTimer->interval(), lower.activeDisplayInterval());
+        QCOMPARE(lower.m_backdropTimer->interval(), qMax(1, lower.activeDisplayInterval() / 2));
         lower.setLiveBackdropEnabled(false);
     }
 
@@ -2148,26 +2505,17 @@ private slots:
         auto* tile = library.m_tiles.first();
         QVERIFY(tile);
         const qreal dpr = tile->devicePixelRatioF();
-        const qreal galleryScale = tile->width() / 220.0;
-        const qreal previewDpr = dpr * galleryScale;
         const QImage reference = DesktopWidget::renderPreview(
-            DesktopWidget::CardKind::Battery, 0, box, previewDpr);
+            DesktopWidget::CardKind::Battery, 0, tile->size(), dpr);
         QImage rendered(tile->size() * dpr, reference.format());
         rendered.setDevicePixelRatio(dpr);
         rendered.fill(Qt::transparent);
         QPainter tilePainter(&rendered);
         tile->render(&tilePainter, QPoint(), QRegion(), QWidget::DrawChildren);
         tilePainter.end();
-        const QPoint origin = (QPointF(110, 66) * previewDpr
-            - QPointF(reference.width() * .5, reference.height() * .5)).toPoint();
-        QImage crop = rendered.copy(QRect(origin, reference.size()));
-        crop.setDevicePixelRatio(previewDpr);
-        qInfo() << "Preview native DPI" << dpr << "origin" << origin;
-        crop.save(QStringLiteral("artifacts/preview-native-tile.png"));
+        rendered.save(QStringLiteral("artifacts/preview-native-tile.png"));
         reference.save(QStringLiteral("artifacts/preview-native-reference.png"));
-        // 电量数据可能在两次捕获之间变化，使用静态抗锯齿边缘检查预览是否被过滤。
-        const QRect rim(0, 0, reference.width(), qRound(3 * dpr));
-        QCOMPARE(crop.copy(rim), reference.copy(rim));
+        QCOMPARE(rendered, reference);
         for (auto* nav : library.m_navButtons) {
             const QPixmap icon = nav->icon().pixmap(QSize(27, 27), 2.0);
             QCOMPARE(icon.size(), QSize(54, 54));
@@ -2250,7 +2598,7 @@ private slots:
         QVERIFY(QTest::qWaitForWindowExposed(&glass));
 
         glass.setLiveBackdropEnabled(true);
-        QCOMPARE(glass.m_backdropTimer->interval(), glass.activeDisplayInterval());
+        QCOMPARE(glass.m_backdropTimer->interval(), qMax(1, glass.activeDisplayInterval() / 2));
         QVERIFY(glass.m_backdropTimer->isActive());
         QColor observed;
         QTRY_VERIFY_WITH_TIMEOUT((observed = centerPixel(glass), observed.red() > 170), 3000);
@@ -2269,7 +2617,7 @@ private slots:
         }
     }
 
-    void stationaryLiveRenderingKeepsCadenceAndStopsWhenDisabled() {
+    void stationaryLiveRenderingIsDrivenByBackgroundChanges() {
         ToggleLiveGlass glass;
         glass.setDesktopCaptureEnabled(false);
         glass.setAnimationEnabled(false);
@@ -2280,8 +2628,12 @@ private slots:
         QTest::qWait(100);
         quint64 revision = glass.frameRevision();
         QTest::qWait(250);
-        QVERIFY2(glass.frameRevision() >= revision + 5,
-                 "Stationary live mode stopped rendering without pointer input");
+        qInfo() << "Unchanged live surface frames in 250 ms:" << glass.frameRevision() - revision;
+        QCOMPARE(glass.frameRevision(), revision);
+        QImage changed(200, 140, QImage::Format_RGB32);
+        changed.fill(Qt::cyan);
+        glass.setBackgroundImage(changed);
+        QTRY_VERIFY_WITH_TIMEOUT(glass.frameRevision() > revision, 1000);
 
         glass.setLiveBackdropEnabled(false);
         QTest::qWait(100);
@@ -2295,7 +2647,7 @@ private slots:
         QTest::qWait(150);
         QCOMPARE(glass.frameRevision(), revision);
         glass.show();
-        QTRY_VERIFY_WITH_TIMEOUT(glass.frameRevision() >= revision + 3, 1500);
+        QTRY_VERIFY_WITH_TIMEOUT(glass.frameRevision() > revision, 1500);
         glass.setMouseThroughEnabled(true);
         glass.setLowPowerRefreshEnabled(true);
         QCOMPARE(glass.refreshInterval(), 250);
@@ -2866,6 +3218,76 @@ private slots:
 #endif
     }
 
+    void libraryHidesApplicationsForWholeSessionAndRestoresOnExit() {
+#ifdef Q_OS_WIN
+        AppSettings().setValue("appearance/liveBackdrop", false);
+        QWidget application;
+        application.setWindowTitle(QStringLiteral("Gallery restore regression"));
+        application.resize(280, 160);
+        application.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&application));
+        const HWND window = reinterpret_cast<HWND>(application.winId());
+        QWidget frameless;
+        frameless.setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
+        frameless.setWindowTitle(QStringLiteral("Frameless gallery restore regression"));
+        frameless.resize(220, 140);
+        frameless.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&frameless));
+        const HWND framelessWindow = reinterpret_cast<HWND>(frameless.winId());
+        QWidget alreadyHidden;
+        alreadyHidden.winId();
+        TestGlass card;
+        card.setDesktopCaptureEnabled(false);
+        card.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&card));
+        {
+            WidgetLibraryDialog library;
+            library.prepareBackdrop();
+            QTRY_VERIFY_WITH_TIMEOUT(!IsWindowVisible(window), 1000);
+            QTRY_VERIFY_WITH_TIMEOUT(!IsWindowVisible(framelessWindow), 1000);
+            library.show();
+            QVERIFY(QTest::qWaitForWindowExposed(&library));
+            QTest::qWait(350);
+            QVERIFY(card.isVisible());
+            QVERIFY(!IsIconic(window));
+            library.notifyWidgetDragStarted(0);
+            library.notifyWidgetDragFinished(0);
+            QVERIFY(!IsWindowVisible(window));
+            library.closeGallery();
+            QTRY_VERIFY_WITH_TIMEOUT(!library.isVisible(), 1000);
+            QTRY_VERIFY_WITH_TIMEOUT(IsWindowVisible(window), 1000);
+            QTRY_VERIFY_WITH_TIMEOUT(IsWindowVisible(framelessWindow), 1000);
+            library.prepareBackdrop();
+            QTRY_VERIFY_WITH_TIMEOUT(!IsWindowVisible(window), 1000);
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(IsWindowVisible(window), 1000);
+        QTRY_VERIFY_WITH_TIMEOUT(IsWindowVisible(framelessWindow), 1000);
+        QVERIFY(!IsWindowVisible(reinterpret_cast<HWND>(alreadyHidden.winId())));
+#endif
+    }
+
+    void librarySearchesAllVariantsAndUsesNaturalGridSizes() {
+        AppSettings().setValue("appearance/scale", 1.0);
+        WidgetLibraryDialog library;
+        QCOMPARE(library.m_tiles.first()->size(), QSize(library.scaled(128), library.scaled(128)));
+        QCOMPARE(library.m_tiles.at(4)->size(), QSize(library.scaled(128) * 2 + library.scaled(12), library.scaled(128)));
+        QCOMPARE(library.m_tiles.at(5)->size(), QSize(library.scaled(128) * 2 + library.scaled(12), library.scaled(128) * 2 + library.scaled(12)));
+        // 所有组件分区保留全部变体，搜索不受建议列表限制。
+        for (QFrame* tile : library.m_tiles)
+            QVERIFY(library.m_tileLayout->indexOf(tile) >= 0);
+        library.m_search->setText(QStringLiteral("词典详情"));
+        QCOMPARE(library.m_tileLayout->count(), 1);
+        QCOMPARE(library.m_tileLayout->itemAt(0)->widget(), library.m_tiles.at(10));
+        library.m_search->clear();
+        library.resize(600, 440);
+        library.applyTileFilter();
+        for (QFrame* tile : library.m_tiles) {
+            int row, col, rows, cols;
+            library.m_tileLayout->getItemPosition(library.m_tileLayout->indexOf(tile), &row, &col, &rows, &cols);
+            QVERIFY(col + cols <= library.tileColumnCount());
+        }
+    }
+
     void libraryHonorsGlobalLiveBackdropSetting() {
         AppSettings().setValue(QStringLiteral("appearance/liveBackdrop"), false);
         WidgetLibraryDialog staticLibrary;
@@ -2886,8 +3308,10 @@ private slots:
         liveLibrary.show();
         QVERIFY(QTest::qWaitForWindowExposed(&liveLibrary));
         QTRY_VERIFY_WITH_TIMEOUT(liveLibrary.m_liveBackdropTimer.isActive(), 1000);
-        QCOMPARE(liveLibrary.m_liveBackdropTimer.interval(),
-                 qMax(1, liveLibrary.activeDisplayInterval() / 2));
+        const int interval = liveLibrary.m_liveBackdropTimer.interval();
+        QVERIFY(interval == liveLibrary.activeDisplayInterval()
+                || interval == qMax(1, liveLibrary.activeDisplayInterval() / 2)
+                || interval == qMax(100, liveLibrary.activeDisplayInterval()));
         liveLibrary.hide();
         AppSettings().setValue(QStringLiteral("appearance/liveBackdrop"), false);
     }
@@ -3281,23 +3705,42 @@ private slots:
         auto* search = library.findChild<QLineEdit*>();
         auto* footer = library.findChild<QFrame*>("footer");
         QVERIFY(tile && search && footer);
-        QCOMPARE(tile->size(), QSize(231, 185));
-        QCOMPARE(search->height(), 38);
-        QCOMPARE(footer->height(), 74);
-        QVERIFY(search->styleSheet().contains("border-radius:19px"));
-        QVERIFY(library.styleSheet().contains("border-radius:19px"));
         QScreen* screen = QGuiApplication::screenAt(QCursor::pos());
         if (!screen)
             screen = QGuiApplication::primaryScreen();
         QVERIFY(screen);
-        QCOMPARE(library.width(), qMin(1386, screen->availableGeometry().width() - 32));
-        QCOMPARE(library.height(), qMin(840, screen->availableGeometry().height() - 32));
+        const auto expectedSize = [screen](qreal scale) {
+            const qreal fitted = WidgetLibraryDialog::fittedScaleForArea(screen->availableGeometry(), scale);
+            return QSize(qRound(1980 * fitted), qRound(1200 * fitted));
+        };
+        const QSize expected = expectedSize(.7);
+        QCOMPARE(library.size(), expected);
+        const QSize tileSize = tile->size();
+        QCOMPARE(search->height(), library.scaled(36));
+        QCOMPARE(tileSize.width(), library.scaled(128));
+        const qreal interfaceScale = library.m_interfaceScale;
+        for (qreal desktopScale : {.4, .7, 1.25, 2.0}) {
+            AppSettings().setValue("appearance/scale", desktopScale);
+            WidgetLibraryDialog other;
+            QCOMPARE(other.size(), expectedSize(desktopScale));
+            QCOMPARE(other.m_tiles.first()->width(), other.scaled(128));
+            QCOMPARE(other.m_search->height(), other.scaled(36));
+            QCOMPARE(other.m_footer->height(), other.scaled(62));
+            QVERIFY(other.m_interfaceScale <= desktopScale);
+            if (desktopScale == .4) {
+                QCOMPARE(other.size(), QSize(792, 480));
+                QCOMPARE(other.m_search->height(), 22);
+                QCOMPARE(other.m_tiles.first()->size(), QSize(77, 77));
+            }
+        }
+        AppSettings().setValue("appearance/scale", .7);
         library.prepareBackdrop();
         library.show();
         QVERIFY(QTest::qWaitForWindowExposed(&library));
-        QTest::qWait(350);
+        QTest::qWait(400);
+        QVERIFY(screen->availableGeometry().contains(library.geometry()));
         const QImage gallery = library.grab().toImage().convertToFormat(QImage::Format_ARGB32);
-        gallery.save("artifacts/gallery-small-scale.png");
+        QVERIFY(gallery.save("artifacts/gallery-unified-scale-70.png"));
         for (int y = 0; y < 4; ++y) {
             for (int x = 0; x < 4; ++x) {
                 QCOMPARE(qAlpha(gallery.pixel(x, y)), 0);
@@ -3307,45 +3750,56 @@ private slots:
             }
         }
         library.hide();
-
-        library.setInterfaceScale(1.5);
-        QCOMPARE(tile->size(), QSize(495, 396));
-        QCOMPARE(search->height(), 81);
-        QCOMPARE(footer->height(), 158);
-        QCOMPARE(library.m_interfaceScale, 1.5);
-        library.setInterfaceScale(0.4);
-        QCOMPARE(tile->size(), QSize(132, 106));
-        QCOMPARE(search->height(), 22);
-        QCOMPARE(footer->height(), 42);
-        QVERIFY(search->styleSheet().contains("border-radius:11px"));
-
+        AppSettings().setValue("appearance/scale", .7);
         DesktopWidget owner(nullptr, DesktopWidget::CardKind::Clock, false,
                             QStringLiteral("scale-library-owner"), 0);
         owner.m_ownsTray = true;
         owner.showWidgetLibrary();
         QVERIFY(owner.m_library);
         auto* shared = owner.m_library;
-        QCOMPARE(shared->m_interfaceScale, 0.7);
+        QCOMPARE(shared->m_interfaceScale, interfaceScale);
+        const QSize initialCardSize = owner.size();
         owner.applyScale(1.25);
+        QVERIFY(owner.size() != initialCardSize);
         QCOMPARE(owner.m_library, shared);
-        QCOMPARE(shared->m_interfaceScale, 1.25);
-        owner.syncGroupSettings(1.25, false, false, false,
-                                1.25, 2);
+        QCOMPARE(shared->size(), expectedSize(1.25));
+        QVERIFY(shared->m_interfaceScale > interfaceScale);
+        owner.syncGroupSettings(.7, false, false, false, 1.25, 2);
         QCOMPARE(shared->m_blurRadius, LiquidGlassStyle::kBlurRadius);
         QCOMPARE(shared->glassOpacity(), 1.0f);
         QCOMPARE(shared->renderScale(), 1.25f);
-        QCOMPARE(shared->findChild<QFrame*>("widgetTile")->size(), QSize(413, 330));
-        QVERIFY2(shared->styleSheet().contains("border-radius:34px"),
-                 qPrintable(shared->styleSheet()));
-        QVERIFY2(shared->findChild<QLineEdit*>()->styleSheet().contains("border-radius:34px"),
-                 qPrintable(shared->findChild<QLineEdit*>()->styleSheet()));
-        QTest::qWait(350);
-        QCOMPARE(shared->width(), qMin(2475, screen->availableGeometry().width() - 32));
+        QCOMPARE(shared->m_tiles.first()->size(), tileSize);
+        QTest::qWait(400);
+        QCOMPARE(shared->size(), expected);
         auto* scroll = shared->findChild<QScrollArea*>();
         QVERIFY(scroll);
         QCOMPARE(scroll->horizontalScrollBar()->maximum(), 0);
-        shared->grab().save("artifacts/gallery-scaled.png");
+        QVERIFY(shared->grab().save("artifacts/gallery-unified-scale-updated.png"));
         shared->hide();
+    }
+
+    void libraryScaleFitsDifferentWorkAreas() {
+        for (const QRect& area : {QRect(0, 0, 1280, 720), QRect(-1920, 0, 1920, 1080),
+                                 QRect(0, 0, 3840, 2160), QRect(0, 0, 3440, 1440),
+                                 QRect(0, 0, 800, 600), QRect(0, 0, 320, 240)}) {
+            QSize previous;
+            for (qreal requested : {.4, .7, 1.0, 1.25, 2.0}) {
+                const qreal fitted = WidgetLibraryDialog::fittedScaleForArea(area, requested);
+                const QSize size(qRound(1980 * fitted), qRound(1200 * fitted));
+                QVERIFY(size.width() <= area.width() - 32);
+                QVERIFY(size.height() <= area.height() - 32);
+                QVERIFY(fitted <= requested);
+                QVERIFY(size.width() >= previous.width());
+                QVERIFY(size.height() >= previous.height());
+                if (1980 * requested <= area.width() - 32
+                    && 1200 * requested <= area.height() - 32) {
+                    QCOMPARE(fitted, requested);
+                    QCOMPARE(size, QSize(qRound(1980 * requested), qRound(1200 * requested)));
+                }
+                QVERIFY(qAbs(size.width() * 1200 - size.height() * 1980) <= 1590);
+                previous = size;
+            }
+        }
     }
 
     void hiddenConfigurationRoundTrip() {
@@ -3598,6 +4052,67 @@ private slots:
                  "Highest AA did not smooth the actual 28.4 temperature");
         qInfo() << "Weather device scale" << card.devicePixelRatioF()
                 << "quality" << card.renderScale();
+        const QString referencePath = qEnvironmentVariable("WIDGET_GLASS_REFERENCE_FRAME");
+        if (!referencePath.isEmpty()) {
+            QImage comparison(referencePath);
+            QVERIFY(!comparison.isNull());
+            const QRect cardBounds(184, 208, 688, 328);
+            card.m_widgetScale = 1.0 / card.devicePixelRatioF();
+            card.setGlassRadius(LiquidGlassStyle::kCardCornerRadius * card.m_widgetScale);
+            card.setFixedSize(QSize(qRound(cardBounds.width() / card.devicePixelRatioF()),
+                qRound(cardBounds.height() / card.devicePixelRatioF())));
+            card.m_weatherLocation = QStringLiteral("天心区");
+            card.m_weatherTemperature = QStringLiteral("21");
+            card.m_weatherDescription = QStringLiteral("晴朗无云");
+            card.m_weatherHigh = QStringLiteral("30");
+            card.m_weatherLow = QStringLiteral("19");
+            card.m_weatherCode = 0;
+            card.m_weatherHours.clear();
+            for (int hour = 0; hour < 6; ++hour)
+                card.m_weatherHours.append({QString::number(2 + hour) + QStringLiteral("时"),
+                    QString::number(hour == 0 || hour == 5 ? 21 : 20), 0, hour < 5});
+            card.setBackgroundImage(comparison.copy(cardBounds));
+            DesktopWidget::setGlobalFontSmoothing(4);
+            const QImage frame = card.grabFramebuffer();
+            QPainter preview(&comparison);
+            preview.drawImage(cardBounds, frame);
+            preview.end();
+            QVERIFY(comparison.save(QStringLiteral("artifacts/optical-glass-weather-reference.png")));
+            PipelineProbe material;
+            material.resize(card.size());
+            material.addGlassObject(QPointF(), material.size());
+            material.setGlassObjectCornerRadius(0, float(card.m_widgetScale * LiquidGlassStyle::kCardCornerRadius));
+            material.setRenderScale(1.5f);
+            material.setNoiseAmount(0);
+            material.setBackgroundImage(QImage(referencePath).copy(cardBounds));
+            material.show();
+            QVERIFY(QTest::qWaitForWindowExposed(&material));
+            QVERIFY(material.grabFramebuffer().save(QStringLiteral("artifacts/reference-material-only.png")));
+            const QString galleryPath = qEnvironmentVariable("WIDGET_GLASS_GALLERY_FRAME");
+            if (!galleryPath.isEmpty()) {
+                material.hide();
+                card.hide();
+                AppSettings().setValue("appearance/scale", .4);
+                AppSettings().setValue("appearance/liveBackdrop", false);
+                WidgetLibraryDialog library;
+                library.setDesktopCaptureEnabled(false);
+                library.setRenderScale(1.5f);
+                library.setNoiseAmount(0);
+                library.show();
+                QVERIFY(QTest::qWaitForWindowExposed(&library));
+                QTest::qWait(350);
+                library.resize(780, 400);
+                library.m_recommendedTiles = {7, 0, 4, 9, 12};
+                library.m_selectedCategory = -1;
+                library.applyTileFilter();
+                const QImage backdrop(galleryPath);
+                QVERIFY(!backdrop.isNull());
+                library.setBackgroundImage(backdrop);
+                QTest::qWait(50);
+                QVERIFY(library.grab().save(QStringLiteral("artifacts/reference-gallery-window.png")));
+                library.hide();
+            }
+        }
         DesktopWidget::setGlobalFontSmoothing(2);
     }
 

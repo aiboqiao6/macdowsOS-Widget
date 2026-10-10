@@ -159,6 +159,7 @@ private:
     {
         static const QHash<QString, QVariant> values = {
             {QStringLiteral("appearance/scale"), 1.0},
+            {QStringLiteral("appearance/darkMode"), false},
             {QStringLiteral("appearance/liveBackdrop"), true},
             {QStringLiteral("appearance/fontSmoothing"), 4},
             {QStringLiteral("interaction/mouseThrough"), false},

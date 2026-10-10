@@ -60,6 +60,7 @@ public:
     static void setGlobalFontSmoothing(int level);
     static int globalFontSmoothing();
     static void applyFontSmoothing(QFont& font);
+    static void setGlobalDarkMode(bool enabled);
     static void shutdown();
 
 protected:
@@ -165,7 +166,6 @@ private:
     bool m_hasSavedPosition = false;
     QPoint m_dragOrigin;
     NativeWindows::HiddenWindows m_dragHiddenWindows;
-    NativeWindows::HiddenWindows m_libraryDragHiddenWindows;
     bool m_clickPending = false;
     qreal m_widgetScale = 1.0;
     int m_devicePollCount = 0;

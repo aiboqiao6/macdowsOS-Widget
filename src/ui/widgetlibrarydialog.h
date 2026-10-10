@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rendering/liquidglasswidget.h"
+#include "rendering/nativewindows.h"
 
 #include <QList>
 #include <QImage>
@@ -28,8 +29,9 @@ class WidgetLibraryDialog final : public LiquidGlassWidget
     Q_OBJECT
 public:
     explicit WidgetLibraryDialog(QWidget* parent = nullptr);
-    static void refreshFontRendering();
-    void setInterfaceScale(qreal scale);
+    ~WidgetLibraryDialog() override;
+    static void refreshPreviews();
+    void updateScreenLayout();
 
     // 图库隐藏时捕获完整桌面，再由共享玻璃管线处理模糊和折射。
     void prepareBackdrop();
@@ -61,11 +63,12 @@ private:
     void selectCategory(int category);
     void applyTileFilter();
     int scaled(int value) const;
-    int windowScaled(int value) const;
+    static qreal fittedScaleForArea(const QRect& area, qreal scale);
     int tileColumnCount() const;
-    void randomizeRecommendations();
+    void resetRecommendations();
     QList<QFrame*> m_tiles;
     QList<QPushButton*> m_navButtons;
+    QList<QLabel*> m_categoryTitles;
     QGridLayout* m_tileLayout = nullptr;
     QVBoxLayout* m_sideLayout = nullptr;
     QVBoxLayout* m_contentLayout = nullptr;
@@ -76,6 +79,7 @@ private:
     QLabel* m_sectionTitle = nullptr;
     QLineEdit* m_search = nullptr;
     qreal m_interfaceScale = 1.0;
+    QSize m_preferredSize;
     bool m_scaleApplied = false;
     int m_tileColumns = 0;
     int m_selectedCategory = -1;
@@ -92,5 +96,9 @@ private:
     quint64 m_liveBackdropFrames = 0;
     quint64 m_liveBackdropSamples = 0;
     quint64 m_backdropGeneration = 0;
+    int m_unchangedBackdropSamples = 0;
+    NativeWindows::HiddenWindows m_hiddenApplicationWindows;
+    bool m_desktopPrepared = false;
+    bool m_initialBackdropPending = false;
     bool m_closing = false;
 };

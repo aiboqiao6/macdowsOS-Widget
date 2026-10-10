@@ -3,6 +3,7 @@
 #include "qtglassflowscene.h"
 #include "renderdiagnostics.h"
 #include "rendering/glpixeltransfer.h"
+#include "app/appsettings.h"
 
 #include <QFile>
 #include <QImage>
@@ -57,8 +58,7 @@ QtGlassFlowScene::QtGlassFlowScene(QWidget *parent)
       m_blurCacheDirty(true),
       // 渲染器内部默认使用原生分辨率，应用可根据保存的画质设置覆盖。
       m_renderScale(1.0f), m_connectionsDirty(true),
-      m_refractionA(0.7f), m_refractionB(2.3f), m_refractionC(5.2f),
-      m_refractionD(6.9f), m_fPower(LiquidGlassStyle::kRefractionPower),
+      m_fPower(LiquidGlassStyle::kRefractionPower),
       m_blurRadius(LiquidGlassStyle::kBlurRadius),
       m_blurIterations(LiquidGlassStyle::kBlurIterations),
       m_noiseAmount(LiquidGlassStyle::kNoiseAmount), m_attractionDist(0.0f),
@@ -67,6 +67,7 @@ QtGlassFlowScene::QtGlassFlowScene(QWidget *parent)
       m_animationEnabled(false),
       m_dragIndex(-1)
 {
+    m_darkModeEnabled = AppSettings().value(QStringLiteral("appearance/darkMode"), false).toBool();
     setMouseTracking(true);
     setAttribute(Qt::WA_OpaquePaintEvent, true);
 
@@ -140,6 +141,7 @@ int QtGlassFlowScene::addGlassObject(const QPointF &pos, const QSizeF &size,
     object.powerFactor = power;
     m_objects.append(object);
     m_connectionsDirty = true;
+    m_blurCacheDirty = true;
     update();
     return m_objects.size() - 1;
 }
@@ -149,6 +151,8 @@ void QtGlassFlowScene::setGlassObjectGeometry(int index, const QPointF &pos,
 {
     if (index < 0 || index >= m_objects.size())
         return;
+    if (m_objects[index].size != size)
+        m_blurCacheDirty = true;
     m_objects[index].position = pos;
     m_objects[index].size = size;
     m_connectionsDirty = true;
@@ -159,7 +163,11 @@ void QtGlassFlowScene::setGlassObjectCornerRadius(int index, float radius)
 {
     if (index < 0 || index >= m_objects.size())
         return;
-    m_objects[index].cornerRadius = qMax(0.0f, radius);
+    const float boundedRadius = qMax(0.0f, radius);
+    if (m_objects[index].cornerRadius == boundedRadius)
+        return;
+    m_objects[index].cornerRadius = boundedRadius;
+    m_blurCacheDirty = true;
     update();
 }
 
@@ -170,6 +178,7 @@ void QtGlassFlowScene::setGlassObjectVisible(int index, bool visible)
     if (m_objects[index].visible == visible)
         return;
     m_objects[index].visible = visible;
+    m_blurCacheDirty = true;
     if (!visible && m_dragIndex == index) {
         m_dragIndex = -1;
         syncTimerCadence();
@@ -217,6 +226,15 @@ void QtGlassFlowScene::setGlassOpacity(float opacity)
     if (qFuzzyCompare(m_glassOpacity, next))
         return;
     m_glassOpacity = next;
+    update();
+}
+
+void QtGlassFlowScene::setDarkModeEnabled(bool enabled)
+{
+    if (m_darkModeEnabled == enabled)
+        return;
+    m_darkModeEnabled = enabled;
+    // 只更新材质参数，背景纹理与模糊结果继续复用。
     update();
 }
 
@@ -298,7 +316,13 @@ void QtGlassFlowScene::setRenderScale(float scale)
 }
 
 void QtGlassFlowScene::setPowerFactor(float value) { m_globalPower = value; update(); }
-void QtGlassFlowScene::setRefractionPower(float value) { m_fPower = value; update(); }
+void QtGlassFlowScene::setRefractionPower(float value)
+{
+    if ((m_fPower == 0.0f) != (value == 0.0f))
+        m_blurCacheDirty = true;
+    m_fPower = value;
+    update();
+}
 
 void QtGlassFlowScene::setBlurRadius(float value)
 {
@@ -638,7 +662,17 @@ void QtGlassFlowScene::runBlurPass()
     if (!m_sceneFbo || !m_blurPingFbo || !m_blurPongFbo)
         return;
     // 高画质逐像素覆盖高斯核，并利用线性过滤合并相邻采样；低画质降低密度与 FBO 分辨率。
-    const float sigma = qBound(0.01f, m_blurRadius * m_renderScale * 1.95f, 42.0f);
+    float scattering = 1.0f;
+    if (m_fPower != 0.0f) {
+        for (const GlassObject& object : std::as_const(m_objects)) {
+            if (!object.visible)
+                continue;
+            const float curvature = LiquidGlassStyle::curvature(
+                float(qMin(object.size.width(), object.size.height()) * .5), object.cornerRadius);
+            scattering = qMax(scattering, 1.0f + (1.0f - curvature) * 2.4f);
+        }
+    }
+    const float sigma = qBound(0.01f, m_blurRadius * scattering * m_renderScale * 1.95f, 42.0f);
     const int stride = m_renderScale < .7f ? 4 : m_renderScale < .9f ? 3
                      : m_renderScale < 1.2f ? 2 : 1;
     if (!qFuzzyCompare(m_blurKernelSigma, sigma) || m_blurKernelStride != stride) {
@@ -761,11 +795,9 @@ void QtGlassFlowScene::renderGlassObject(int index)
     m_glassShader->setUniformValue("u_objHalfSizePx", QVector2D(float(object.size.width()) * dpr * .5f,
                                                                    float(object.size.height()) * dpr * .5f));
     m_glassShader->setUniformValue("u_cornerRadiusPx", float(object.cornerRadius * dpr));
+    m_glassShader->setUniformValue("u_curvature", LiquidGlassStyle::curvature(
+        float(qMin(object.size.width(), object.size.height()) * .5), object.cornerRadius));
     m_glassShader->setUniformValue("u_powerFactor", power);
-    m_glassShader->setUniformValue("u_a", m_refractionA);
-    m_glassShader->setUniformValue("u_b", m_refractionB);
-    m_glassShader->setUniformValue("u_c", m_refractionC);
-    m_glassShader->setUniformValue("u_d", m_refractionD);
     m_glassShader->setUniformValue("u_fPower", m_fPower);
     // 降低高画质抖动强度，最高画质关闭抖动，避免确定性像素图案形成细网格。
     const float ditherWeight = qBound(0.0f, (1.5f - m_renderScale) / 0.9f, 1.0f);
@@ -774,6 +806,7 @@ void QtGlassFlowScene::renderGlassObject(int index)
     m_glassShader->setUniformValue("u_edgeAaScale",
                                    qBound(0.85f, 0.65f + m_renderScale * 0.45f, 1.30f));
     m_glassShader->setUniformValue("u_opacity", m_glassOpacity);
+    m_glassShader->setUniformValue("u_darkMode", m_darkModeEnabled);
 
     QVector<QVector2D> centers, halves;
     QVector<float> powers, strengths;

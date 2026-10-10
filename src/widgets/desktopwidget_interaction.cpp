@@ -35,23 +35,6 @@ void DesktopWidget::showWidgetLibrary()
                     if (!addWidget(kind, globalPos, variant))
                         QToolTip::showText(globalPos, QStringLiteral("当前屏幕没有足够的空位，可缩小组件后重试"));
                 });
-        connect(m_library, &WidgetLibraryDialog::widgetDragStarted, this,
-                [this](int) {
-                    if (!m_libraryDragHiddenWindows.isEmpty())
-                        return;
-                    QSet<WId> widgetWindows;
-                    for (DesktopWidget* widget : std::as_const(s_instances)) {
-                        if (widget && widget->isVisible())
-                            widgetWindows.insert(widget->winId());
-                    }
-                    m_libraryDragHiddenWindows =
-                        NativeWindows::hideApplicationWindows(widgetWindows);
-                });
-        connect(m_library, &WidgetLibraryDialog::widgetDragFinished, this,
-                [this](int) {
-                    NativeWindows::restoreApplicationWindows(m_libraryDragHiddenWindows);
-                    m_libraryDragHiddenWindows.clear();
-                });
         connect(m_library, &WidgetLibraryDialog::widgetDragPreview, this,
                 [this](int encoded, const QPoint& globalPos, bool visible) {
                     if (visible)
@@ -62,7 +45,7 @@ void DesktopWidget::showWidgetLibrary()
                 });
     }
     // 图库可能比设置窗口存活更久，每次打开时重新同步全局显示配置。
-    m_library->setInterfaceScale(m_widgetScale);
+    m_library->updateScreenLayout();
     m_library->setLiveBackdropEnabled(liveBackdropEnabled());
     m_library->setRenderScale(renderScale());
     if (!m_library->isVisible()) {

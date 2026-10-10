@@ -1,5 +1,6 @@
 #include "ui/widgetlibrarydialog.h"
 #include "widgets/desktopwidget.h"
+#include "widgets/widgetgeometry.h"
 #include "media/systemmediasession.h"
 #include "rendering/responsivelayout.h"
 #include "app/appsettings.h"
@@ -23,7 +24,6 @@
 #include <QPixmap>
 #include <QPropertyAnimation>
 #include <QPushButton>
-#include <QRandomGenerator>
 #include <QResizeEvent>
 #include <QScreen>
 #include <QScrollArea>
@@ -43,10 +43,12 @@
 
 namespace {
 
-// 图库表面与内容分别缩放，最终窗口尺寸受桌面工作区限制。
-constexpr int kGalleryWidth = 1320 * 3 / 2;
-constexpr int kGalleryHeight = 800 * 3 / 2;
+// 恢复原有设计基准；窗口和内容各自只应用一次全局外观缩放。
+constexpr int kGalleryWidth = 1980;
+constexpr int kGalleryHeight = 1200;
 constexpr qreal kGalleryContentZoom = 1.5;
+constexpr int kPreviewCell = 128;
+constexpr int kPreviewGap = 12;
 
 void paintNavIcon(QPainter& painter, const QRectF& bounds, int category)
 {
@@ -55,11 +57,19 @@ void paintNavIcon(QPainter& painter, const QRectF& bounds, int category)
     const qreal inset = qMin(bounds.width(), bounds.height()) * .1;
     const QRectF canvas = bounds.adjusted(inset, inset, -inset, -inset);
     const ResponsiveLayout::Metrics metrics(canvas);
-    const QColor ink = category == 1 ? QColor(111, 232, 157, 245)
-                      : category == 2 ? QColor(122, 194, 255, 245)
-                      : category == 3 ? QColor(220, 229, 244, 245)
-                      : category == 4 ? QColor(229, 157, 245, 245)
-                                      : QColor(198, 185, 255, 245);
+    if (category > 0) {
+        const QColor fill = category == 1 ? QColor(52, 201, 89)
+                          : category == 2 ? QColor(38, 153, 230)
+                          : category == 3 ? QColor(239, 242, 246)
+                          : category == 4 ? QColor(153, 87, 219)
+                                          : QColor(235, 76, 112);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(fill);
+        painter.drawRoundedRect(canvas, metrics.size(.22), metrics.size(.22));
+    }
+    const QColor ink = category == 3 ? QColor(50, 56, 62)
+                      : category == 0 ? QColor(207, 219, 223, 210)
+                                      : QColor(255, 255, 255, 245);
     painter.setPen(QPen(ink, metrics.stroke(painter, .075), Qt::SolidLine,
                   Qt::RoundCap, Qt::RoundJoin));
     painter.setBrush(Qt::NoBrush);
@@ -145,7 +155,9 @@ public:
     {
         setObjectName(QStringLiteral("widgetTile"));
         setProperty("tileTitle", title);
-        setFixedSize(qRound(220 * m_scale), qRound(176 * m_scale));
+        updateTileSize();
+        setToolTip(title + QStringLiteral("\n") + subtitle);
+        setAccessibleName(title);
         setAttribute(Qt::WA_Hover, true);
         setCursor(Qt::OpenHandCursor);
         m_press = QPoint(-1, -1);
@@ -163,17 +175,18 @@ public:
         if (qFuzzyCompare(m_scale, scale))
             return;
         m_scale = scale;
-        setFixedSize(qRound(220 * m_scale), qRound(176 * m_scale));
+        updateTileSize();
         refreshPreview();
     }
 
     void refreshPreview()
     {
-        const QSize previewSize(204, 128);
-        const qreal dpr = devicePixelRatioF() * m_scale;
-        const QString key = QStringLiteral("%1:%2:%3x%4:%5:%6")
+        const QSize previewSize = size();
+        const qreal dpr = devicePixelRatioF();
+        const QString key = QStringLiteral("%1:%2:%3x%4:%5:%6:%7")
             .arg(m_cardKind).arg(m_cardVariant).arg(previewSize.width()).arg(previewSize.height())
-            .arg(dpr, 0, 'g', 12).arg(DesktopWidget::globalFontSmoothing());
+            .arg(dpr, 0, 'g', 12).arg(DesktopWidget::globalFontSmoothing())
+            .arg(m_owner->darkModeEnabled());
         if (m_cardKind == int(DesktopWidget::CardKind::Music))
             previewCache().remove(key);
         if (const auto* cached = previewCache().object(key)) {
@@ -199,13 +212,12 @@ protected:
     void paintEvent(QPaintEvent*) override
     {
         QPainter painter(this);
-        painter.scale(m_scale, m_scale);
         painter.setRenderHint(QPainter::Antialiasing);
         painter.setRenderHint(QPainter::TextAntialiasing,
                         DesktopWidget::globalFontSmoothing() > 0);
         painter.setRenderHint(QPainter::SmoothPixmapTransform);
-        // 图库共用一个玻璃表面，预览项不叠加额外外框。
-        const QRectF preview(8, 2, 204, 128);
+        // 缩略图包含完整卡片底面，按原生像素绘制，避免重复缩放使小字模糊。
+        const QRectF preview(rect());
         if (!m_preview.isNull()) {
             const QTransform device = painter.deviceTransform();
             const QPointF origin = preview.center()
@@ -221,23 +233,6 @@ protected:
             painter.drawText(preview, Qt::AlignCenter, QStringLiteral("预览暂不可用"));
         }
 
-        painter.setPen(QColor(247, 249, 253));
-        QFont footerFont = qApp->font();
-        footerFont.setPixelSize(14);
-        footerFont.setWeight(QFont::DemiBold);
-        DesktopWidget::applyFontSmoothing(footerFont);
-        painter.setFont(footerFont);
-        ResponsiveLayout::drawSingleLine(painter, QRectF(10, 134, 200, 20),
-                                   Qt::AlignCenter | Qt::AlignVCenter, m_title);
-        painter.setPen(QColor(173, 186, 207));
-        QFont subtitleFont = qApp->font();
-        subtitleFont.setPixelSize(12);
-        DesktopWidget::applyFontSmoothing(subtitleFont);
-        painter.setFont(subtitleFont);
-        ResponsiveLayout::drawSingleLine(
-            painter, QRectF(10, 154, 200, 17),
-            Qt::AlignCenter | Qt::AlignVCenter,
-            QFontMetrics(painter.font()).elidedText(m_subtitle, Qt::ElideRight, 192));
     }
 
     void mousePressEvent(QMouseEvent* event) override
@@ -310,6 +305,13 @@ protected:
     }
 
 private:
+    void updateTileSize()
+    {
+        setFixedSize(WidgetGeometry::gridWidgetSize(
+            static_cast<DesktopWidget::CardKind>(m_cardKind), m_cardVariant,
+            qMax(1, qRound(kPreviewCell * m_scale)),
+            qMax(1, qRound(kPreviewGap * m_scale))));
+    }
     QString m_title;
     QString m_subtitle;
     int m_cardKind = 0;
@@ -324,7 +326,12 @@ private:
 
 }
 
-void WidgetLibraryDialog::refreshFontRendering()
+WidgetLibraryDialog::~WidgetLibraryDialog()
+{
+    NativeWindows::restoreApplicationWindows(m_hiddenApplicationWindows);
+}
+
+void WidgetLibraryDialog::refreshPreviews()
 {
     previewCache().clear();
     if (!qApp)
@@ -348,8 +355,6 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     setDesktopLayerEnabled(false);
     setDesktopCaptureEnabled(false);
     const AppSettings settings;
-    m_interfaceScale = qBound<qreal>(0.40,
-        settings.value(QStringLiteral("appearance/scale"), 1.0).toDouble(), 2.0);
     setLiveBackdropEnabled(
         settings.value(QStringLiteral("appearance/liveBackdrop"), true).toBool());
     setGlassMargins(0);
@@ -376,7 +381,7 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     m_liveBackdropTimer.setTimerType(Qt::PreciseTimer);
     m_liveBackdropTimer.setSingleShot(false);
     // 实时捕获独立于短暂的面板动画，显示时按实际显示器更新间隔。
-    m_liveBackdropTimer.setInterval(qMax(1, activeDisplayInterval() / 2));
+    m_liveBackdropTimer.setInterval(activeDisplayInterval());
     connect(&m_liveBackdropTimer, &QTimer::timeout,
             this, &WidgetLibraryDialog::refreshBackdrop);
     setAttribute(Qt::WA_TranslucentBackground, true);
@@ -385,8 +390,8 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     setAttribute(Qt::WA_DeleteOnClose, false);
     // 图库比桌面卡片大，清除继承的最大尺寸约束。
     setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
-    setMinimumSize(windowScaled(320), windowScaled(240));
-    resize(windowScaled(kGalleryWidth), windowScaled(kGalleryHeight));
+    setMinimumSize(320, 240);
+    resize(kGalleryWidth, kGalleryHeight);
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
@@ -460,6 +465,13 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     scrollHost->setAttribute(Qt::WA_TranslucentBackground);
     auto* tileLayout = new QGridLayout(scrollHost);
     m_tileLayout = tileLayout;
+    for (const QString& name : {QStringLiteral("电池"), QStringLiteral("天气"),
+                               QStringLiteral("时钟"), QStringLiteral("词典"),
+                               QStringLiteral("音乐")}) {
+        auto* heading = new QLabel(name, scrollHost);
+        heading->setObjectName(QStringLiteral("categoryTitle"));
+        m_categoryTitles.append(heading);
+    }
     tileLayout->setContentsMargins(0, 0, 0, 12);
     tileLayout->setHorizontalSpacing(14);
     tileLayout->setVerticalSpacing(14);
@@ -513,8 +525,8 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     root->addWidget(footer);
     connect(done, &QPushButton::clicked, this, &WidgetLibraryDialog::closeGallery);
 
-    setInterfaceScale(m_interfaceScale);
-    randomizeRecommendations();
+    updateScreenLayout();
+    resetRecommendations();
     applyTileFilter();
 
 }
@@ -524,22 +536,32 @@ int WidgetLibraryDialog::scaled(int value) const
     return qMax(1, qRound(value * m_interfaceScale * kGalleryContentZoom));
 }
 
-int WidgetLibraryDialog::windowScaled(int value) const
+qreal WidgetLibraryDialog::fittedScaleForArea(const QRect& area, qreal scale)
 {
-    return qMax(1, qRound(value * m_interfaceScale));
+    return qMin(qBound<qreal>(.4, scale, 2.0),
+                qMin(qMax(1, area.width() - 32) / qreal(kGalleryWidth),
+                     qMax(1, area.height() - 32) / qreal(kGalleryHeight)));
 }
 
 int WidgetLibraryDialog::tileColumnCount() const
 {
     const int sidebarWidth = width() < scaled(650) ? 0 : qMin(scaled(270), width() / 4);
-    return qBound(1, (width() - sidebarWidth - scaled(55) + scaled(14))
-                     / scaled(234), 4);
+    return qBound(2, (width() - sidebarWidth - scaled(55) - scaled(10) + scaled(kPreviewGap))
+                     / (scaled(kPreviewCell) + scaled(kPreviewGap)), 8);
 }
 
-void WidgetLibraryDialog::setInterfaceScale(qreal scale)
+void WidgetLibraryDialog::updateScreenLayout()
 {
-    const qreal newScale = qBound<qreal>(0.40, scale, 2.0);
-    if (m_scaleApplied && qFuzzyCompare(m_interfaceScale, newScale))
+    QScreen* screen = isVisible() && m_desktopPrepared ? QGuiApplication::screenAt(geometry().center())
+                                  : QGuiApplication::screenAt(QCursor::pos());
+    if (!screen)
+        screen = QGuiApplication::primaryScreen();
+    const QRect area = screen ? screen->availableGeometry() : QRect(0, 0, 1280, 800);
+    const qreal newScale = fittedScaleForArea(area,
+        AppSettings().value(QStringLiteral("appearance/scale"), 1.0).toDouble());
+    const QSize preferred(qMax(1, qRound(kGalleryWidth * newScale)),
+                          qMax(1, qRound(kGalleryHeight * newScale)));
+    if (m_scaleApplied && qFuzzyCompare(m_interfaceScale, newScale) && m_preferredSize == preferred)
         return;
     if (m_scaleApplied)
         previewCache().clear();
@@ -547,6 +569,7 @@ void WidgetLibraryDialog::setInterfaceScale(qreal scale)
     if (m_slideAnimation && m_slideAnimation->state() == QAbstractAnimation::Running)
         m_slideAnimation->stop();
     m_interfaceScale = newScale;
+    m_preferredSize = preferred;
     setGlassRadius(26.0 * m_interfaceScale);
     // 圆角半径不能大于控件高度的一半，避免小数缩放时 QSS 回退为方角。
     const int controlRadius = qMin(scaled(18), scaled(36) / 2);
@@ -554,19 +577,19 @@ void WidgetLibraryDialog::setInterfaceScale(qreal scale)
     const QString style = QStringLiteral(
         "WidgetLibraryDialog { background:transparent; color:#f7f9fd; border:0; }"
         "QFrame#sidebar, QFrame#footer { background:transparent; border:0; }"
-        "QLabel#sectionTitle { color:#f8fbff; font-size:%1px; font-weight:600; }"
+        "QLabel#sectionTitle, QLabel#categoryTitle { color:rgba(241,247,250,165); font-size:%1px; font-weight:600; }"
         "QLabel#footerHint { color:rgba(246,250,255,225); font-size:%2px; }"
         "QPushButton#navButton, QPushButton#navSelected { text-align:left; border:0; border-radius:%3px; padding-left:%4px; color:rgba(246,249,253,230); font-size:%2px; }"
         "QPushButton#navButton:hover { background:rgba(255,255,255,48); }"
-        "QPushButton#navSelected { background:rgba(255,255,255,104); color:#ffffff; font-weight:600; }"
+        "QPushButton#navSelected { background:rgba(255,255,255,40); color:#ffffff; font-weight:600; }"
         "QPushButton#doneButton { background:#1684f7; border:1px solid rgba(255,255,255,90); border-radius:%5px; color:white; font-size:%2px; font-weight:600; padding:0 %6px; }"
         "QPushButton#doneButton:hover { background:#3195fb; }"
         "QScrollArea, QScrollArea > QWidget, QScrollArea > QWidget > QWidget { background:transparent; border:0; }"
         "QScrollBar:vertical { width:%7px; background:transparent; }"
         "QScrollBar::handle:vertical { background:rgba(255,255,255,96); border-radius:%8px; min-height:%9px; }"
         "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }")
-        .arg(scaled(19)).arg(scaled(15)).arg(scaled(12)).arg(scaled(10))
-        .arg(controlRadius).arg(scaled(23)).arg(scaled(7)).arg(scaled(3))
+        .arg(scaled(13)).arg(scaled(15)).arg(scaled(12)).arg(scaled(10))
+        .arg(qMin(scaled(16), scaled(32) / 2)).arg(scaled(23)).arg(scaled(7)).arg(scaled(3))
         .arg(scaled(35));
     setStyleSheet(style);
     if (m_sidebar)
@@ -580,7 +603,7 @@ void WidgetLibraryDialog::setInterfaceScale(qreal scale)
         m_search->setStyleSheet(QStringLiteral(
             "QLineEdit { border:1px solid rgba(255,255,255,75); border-radius:%1px; "
             "padding:0 %2px; color:#f7fbff; background:rgba(238,246,253,54); font-size:%3px; }"
-            "QLineEdit:focus { border:1px solid rgba(255,255,255,145); background:rgba(238,246,253,74); }")
+            "QLineEdit:focus { border:2px solid #2d9ed4; background:rgba(238,246,253,65); }")
             .arg(controlRadius).arg(scaled(12)).arg(scaled(15)));
     }
     for (QPushButton* button : std::as_const(m_navButtons)) {
@@ -593,29 +616,20 @@ void WidgetLibraryDialog::setInterfaceScale(qreal scale)
     }
     if (m_tileLayout) {
         m_tileLayout->setContentsMargins(0, 0, 0, scaled(12));
-        m_tileLayout->setHorizontalSpacing(scaled(14));
-        m_tileLayout->setVerticalSpacing(scaled(14));
+        m_tileLayout->setHorizontalSpacing(scaled(kPreviewGap));
+        m_tileLayout->setVerticalSpacing(scaled(kPreviewGap));
     }
     for (QFrame* tile : std::as_const(m_tiles))
         static_cast<DragTile*>(tile)->setScale(m_interfaceScale * kGalleryContentZoom);
     if (m_footer)
-        m_footer->setFixedHeight(scaled(70));
+        m_footer->setFixedHeight(scaled(62));
     if (m_footerLayout)
         m_footerLayout->setContentsMargins(scaled(24), 0, scaled(23), 0);
     if (m_doneButton)
-        m_doneButton->setFixedHeight(scaled(36));
+        m_doneButton->setFixedSize(scaled(90), scaled(32));
 
-    QScreen* screen = isVisible() ? QGuiApplication::screenAt(geometry().center())
-                                  : QGuiApplication::screenAt(QCursor::pos());
-    if (!screen)
-        screen = QGuiApplication::primaryScreen();
-    const QRect area = screen ? screen->availableGeometry() : QRect();
-    const int maxWidth = screen ? qMax(1, area.width() - 32) : QWIDGETSIZE_MAX;
-    const int maxHeight = screen ? qMax(1, area.height() - 32) : QWIDGETSIZE_MAX;
-    setMinimumSize(qMin(windowScaled(320), maxWidth),
-                   qMin(windowScaled(240), maxHeight));
-    resize(qMin(windowScaled(kGalleryWidth), maxWidth),
-           qMin(windowScaled(kGalleryHeight), maxHeight));
+    setMinimumSize(qMin(scaled(340), preferred.width()), qMin(scaled(240), preferred.height()));
+    resize(preferred);
     if (isVisible() && screen) {
         const int targetX = area.left() + (area.width() - width()) / 2;
         const int targetY = area.bottom() - height() - 8;
@@ -631,42 +645,17 @@ void WidgetLibraryDialog::setInterfaceScale(qreal scale)
             updateBackdropFrame();
         }
         if (liveBackdropEnabled()) {
-            m_liveBackdropTimer.setInterval(qMax(1, activeDisplayInterval() / 2));
+            m_liveBackdropTimer.setInterval(activeDisplayInterval());
             m_liveBackdropTimer.start();
         }
     }
     applyTileFilter();
 }
 
-void WidgetLibraryDialog::randomizeRecommendations()
+void WidgetLibraryDialog::resetRecommendations()
 {
-    m_recommendedTiles.clear();
-    if (m_tiles.isEmpty())
-        return;
-    // 随机推荐时保持类型多样性。
-    QList<int> candidates;
-    for (int i = 0; i < m_tiles.size(); ++i)
-        candidates.append(i);
-    for (int i = candidates.size() - 1; i > 0; --i) {
-        const int j = int(QRandomGenerator::global()->bounded(i + 1));
-        candidates.swapItemsAt(i, j);
-    }
-    QSet<int> categories;
-    for (int index : candidates) {
-        const int category = m_tiles.at(index)->property("tileCategory").toInt();
-        if (categories.size() < 4 && categories.contains(category))
-            continue;
-        m_recommendedTiles.append(index);
-        categories.insert(category);
-        if (m_recommendedTiles.size() == 6)
-            break;
-    }
-    for (int index : candidates) {
-        if (m_recommendedTiles.size() == 6)
-            break;
-        if (!m_recommendedTiles.contains(index))
-            m_recommendedTiles.append(index);
-    }
+    // 稳定的大小组合形成紧凑画廊，避免每次打开都跳换布局。
+    m_recommendedTiles = {7, 0, 5, 9, 12, 4};
 }
 
 void WidgetLibraryDialog::selectCategory(int category)
@@ -687,7 +676,7 @@ void WidgetLibraryDialog::selectCategory(int category)
                                                     : category == 4 ? QStringLiteral("词典")
                                                                     : QStringLiteral("音乐")));
     if (category == 0)
-        randomizeRecommendations();
+        resetRecommendations();
     applyTileFilter();
 }
 
@@ -696,24 +685,76 @@ void WidgetLibraryDialog::applyTileFilter()
     if (!m_tileLayout)
         return;
     const QString query = m_search ? m_search->text().trimmed().toLower() : QString();
+    while (QLayoutItem* item = m_tileLayout->takeAt(0))
+        delete item;
+    for (QLabel* title : std::as_const(m_categoryTitles))
+        title->hide();
+    const int columns = tileColumnCount();
+    m_tileColumns = columns;
     QList<QFrame*> visible;
     for (int i = 0; i < m_tiles.size(); ++i) {
         QFrame* tile = m_tiles.at(i);
         const int category = tile->property("tileCategory").toInt();
-        const bool categoryMatch = m_selectedCategory < 0
-            ? m_recommendedTiles.contains(i)
-            : category == m_selectedCategory;
+        const bool categoryMatch = m_selectedCategory < 0 || category == m_selectedCategory;
         const bool queryMatch = query.isEmpty()
             || tile->property("tileSearch").toString().contains(query);
         tile->setVisible(categoryMatch && queryMatch);
         if (categoryMatch && queryMatch)
             visible.append(tile);
-        m_tileLayout->removeWidget(tile);
     }
-    const int columns = tileColumnCount();
-    m_tileColumns = columns;
-    for (int i = 0; i < visible.size(); ++i)
-        m_tileLayout->addWidget(visible.at(i), i / columns, i % columns);
+    // 每个分区按真实网格跨度填空，正方形、横向与大卡片共用同一间距。
+    int nextRow = 0;
+    const auto placeTiles = [&](const QList<QFrame*>& group) {
+        QSet<QPair<int, int>> occupied;
+        int rows = 0;
+        for (QFrame* tile : group) {
+            const auto kind = static_cast<DesktopWidget::CardKind>(tile->property("tileKind").toInt());
+            const int variant = tile->property("tileVariant").toInt();
+            const int w = WidgetGeometry::gridColumnSpan(kind, variant);
+            const int h = WidgetGeometry::gridRowSpan(kind, variant);
+            bool placed = false;
+            for (int row = 0; !placed; ++row) {
+                for (int col = 0; col + w <= columns; ++col) {
+                    bool free = true;
+                    for (int y = 0; y < h; ++y)
+                        for (int x = 0; x < w; ++x)
+                            free = free && !occupied.contains({row + y, col + x});
+                    if (!free) continue;
+                    for (int y = 0; y < h; ++y)
+                        for (int x = 0; x < w; ++x)
+                            occupied.insert({row + y, col + x});
+                    m_tileLayout->addWidget(tile, nextRow + row, col, h, w, Qt::AlignTop | Qt::AlignLeft);
+                    rows = qMax(rows, row + h);
+                    placed = true;
+                    break;
+                }
+            }
+        }
+        nextRow += rows;
+    };
+    if (m_selectedCategory < 0 && query.isEmpty()) {
+        QList<QFrame*> recommended;
+        for (int index : std::as_const(m_recommendedTiles))
+            if (index >= 0 && index < m_tiles.size())
+                recommended.append(m_tiles.at(index));
+        placeTiles(recommended);
+        for (int category = 1; category <= m_categoryTitles.size(); ++category) {
+            QList<QFrame*> group;
+            for (QFrame* tile : visible)
+                if (!recommended.contains(tile) && tile->property("tileCategory").toInt() == category)
+                    group.append(tile);
+            if (group.isEmpty()) continue;
+            QLabel* title = m_categoryTitles.at(category - 1);
+            title->setFixedHeight(scaled(42));
+            title->show();
+            m_tileLayout->addWidget(title, nextRow++, 0, 1, columns);
+            placeTiles(group);
+        }
+    } else {
+        placeTiles(visible);
+    }
+    if (m_sectionTitle && m_selectedCategory < 0)
+        m_sectionTitle->setText(query.isEmpty() ? QStringLiteral("建议") : QStringLiteral("搜索结果"));
     m_tileLayout->setAlignment(Qt::AlignLeft | Qt::AlignTop);
 }
 
@@ -735,6 +776,11 @@ void WidgetLibraryDialog::mouseReleaseEvent(QMouseEvent* event)
 
 bool WidgetLibraryDialog::event(QEvent* event)
 {
+    if (event->type() == QEvent::KeyPress
+        && static_cast<QKeyEvent*>(event)->key() == Qt::Key_Escape) {
+        closeGallery();
+        return true;
+    }
     // 图库失去激活时立即关闭，避免临时置顶面板滞留在屏幕上。
     if (event->type() == QEvent::WindowDeactivate && !m_closing) {
         closeGallery();
@@ -745,6 +791,17 @@ bool WidgetLibraryDialog::event(QEvent* event)
 
 void WidgetLibraryDialog::prepareBackdrop()
 {
+    updateScreenLayout();
+    m_initialBackdropPending = true;
+    if (!m_desktopPrepared) {
+        QSet<WId> preserved;
+        // 保留桌面卡片及本应用面板，其他应用在整个添加会话内保持隐藏。
+        for (QWidget* widget : QApplication::topLevelWidgets())
+            if (dynamic_cast<LiquidGlassWidget*>(widget))
+                preserved.insert(widget->winId());
+        m_hiddenApplicationWindows = NativeWindows::hideApplicationWindows(preserved);
+        m_desktopPrepared = true;
+    }
     selectCategory(0);
     preparePanelOpening();
     QScreen* screen = QGuiApplication::screenAt(QCursor::pos());
@@ -754,10 +811,9 @@ void WidgetLibraryDialog::prepareBackdrop()
         return;
 
     const QRect area = screen->availableGeometry();
-    const int targetWidth = qMin(windowScaled(kGalleryWidth), qMax(1, area.width() - 32));
-    const int targetHeight = qMin(windowScaled(kGalleryHeight), qMax(1, area.height() - 32));
-    setMinimumSize(qMin(windowScaled(320), targetWidth),
-                   qMin(windowScaled(240), targetHeight));
+    const int targetWidth = m_preferredSize.width();
+    const int targetHeight = m_preferredSize.height();
+    setMinimumSize(qMin(scaled(340), targetWidth), qMin(scaled(240), targetHeight));
     const int targetX = area.left() + (area.width() - targetWidth) / 2;
     const int targetY = area.bottom() - targetHeight - 8;
     m_backdropRect = QRect(targetX, targetY, targetWidth, targetHeight);
@@ -792,16 +848,7 @@ void WidgetLibraryDialog::resizeEvent(QResizeEvent* event)
     const int columns = tileColumnCount();
     if (columns == m_tileColumns)
         return;
-    m_tileColumns = columns;
-    for (QFrame* tile : std::as_const(m_tiles))
-        m_tileLayout->removeWidget(tile);
-    int visibleIndex = 0;
-    for (QFrame* tile : std::as_const(m_tiles)) {
-        if (!tile->isVisible())
-            continue;
-        m_tileLayout->addWidget(tile, visibleIndex / columns, visibleIndex % columns);
-        ++visibleIndex;
-    }
+    applyTileFilter();
 }
 
 void WidgetLibraryDialog::updateBackdropFrame()
@@ -868,8 +915,9 @@ void WidgetLibraryDialog::updateBackdropFrame()
 
 void WidgetLibraryDialog::refreshBackdrop()
 {
-    if (!liveBackdropEnabled() || desktopDragActive() || !isVisible() || m_backdropCaptureRect.isNull()
-        || m_liveCapturesInFlight >= 2)
+    if ((!liveBackdropEnabled() && !m_initialBackdropPending) || desktopDragActive() || !isVisible() || m_backdropCaptureRect.isNull()
+        || m_liveCapturesInFlight >= 2
+        || (m_slideAnimation && m_slideAnimation->state() == QAbstractAnimation::Running))
         return;
     // 动画结束后仅采样可见面板，下一次动画之前再重建路径条带。
     const QRect area = geometry();
@@ -879,19 +927,24 @@ void WidgetLibraryDialog::refreshBackdrop()
         m_liveCapturesInFlight = qMax(0, m_liveCapturesInFlight - 1);
         if (!isVisible() || desktopDragActive() || generation != m_backdropGeneration)
             return;
-        if (!image.isNull())
+        if (!image.isNull()) {
+            m_initialBackdropPending = false;
             ++m_liveBackdropSamples;
+        }
         if (!image.isNull() && image != m_backdropCanvas) {
+            m_unchangedBackdropSamples = 0;
             m_backdropCanvas = std::move(image);
             m_backdropRect = geometry();
             m_backdropCaptureRect = m_backdropRect;
             ++m_liveBackdropFrames;
             m_lastBackdropGeometry = QRect();
             updateBackdropFrame();
+        } else if (!image.isNull()) {
+            m_unchangedBackdropSamples = qMin(512, m_unchangedBackdropSamples + 1);
         }
-        // 完成回调立即补充双请求流水线，避免等待下一次界面定时器造成捕获空闲。
-        if (liveBackdropEnabled())
-            refreshBackdrop();
+        // 变化背景维持显示器节奏，静止时仅每百毫秒探测一次。
+        m_liveBackdropTimer.setInterval(m_unchangedBackdropSamples >= qMax(3, 350 / qMax(1, activeDisplayInterval() / 2))
+            ? qMax(100, activeDisplayInterval()) : qMax(1, activeDisplayInterval() / 2));
     });
 }
 
@@ -903,12 +956,19 @@ void WidgetLibraryDialog::hideEvent(QHideEvent* event)
     if (m_slideAnimation)
         m_slideAnimation->stop();
     LiquidGlassWidget::hideEvent(event);
+    NativeWindows::restoreApplicationWindows(m_hiddenApplicationWindows);
+    m_hiddenApplicationWindows.clear();
+    m_desktopPrepared = false;
+    m_initialBackdropPending = false;
 }
 
 void WidgetLibraryDialog::showEvent(QShowEvent* event)
 {
+    if (!m_desktopPrepared)
+        prepareBackdrop();
     LiquidGlassWidget::showEvent(event);
     m_closing = false;
+    m_unchangedBackdropSamples = 0;
     ++m_backdropGeneration;
     // 属性动画已调度几何更新，无需额外定时器重复裁剪和上传纹理。
     m_renderTimer.stop();
@@ -947,11 +1007,13 @@ void WidgetLibraryDialog::showEvent(QShowEvent* event)
                 if (liveBackdropEnabled()) {
                     m_liveBackdropTimer.setTimerType(Qt::PreciseTimer);
                     // 在呈现边界之间轮询，降低定时器延迟造成的丢帧；未变化帧不会重复上传。
-                    m_liveBackdropTimer.setInterval(qMax(1, activeDisplayInterval() / 2));
+                    m_liveBackdropTimer.setInterval(activeDisplayInterval());
                     m_liveBackdropTimer.start();
                     refreshBackdrop();
                 } else {
                     m_liveBackdropTimer.stop();
+                    // 异步隐藏应用完成后补采一次，静态模式也不能保留打开前的窗口影像。
+                    refreshBackdrop();
                 }
             }
         });
