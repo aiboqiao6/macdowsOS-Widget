@@ -440,7 +440,6 @@ private slots:
         QVERIFY(QDir().mkpath(output));
         PipelineProbe scene;
         scene.resize(400, 310);
-        scene.setNoiseAmount(0);
         scene.setBlurRadius(8);
         scene.addGlassObject(QPointF(0, 0), QSizeF(400, 310));
         scene.setGlassObjectCornerRadius(0, 34);
@@ -451,11 +450,13 @@ private slots:
         scene.setBackgroundImage(background);
         scene.show();
         QVERIFY(QTest::qWaitForWindowExposed(&scene));
+        for (bool dark : {false, true}) {
+        scene.setDarkModeEnabled(dark);
         for (float quality : {.6f, .8f, 1.f, 1.25f, 1.5f}) {
             scene.setRenderScale(quality);
-            for (int mode = 0; mode < 3; ++mode) {
-                scene.withText = mode == 2;
-                const QString name = QStringLiteral("pipeline-%1-%2").arg(quality).arg(mode);
+            for (int mode = 0; mode < 4; ++mode) {
+                scene.withText = mode >= 2;
+                const QString name = QStringLiteral("pipeline-%1-%2-%3").arg(dark).arg(quality).arg(mode);
                 scene.makeCurrent();
                 auto* gl = scene.context()->extraFunctions();
                 QList<double> durations;
@@ -463,6 +464,10 @@ private slots:
                 for (int frame = 0; frame < 58; ++frame) {
                     if (mode == 1)
                         scene.m_blurCacheDirty = true;
+                    if (mode == 3) {
+                        scene.m_bgDirty = true;
+                        scene.m_blurCacheDirty = true;
+                    }
                     QElapsedTimer timer;
                     timer.start();
                     scene.paintGL();
@@ -497,6 +502,46 @@ private slots:
                 }
             }
         }
+        }
+        qint64 retainedGlyphBytes = 0;
+        for (const QString& key : scene.m_textRenderer.m_masks.keys())
+            retainedGlyphBytes += scene.m_textRenderer.m_masks.object(key)->pixels.sizeInBytes();
+        qInfo() << "uploaded_glyph_cpu_bytes" << retainedGlyphBytes;
+
+        WidgetLibraryDialog gallery;
+        for (float quality : {.6f, .8f, 1.f, 1.25f, 1.5f}) {
+            const qreal scale = gallery.devicePixelRatioF() * quality;
+            const QSize size(qRound(gallery.width() * scale), qRound(gallery.height() * scale));
+            QImage a(size, QImage::Format_RGB32), b(size, QImage::Format_RGB32);
+            a.fill(QColor(42, 78, 110));
+            b.fill(QColor(82, 118, 150));
+            gallery.m_backdropCaptureRect = gallery.geometry();
+            QList<double> durations;
+            for (int frame = 0; frame < 58; ++frame) {
+                gallery.m_backdropCanvas = frame % 2 ? a : b;
+                gallery.m_lastBackdropGeometry = {};
+                QElapsedTimer timer;
+                timer.start();
+                gallery.updateBackdropFrame();
+                if (frame >= 10) durations.append(timer.nsecsElapsed() / 1e6);
+            }
+            std::sort(durations.begin(), durations.end());
+            const QString name = QStringLiteral("gallery-cpu-%1").arg(quality);
+            qInfo() << name << "median_ms" << durations[durations.size() / 2]
+                    << "p95_ms" << durations[qFloor(durations.size() * .95)];
+            const QImage frame = gallery.m_lastBackdropImage.convertToFormat(QImage::Format_RGBA8888);
+            QVERIFY(frame.save(output + '/' + name + ".png"));
+            const QString baseline = qEnvironmentVariable("WIDGET_PIPELINE_BASELINE");
+            if (!baseline.isEmpty())
+                QCOMPARE(frame, QImage(baseline + '/' + name + ".png").convertToFormat(QImage::Format_RGBA8888));
+        }
+#ifdef Q_OS_WIN
+        PROCESS_MEMORY_COUNTERS_EX memory{};
+        memory.cb = sizeof(memory);
+        QVERIFY(GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory), sizeof(memory)));
+        qInfo() << "process_private_bytes" << quint64(memory.PrivateUsage)
+                << "process_working_set_bytes" << quint64(memory.WorkingSetSize);
+#endif
     }
 
     void initTestCase() {
@@ -610,6 +655,47 @@ private slots:
             }
         }
         QVERIFY2(maximum <= 1, qPrintable(QStringLiteral("CPU/GL translucent glyph difference: %1").arg(maximum)));
+        for (const QString& key : colored.m_textRenderer.m_masks.keys()) {
+            const auto* mask = colored.m_textRenderer.m_masks.object(key);
+            QVERIFY(mask->texture != 0);
+            QVERIFY(mask->pixels.isNull());
+            QVERIFY(!mask->size.isEmpty());
+        }
+    }
+
+    void galleryBackdropSharesFullFramesAndPreservesEdgePixels() {
+        WidgetLibraryDialog gallery;
+        for (qreal scale : {.6, .8, 1., 1.25, 1.5}) {
+            for (const QPoint shift : {QPoint(), QPoint(2, 3), QPoint(-2, -3)}) {
+                const QRect area = gallery.geometry().translated(shift);
+                QImage canvas(QSize(qRound(area.width() * scale), qRound(area.height() * scale)), QImage::Format_RGB32);
+                for (int y = 0; y < canvas.height(); ++y) {
+                    auto* row = reinterpret_cast<QRgb*>(canvas.scanLine(y));
+                    for (int x = 0; x < canvas.width(); ++x)
+                        row[x] = qRgb(x % 256, y % 256, (x + y) % 256);
+                }
+                gallery.m_backdropCanvas = canvas;
+                gallery.m_backdropCaptureRect = area;
+                gallery.m_lastBackdropGeometry = {};
+                gallery.updateBackdropFrame();
+                const QImage actual = gallery.m_lastBackdropImage;
+                QVERIFY(!actual.isNull());
+                if (shift.isNull()) {
+                    QCOMPARE(actual.constBits(), canvas.constBits());
+                    QCOMPARE(actual, canvas);
+                } else {
+                    // 边缘缺列继续延展最近像素，平移时不误用共享整帧分支。
+                    const qreal sx = canvas.width() / qreal(area.width());
+                    const qreal sy = canvas.height() / qreal(area.height());
+                    for (const QPoint sample : {QPoint(actual.width()/2, 0), QPoint(0, actual.height()/2),
+                                               QPoint(actual.width()-1, actual.height()/2), QPoint(actual.width()/2, actual.height()-1)}) {
+                        const int x = qBound(0, sample.x() - qRound(shift.x()*sx), canvas.width()-1);
+                        const int y = qBound(0, sample.y() - qRound(shift.y()*sy), canvas.height()-1);
+                        QCOMPARE(actual.pixelColor(sample), canvas.pixelColor(x, y));
+                    }
+                }
+            }
+        }
     }
 
     void globalControlsUseSharedNativeGlyphPipeline() {
@@ -1089,12 +1175,12 @@ private slots:
         QVERIFY(!light.isNull());
         QVERIFY(!scene.darkModeEnabled());
         QVERIFY(!scene.m_blurCacheDirty);
-        const auto* cache = scene.m_blurPongFbo;
+        const auto* cache = scene.m_sceneFbo;
         const quint64 before = scene.frameRevision();
         scene.setDarkModeEnabled(true);
         QTRY_VERIFY(scene.frameRevision() > before);
         const QImage dark = scene.grabFramebuffer();
-        QCOMPARE(scene.m_blurPongFbo, cache);
+        QCOMPARE(scene.m_sceneFbo, cache);
         QVERIFY(!scene.m_blurCacheDirty);
         const QColor pixel = dark.pixelColor(dark.width() / 2, dark.height() / 2);
         QVERIFY(qGray(pixel.rgb()) < qGray(light.pixelColor(light.width() / 2, light.height() / 2).rgb()) * .6);

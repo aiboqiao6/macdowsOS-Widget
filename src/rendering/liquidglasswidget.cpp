@@ -763,8 +763,11 @@ void LiquidGlassWidget::updateCompositeCrop()
     const qreal sx = m_compositeCanvas.width() / qreal(m_compositeArea.width());
     const qreal sy = m_compositeCanvas.height() / qreal(m_compositeArea.height());
     const QPoint offset = frameGeometry().topLeft() - m_compositeArea.topLeft();
-    QImage sample = m_compositeCanvas.copy(qRound(offset.x() * sx), qRound(offset.y() * sy),
-                                          qMax(1, qRound(width() * sx)), qMax(1, qRound(height() * sy)));
+    const QRect crop(qRound(offset.x() * sx), qRound(offset.y() * sy),
+                     qMax(1, qRound(width() * sx)), qMax(1, qRound(height() * sy)));
+    // 实时静止卡片没有裁剪余量，直接共享完整帧；有边距或下层玻璃时仍按原路径处理。
+    QImage sample = crop == m_compositeCanvas.rect()
+        ? m_compositeCanvas : m_compositeCanvas.copy(crop);
     compositeGlassWindows(sample, frameGeometry(), this);
     // 使用 QImage 的优化行比较，避免逐像素哈希的完整扫描开销。
     if (sample == m_lastCompositedBackdrop)

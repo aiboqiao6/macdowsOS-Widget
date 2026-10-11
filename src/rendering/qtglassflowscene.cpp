@@ -49,7 +49,7 @@ static const float kQuadVerts[] = {
 
 QtGlassFlowScene::QtGlassFlowScene(QWidget *parent)
     : QOpenGLWidget(parent),
-      m_sceneFbo(nullptr), m_blurPingFbo(nullptr), m_blurPongFbo(nullptr),
+      m_sceneFbo(nullptr), m_blurPingFbo(nullptr),
       m_blitShader(nullptr), m_blurShader(nullptr), m_glassShader(nullptr),
       m_quadVbo(QOpenGLBuffer::VertexBuffer), m_quadInitialized(false),
       m_bgTexture(0), m_bgWidth(0), m_bgHeight(0), m_bgDirty(false),
@@ -554,11 +554,10 @@ void QtGlassFlowScene::createFBOs(int w, int h)
     format.setInternalTextureFormat(GL_RGBA8);
     m_sceneFbo = new QOpenGLFramebufferObject(w, h, format);
     m_blurPingFbo = new QOpenGLFramebufferObject(w, h, format);
-    m_blurPongFbo = new QOpenGLFramebufferObject(w, h, format);
-    RenderDiagnostics::write("gl.fbo.create", QString("surface=0x%1 size=%2x%3 scene=%4 ping=%5 pong=%6 valid=%7/%8/%9")
+    RenderDiagnostics::write("gl.fbo.create", QString("surface=0x%1 size=%2x%3 scene=%4 ping=%5 valid=%6/%7")
         .arg(quintptr(this), 0, 16).arg(w).arg(h).arg(m_sceneFbo->handle())
-        .arg(m_blurPingFbo->handle()).arg(m_blurPongFbo->handle())
-        .arg(m_sceneFbo->isValid()).arg(m_blurPingFbo->isValid()).arg(m_blurPongFbo->isValid()));
+        .arg(m_blurPingFbo->handle())
+        .arg(m_sceneFbo->isValid()).arg(m_blurPingFbo->isValid()));
     const auto setLinear = [this](QOpenGLFramebufferObject *fbo) {
         glBindTexture(GL_TEXTURE_2D, fbo->texture());
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -569,7 +568,6 @@ void QtGlassFlowScene::createFBOs(int w, int h)
     };
     setLinear(m_sceneFbo);
     setLinear(m_blurPingFbo);
-    setLinear(m_blurPongFbo);
     m_blurCacheDirty = true;
     reportGlErrors("fbo-create");
 }
@@ -578,7 +576,6 @@ void QtGlassFlowScene::destroyFBOs()
 {
     delete m_sceneFbo; m_sceneFbo = nullptr;
     delete m_blurPingFbo; m_blurPingFbo = nullptr;
-    delete m_blurPongFbo; m_blurPongFbo = nullptr;
 }
 
 void QtGlassFlowScene::loadBackgroundTexture()
@@ -659,7 +656,7 @@ void QtGlassFlowScene::renderBackgroundToFbo()
 
 void QtGlassFlowScene::runBlurPass()
 {
-    if (!m_sceneFbo || !m_blurPingFbo || !m_blurPongFbo)
+    if (!m_sceneFbo || !m_blurPingFbo)
         return;
     // 高画质逐像素覆盖高斯核，并利用线性过滤合并相邻采样；低画质降低密度与 FBO 分辨率。
     float scattering = 1.0f;
@@ -724,11 +721,12 @@ void QtGlassFlowScene::runBlurPass()
         program->setUniformValue("u_direction", QVector2D(1, 0));
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
-        m_blurPongFbo->bind();
+        // 水平通道已读完原背景，垂直通道写回场景纹理，两个同格式 FBO 即可完成全部迭代。
+        m_sceneFbo->bind();
         glBindTexture(GL_TEXTURE_2D, m_blurPingFbo->texture());
         program->setUniformValue("u_direction", QVector2D(0, 1));
         glDrawArrays(GL_TRIANGLES, 0, 6);
-        source = m_blurPongFbo->texture();
+        source = m_sceneFbo->texture();
     }
     glBindTexture(GL_TEXTURE_2D, 0);
     releaseFullscreenQuad(program);
@@ -837,7 +835,7 @@ void QtGlassFlowScene::renderGlassObject(int index)
         m_glassShader->setUniformValueArray("u_connStrength", strengths.constData(), count, 1);
     }
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, m_blurPongFbo ? m_blurPongFbo->texture() : 0);
+    glBindTexture(GL_TEXTURE_2D, m_sceneFbo ? m_sceneFbo->texture() : 0);
     glEnable(GL_BLEND);
     glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     drawFullscreenQuad(m_glassShader);

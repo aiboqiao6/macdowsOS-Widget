@@ -227,6 +227,7 @@ bool Renderer::paint(QPainter& painter, const QPointF& baseline, const QString& 
         created->pixels = coverage(rasterFont, text, &created->offset).convertToFormat(QImage::Format_RGBA8888);
         if (created->pixels.isNull())
             return false;
+        created->size = created->pixels.size();
         // 先保留 CPU 掩码，纹理在 QPainter 切回原生绘制之后上传。
         const int cost = qMax(1, int(created->pixels.sizeInBytes() / 1024));
         if (cost > m_masks.maxCost())
@@ -241,7 +242,7 @@ bool Renderer::paint(QPainter& painter, const QPointF& baseline, const QString& 
     const QPointF deviceBaseline = transform.map(baseline);
     const QPoint origin(qRound(deviceBaseline.x()) + mask->offset.x(),
                         qRound(deviceBaseline.y()) + mask->offset.y());
-    const QRect destination(origin, mask->pixels.size());
+    const QRect destination(origin, mask->size);
     QRect clip(QPoint(), m_nativeSize);
     if (painter.hasClipping())
         clip &= transform.mapRect(painter.clipBoundingRect()).toAlignedRect();
@@ -288,6 +289,12 @@ bool Renderer::paint(QPainter& painter, const QPointF& baseline, const QString& 
             painter.endNativePainting();
             return false;
         }
+        // 链接后缓存位置，避免每个字串和每个颜色通道重复查询驱动。
+        m_viewportLocation = m_shader->uniformLocation("viewport");
+        m_rectangleLocation = m_shader->uniformLocation("rectangle");
+        m_maskTextureLocation = m_shader->uniformLocation("maskTexture");
+        m_inkLocation = m_shader->uniformLocation("ink");
+        m_channelLocation = m_shader->uniformLocation("channel");
         gl->glGenBuffers(1, &m_vertexBuffer);
         gl->glBindBuffer(GL_ARRAY_BUFFER, m_vertexBuffer);
         const float vertices[] = {0,0, 1,0, 0,1, 1,1};
@@ -306,6 +313,8 @@ bool Renderer::paint(QPainter& painter, const QPointF& baseline, const QString& 
         gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        // 纹理上传是同步消费客户端像素，后续绘制只保留尺寸和 GPU 纹理。
+        mask->pixels = {};
     } else {
         gl->glBindTexture(GL_TEXTURE_2D, mask->texture);
     }
@@ -313,10 +322,10 @@ bool Renderer::paint(QPainter& painter, const QPointF& baseline, const QString& 
     gl->glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
     gl->glEnableVertexAttribArray(0);
     m_shader->bind();
-    m_shader->setUniformValue("viewport", QVector2D(m_nativeSize.width(), m_nativeSize.height()));
-    m_shader->setUniformValue("rectangle", QVector4D(destination.x(), destination.y(), destination.width(), destination.height()));
-    m_shader->setUniformValue("maskTexture", 0);
-    m_shader->setUniformValue("ink", QVector4D(color.redF(), color.greenF(), color.blueF(), opacity));
+    m_shader->setUniformValue(m_viewportLocation, QVector2D(m_nativeSize.width(), m_nativeSize.height()));
+    m_shader->setUniformValue(m_rectangleLocation, QVector4D(destination.x(), destination.y(), destination.width(), destination.height()));
+    m_shader->setUniformValue(m_maskTextureLocation, 0);
+    m_shader->setUniformValue(m_inkLocation, QVector4D(color.redF(), color.greenF(), color.blueF(), opacity));
     gl->glViewport(0, 0, m_nativeSize.width(), m_nativeSize.height());
     gl->glDisable(GL_DEPTH_TEST);
     gl->glDisable(GL_STENCIL_TEST);
@@ -328,7 +337,7 @@ bool Renderer::paint(QPainter& painter, const QPointF& baseline, const QString& 
     // 分别混合 RGB 覆盖率，再用最大覆盖率更新 alpha，保持透明玻璃上的字形覆盖。
     for (int channel = 0; channel < 4; ++channel) {
         gl->glColorMask(channel == 0, channel == 1, channel == 2, channel == 3);
-        m_shader->setUniformValue("channel", channel);
+        m_shader->setUniformValue(m_channelLocation, channel);
         gl->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     }
     gl->glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);

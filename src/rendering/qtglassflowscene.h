@@ -132,7 +132,6 @@ private:
 
     QOpenGLFramebufferObject *m_sceneFbo;
     QOpenGLFramebufferObject *m_blurPingFbo;
-    QOpenGLFramebufferObject *m_blurPongFbo;
     QOpenGLShaderProgram *m_blitShader;
     QOpenGLShaderProgram *m_blurShader;
     // 按采样数缓存最多四个程序，必须在所属上下文中清空。

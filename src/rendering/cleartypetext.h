@@ -11,6 +11,7 @@
 class QPainter;
 class QPaintDevice;
 class QFont;
+class WidgetRegression;
 
 namespace ClearTypeText {
 void setEnabled(bool enabled);
@@ -30,15 +31,22 @@ public:
     void clear();
     bool paint(QPainter& painter, const QPointF& baseline, const QString& text);
 private:
+    friend class ::WidgetRegression;
     void clearMasks();
     struct Mask {
         QImage pixels;
+        QSize size;
         QPoint offset;
         unsigned int texture = 0;
     };
     std::unique_ptr<QOpenGLShaderProgram> m_shader;
     QCache<QString, Mask> m_masks{4096};
     unsigned int m_vertexBuffer = 0;
+    int m_viewportLocation = -1;
+    int m_rectangleLocation = -1;
+    int m_maskTextureLocation = -1;
+    int m_inkLocation = -1;
+    int m_channelLocation = -1;
     QPaintDevice* m_device = nullptr;
     QSize m_nativeSize;
 };

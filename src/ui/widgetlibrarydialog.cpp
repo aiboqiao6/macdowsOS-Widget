@@ -873,6 +873,16 @@ void WidgetLibraryDialog::updateBackdropFrame()
                           frameSize.width(), frameSize.height());
     const QRect source = requested.intersected(m_backdropCanvas.rect());
 
+    // 稳定面板的捕获矩形与显示矩形一致，直接共享原始像素，避免整面分配和格式转换。
+    if (requested == m_backdropCanvas.rect() && m_backdropCanvas.format() == QImage::Format_RGB32) {
+        m_lastBackdropGeometry = currentGeometry;
+        if (m_backdropCanvas != m_lastBackdropImage) {
+            m_lastBackdropImage = m_backdropCanvas;
+            setBackgroundImage(m_lastBackdropImage);
+        }
+        return;
+    }
+
     QImage frame(frameSize, QImage::Format_RGBA8888);
     frame.fill(Qt::transparent);
     if (!source.isEmpty()) {
