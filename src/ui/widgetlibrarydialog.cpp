@@ -7,6 +7,8 @@
 #include <QApplication>
 #include <QCursor>
 #include <QKeyEvent>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QFontMetrics>
 #include <QFrame>
 #include <QGridLayout>
@@ -48,6 +50,7 @@ constexpr int kGalleryHeight = 1200;
 constexpr qreal kGalleryContentZoom = 1.5;
 constexpr int kPreviewCell = 128;
 constexpr int kPreviewGap = 12;
+constexpr int kCustomCategory = 7;
 
 void paintNavIcon(QPainter& painter, const QRectF& bounds, int category)
 {
@@ -62,6 +65,7 @@ void paintNavIcon(QPainter& painter, const QRectF& bounds, int category)
                           : category == 3 ? QColor(239, 242, 246)
                           : category == 4 ? QColor(153, 87, 219)
                           : category == 6 ? QColor(244, 100, 93)
+                          : category == kCustomCategory ? QColor(75, 123, 232)
                                           : QColor(235, 76, 112);
         painter.setPen(Qt::NoPen);
         painter.setBrush(fill);
@@ -156,9 +160,10 @@ class DragTile final : public QFrame
 {
 public:
     DragTile(const QString& title, const QString& subtitle, int kind,
-             int variant, int category, WidgetLibraryDialog* owner, qreal scale)
+             int variant, int category, WidgetLibraryDialog* owner, qreal scale,
+             const CustomWidgets::Definition& custom = {})
         : QFrame(owner), m_title(title), m_subtitle(subtitle), m_cardKind(kind),
-          m_cardVariant(variant), m_category(category), m_owner(owner), m_scale(scale)
+          m_cardVariant(variant), m_category(category), m_custom(custom), m_owner(owner), m_scale(scale)
     {
         setObjectName(QStringLiteral("widgetTile"));
         setProperty("tileTitle", title);
@@ -183,6 +188,10 @@ public:
 
     void refreshPreview()
     {
+        if (!m_custom.id.isEmpty()) {
+            update();
+            return;
+        }
         const QSize previewSize = size();
         const qreal dpr = devicePixelRatioF();
         const QString key = QStringLiteral("%1:%2:%3x%4:%5:%6:%7")
@@ -200,6 +209,8 @@ public:
         update();
     }
 
+    bool interactionActive() const { return m_press.x() >= 0; }
+
 protected:
     bool event(QEvent* event) override
     {
@@ -216,6 +227,10 @@ protected:
         painter.setRenderHint(QPainter::TextAntialiasing,
                         DesktopWidget::globalFontSmoothing() > 0);
         painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        if (!m_custom.id.isEmpty()) {
+            paintCustomPreview(painter);
+            return;
+        }
         // 缩略图包含完整卡片底面，按原生像素绘制，避免重复缩放使小字模糊。
         const QRectF preview(rect());
         if (!m_preview.isNull()) {
@@ -279,8 +294,12 @@ protected:
             const bool dropped = m_dragging && m_press.x() >= 0;
             const QPoint position = event->globalPosition().toPoint();
             cancelDrag();
-            if (dropped && !m_owner->geometry().contains(position))
-                m_owner->notifyWidgetDropped(m_cardKind * 100 + m_cardVariant, position);
+            if (dropped && !m_owner->geometry().contains(position)) {
+                if (m_custom.id.isEmpty())
+                    m_owner->notifyWidgetDropped(m_cardKind * 100 + m_cardVariant, position);
+                else
+                    m_owner->notifyCustomWidgetDropped(m_custom.id, position);
+            }
             event->accept();
             return;
         }
@@ -305,6 +324,54 @@ protected:
     }
 
 private:
+    void paintCustomPreview(QPainter& painter)
+    {
+        // 自定义卡片展示名称、创作模式和尺寸，图库不启动脚本或网络请求。
+        painter.scale(m_scale, m_scale);
+        const QRectF card(0, 0, width() / m_scale, height() / m_scale);
+        const QColor foreground(m_custom.foreground);
+        painter.setPen(QPen(QColor(255, 255, 255, 70), 1));
+        painter.setBrush(QColor(m_custom.background));
+        painter.drawRoundedRect(card.adjusted(.5, .5, -.5, -.5), 20, 20);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(m_custom.accent));
+        painter.drawRoundedRect(QRectF(14, 13, 31, 25), 7, 7);
+        QFont font = painter.font();
+        font.setPixelSize(12);
+        font.setBold(true);
+        painter.setFont(font);
+        painter.setPen(QColor(m_custom.background));
+        painter.drawText(QRectF(14, 13, 31, 25), Qt::AlignCenter,
+                         m_custom.mode == QStringLiteral("html") ? QStringLiteral("</>") : QStringLiteral("Aa"));
+        font.setPixelSize(14);
+        painter.setFont(font);
+        painter.setPen(foreground);
+        painter.drawText(QRectF(14, 47, card.width() - 28, 21), Qt::AlignLeft | Qt::AlignVCenter,
+                         painter.fontMetrics().elidedText(m_title, Qt::ElideRight, int(card.width() - 28)));
+        font.setPixelSize(10);
+        font.setBold(false);
+        painter.setFont(font);
+        const QString size = m_cardVariant == 0 ? QStringLiteral("1 × 1")
+                           : m_cardVariant == 1 ? QStringLiteral("2 × 1") : QStringLiteral("2 × 2");
+        painter.drawText(QRectF(14, 71, card.width() - 28, 17),
+                         (m_custom.mode == QStringLiteral("html") ? QStringLiteral("HTML") : QStringLiteral("低代码"))
+                             + QStringLiteral(" · ") + size);
+        if (card.height() > 180 && m_custom.mode == QStringLiteral("blocks")) {
+            QStringList snippets;
+            for (const auto& block : m_custom.blocks) {
+                const QString text = block.value(QStringLiteral("text")).toString();
+                if (!text.isEmpty()) snippets.append(text);
+                if (snippets.size() >= 3) break;
+            }
+            painter.drawText(QRectF(14, 101, card.width() - 28, card.height() - 139),
+                             Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, snippets.join(QStringLiteral("\n")));
+        }
+        QColor hint = foreground;
+        hint.setAlpha(165);
+        painter.setPen(hint);
+        painter.drawText(QRectF(14, card.height() - 28, card.width() - 28, 16), QStringLiteral("拖到桌面添加"));
+    }
+
     void updateTileSize()
     {
         setFixedSize(WidgetGeometry::gridWidgetSize(
@@ -317,6 +384,7 @@ private:
     int m_cardKind = 0;
     int m_cardVariant = 0;
     int m_category = -1;
+    CustomWidgets::Definition m_custom;
     QImage m_preview;
     QPoint m_press;
     bool m_dragging = false;
@@ -329,6 +397,57 @@ private:
 WidgetLibraryDialog::~WidgetLibraryDialog()
 {
     NativeWindows::restoreApplicationWindows(m_hiddenApplicationWindows);
+}
+
+void WidgetLibraryDialog::refreshCustomWidgets()
+{
+    QList<WidgetLibraryDialog*> libraries;
+    for (QWidget* widget : QApplication::allWidgets())
+        if (auto* library = qobject_cast<WidgetLibraryDialog*>(widget))
+            libraries.append(library);
+    for (auto* library : std::as_const(libraries))
+        library->reloadCustomWidgets();
+}
+
+void WidgetLibraryDialog::reloadCustomWidgets()
+{
+    // 保存可能发生在拖动期间，延后替换卡片，保证鼠标捕获与放置回调完整结束。
+    for (QFrame* tile : std::as_const(m_tiles)) {
+        if (static_cast<DragTile*>(tile)->interactionActive()) {
+            m_customRefreshTimer.start(250);
+            return;
+        }
+    }
+    const auto definitions = CustomWidgets::load();
+    QJsonArray catalog;
+    for (const auto& definition : definitions) catalog.append(definition.toJson());
+    const QByteArray snapshot = QJsonDocument(catalog).toJson(QJsonDocument::Compact);
+    if (m_customCatalogSnapshot == snapshot) return;
+    m_customCatalogSnapshot = snapshot;
+    for (int i = m_tiles.size() - 1; i >= 0; --i) {
+        if (m_tiles.at(i)->property("tileCategory").toInt() != kCustomCategory) continue;
+        auto* tile = m_tiles.takeAt(i);
+        m_tileLayout->removeWidget(tile);
+        delete tile;
+    }
+    for (const auto& definition : definitions) {
+        const QString subtitle = QStringLiteral("自定义小组件 · ")
+            + (definition.mode == QStringLiteral("html") ? QStringLiteral("HTML") : QStringLiteral("低代码"));
+        auto* tile = new DragTile(definition.name, subtitle, int(DesktopWidget::CardKind::Custom),
+                                  definition.variant, kCustomCategory, this,
+                                  m_interfaceScale * kGalleryContentZoom, definition);
+        tile->setProperty("tileKind", int(DesktopWidget::CardKind::Custom));
+        tile->setProperty("tileVariant", definition.variant);
+        tile->setProperty("tileCategory", kCustomCategory);
+        tile->setProperty("customDefinitionId", definition.id);
+        tile->setProperty("tileSearch", (definition.name + QStringLiteral(" ") + subtitle).toLower());
+        m_tiles.append(tile);
+    }
+    m_navButtons.at(kCustomCategory)->setVisible(!definitions.isEmpty());
+    if (definitions.isEmpty() && m_selectedCategory == kCustomCategory)
+        selectCategory(0);
+    else
+        applyTileFilter();
 }
 
 void WidgetLibraryDialog::refreshPreviews()
@@ -426,7 +545,8 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
 
     const QStringList navLabels = { QStringLiteral("所有小组件"), QStringLiteral("电池"),
                                      QStringLiteral("天气"), QStringLiteral("时钟"),
-                                     QStringLiteral("词典"), QStringLiteral("音乐"), QStringLiteral("倒数日") };
+                                     QStringLiteral("词典"), QStringLiteral("音乐"), QStringLiteral("倒数日"),
+                                     QStringLiteral("自定义小组件") };
     for (int i = 0; i < navLabels.size(); ++i) {
         auto* button = new QPushButton(navLabels.at(i), sidebar);
         button->setObjectName(i == 0 ? QStringLiteral("navSelected") : QStringLiteral("navButton"));
@@ -467,7 +587,7 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     m_tileLayout = tileLayout;
     for (const QString& name : {QStringLiteral("电池"), QStringLiteral("天气"),
                                QStringLiteral("时钟"), QStringLiteral("词典"),
-                               QStringLiteral("音乐"), QStringLiteral("倒数日")}) {
+                               QStringLiteral("音乐"), QStringLiteral("倒数日"), QStringLiteral("自定义小组件")}) {
         auto* heading = new QLabel(name, scrollHost);
         heading->setObjectName(QStringLiteral("categoryTitle"));
         m_categoryTitles.append(heading);
@@ -515,7 +635,7 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     auto* footerLayout = new QHBoxLayout(footer);
     m_footerLayout = footerLayout;
     footerLayout->setContentsMargins(24, 0, 23, 0);
-    auto* footerHint = new QLabel(QStringLiteral("将小组件拖放到桌面…"), footer);
+    auto* footerHint = new QLabel(QStringLiteral("将小组件拖放到桌面 · 自定义组件在设置中管理"), footer);
     footerHint->setObjectName(QStringLiteral("footerHint"));
     footerLayout->addWidget(footerHint);
     footerLayout->addStretch(1);
@@ -529,6 +649,9 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
 
     updateScreenLayout();
     resetRecommendations();
+    m_customRefreshTimer.setSingleShot(true);
+    connect(&m_customRefreshTimer, &QTimer::timeout, this, &WidgetLibraryDialog::reloadCustomWidgets);
+    reloadCustomWidgets();
     applyTileFilter();
 
 }
@@ -671,13 +794,7 @@ void WidgetLibraryDialog::selectCategory(int category)
         button->style()->polish(button);
     }
     if (m_sectionTitle)
-        m_sectionTitle->setText(category == 0 ? QStringLiteral("推荐")
-                                              : (category == 1 ? QStringLiteral("电池")
-                                                 : category == 2 ? QStringLiteral("天气")
-                                                    : category == 3 ? QStringLiteral("时钟")
-                                                    : category == 4 ? QStringLiteral("词典")
-                                                    : category == 5 ? QStringLiteral("音乐")
-                                                                    : QStringLiteral("倒数日")));
+        m_sectionTitle->setText(category == 0 ? QStringLiteral("推荐") : m_navButtons.at(category)->text());
     if (category == 0)
         resetRecommendations();
     applyTileFilter();
@@ -977,6 +1094,7 @@ void WidgetLibraryDialog::hideEvent(QHideEvent* event)
 
 void WidgetLibraryDialog::showEvent(QShowEvent* event)
 {
+    reloadCustomWidgets();
     if (!m_desktopPrepared)
         prepareBackdrop();
     LiquidGlassWidget::showEvent(event);
@@ -1111,6 +1229,11 @@ void WidgetLibraryDialog::closeGallery()
 void WidgetLibraryDialog::notifyWidgetDropped(int kind, const QPoint& globalPos)
 {
     emit widgetDropped(kind, globalPos);
+}
+
+void WidgetLibraryDialog::notifyCustomWidgetDropped(const QString& definitionId, const QPoint& globalPos)
+{
+    emit customWidgetDropped(definitionId, globalPos);
 }
 
 void WidgetLibraryDialog::notifyWidgetDragStarted(int kind)

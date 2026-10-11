@@ -33,6 +33,14 @@ void DesktopWidget::paintOverlay(QPainter& painter)
                                                     : SystemMediaSession::instance()->snapshot());
         break;
     case CardKind::Countdown: CountdownCard::paint(painter, card, m_countdown); break;
+    case CardKind::Custom: {
+        QFont font(pingFangFontFamily()); font.setPixelSize(12); applyFontSmoothing(font); painter.setFont(font);
+        painter.setPen(QColor(220, 230, 246));
+        const QString name = m_custom.name.isEmpty() ? QStringLiteral("自定义组件") : m_custom.name;
+        painter.drawText(QRectF(16, 5, card.width() - 32, 24), Qt::AlignVCenter | Qt::AlignLeft,
+            painter.fontMetrics().elidedText(name + QStringLiteral("  ···"), Qt::ElideRight, qRound(card.width() - 32)));
+        break;
+    }
     }
     painter.restore();
 }

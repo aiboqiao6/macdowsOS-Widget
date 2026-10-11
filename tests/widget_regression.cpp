@@ -14,6 +14,11 @@
 #include "widgets/desktopwidget.h"
 #include "widgets/widgetgeometry.h"
 #include "widgets/cardmetrics.h"
+#include "widgets/customwidget.h"
+#include "ui/htmlwidgetview.h"
+#include "ui/widgeteditordialog.h"
+#include <QListWidget>
+#include <QPlainTextEdit>
 
 #include <QApplication>
 #include <QAbstractItemView>
@@ -22,21 +27,25 @@
 #include <QContextMenuEvent>
 #include <QDir>
 #include <QDialog>
+#include <QDoubleSpinBox>
 #include <QDateEdit>
 #include <QLineEdit>
 #include <QFrame>
+#include <QFormLayout>
 #include <QGridLayout>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QLabel>
 #include <QMouseEvent>
+#include <QMessageBox>
 #include <QNetworkReply>
 #include <QNetworkAccessManager>
 #include <QNetworkProxy>
 #include <QPainter>
 #include <QOpenGLExtraFunctions>
 #include <QPushButton>
+#include <QPointer>
 #include <QProcess>
 #include <QScreen>
 #include <QSettings>
@@ -306,6 +315,563 @@ class WidgetRegression : public QObject {
     Q_OBJECT
     QTemporaryDir settings;
 private slots:
+    void customWidgetValidationAndImportExport() {
+        QTemporaryDir directory;
+        auto definition = CustomWidgets::makeTemplate(2);
+        QString error;
+        const QString path = directory.filePath("progress.json");
+        QVERIFY2(CustomWidgets::exportFile(path, definition, &error), qPrintable(error));
+        CustomWidgets::Definition imported;
+        QVERIFY2(CustomWidgets::importFile(path, imported, &error), qPrintable(error));
+        QVERIFY(imported.id != definition.id);
+        QCOMPARE(imported.blocks, definition.blocks);
+        QCOMPARE(imported.name, definition.name);
+        QVERIFY(!imported.allowNetwork);
+        auto invalid = definition.toJson(); invalid.insert("variant", 8);
+        QVERIFY(!CustomWidgets::fromJson(invalid, imported, &error));
+        auto text = CustomWidgets::makeTemplate();
+        text.blocks.first().insert("text", "<script>window.injected=true</script>");
+        QVERIFY(CustomWidgets::document(text).contains("&lt;script&gt;"));
+        invalid = definition.toJson(); invalid.insert("background", "url(evil)");
+        QVERIFY(!CustomWidgets::fromJson(invalid, imported, &error));
+        invalid = definition.toJson(); invalid.insert("blocks", QJsonArray{QJsonObject{{"type", "execute"}}});
+        QVERIFY(!CustomWidgets::fromJson(invalid, imported, &error));
+        QFile html(directory.filePath("sample.html")); QVERIFY(html.open(QIODevice::WriteOnly));
+        html.write("<!doctype html><h1>Imported</h1><script>window.x=42;</script>"); html.close();
+        QVERIFY(CustomWidgets::importFile(html.fileName(), imported, &error));
+        QCOMPARE(imported.mode, QString("html")); QVERIFY(imported.html.contains("window.x=42"));
+        QVERIFY(imported.css.isEmpty()); QVERIFY(imported.javascript.isEmpty());
+        QFile oversized(directory.filePath("large.json")); QVERIFY(oversized.open(QIODevice::WriteOnly));
+        oversized.write(QByteArray(CustomWidgets::MaxFileBytes + 1, 'x')); oversized.close();
+        QVERIFY(!CustomWidgets::importFile(oversized.fileName(), imported, &error));
+    }
+
+    void customCatalogPreservesBrokenFiles() {
+        auto definition = CustomWidgets::makeTemplate(); QString error;
+        QVERIFY(CustomWidgets::save(definition, &error));
+        definition.name = QStringLiteral("更新后的便签"); QVERIFY(CustomWidgets::save(definition, &error));
+        QCOMPARE(CustomWidgets::load().size(), 1); QCOMPARE(CustomWidgets::load().first().name, definition.name);
+        QFile broken(CustomWidgets::catalogPath()); QVERIFY(broken.open(QIODevice::WriteOnly)); broken.write("{broken"); broken.close();
+        QVERIFY(!CustomWidgets::save(definition, &error)); QVERIFY(!error.isEmpty());
+        QVERIFY(broken.open(QIODevice::ReadOnly)); QCOMPARE(broken.readAll(), QByteArray("{broken")); broken.close();
+        QFile::remove(CustomWidgets::catalogPath());
+    }
+
+    void customWidgetDesktopUpdatesAndRestoresSnapshot() {
+        auto cleanup = qScopeGuard([]() { DesktopWidget::shutdown(); });
+        auto definition = CustomWidgets::makeTemplate(); QString error;
+        QVERIFY(DesktopWidget::saveCustomDefinition(definition, &error));
+        auto* widget = DesktopWidget::addCustomWidget(definition, QGuiApplication::primaryScreen()->availableGeometry().topLeft() + QPoint(30, 30));
+        QVERIFY(widget); QCOMPARE(widget->cardKind(), DesktopWidget::CardKind::Custom);
+        QCOMPARE(widget->cardVariant(), 1); QVERIFY(widget->m_customView);
+        QCOMPARE(widget->m_customView->parentWidget(), widget);
+        definition.name = QStringLiteral("同步的自定义组件"); definition.variant = 0;
+        QVERIFY2(DesktopWidget::saveCustomDefinition(definition, &error), qPrintable(error));
+        QCOMPARE(widget->m_custom.name, definition.name); QCOMPARE(widget->cardVariant(), 0);
+        const QPoint savedPosition = widget->pos();
+        QVERIFY(CustomWidgets::remove(definition.id, &error));
+        DesktopWidget::shutdown();
+        const auto restored = DesktopWidget::restoreWidgets(); QCOMPARE(restored.size(), 1);
+        QCOMPARE(restored.first()->m_custom.name, definition.name);
+        QCOMPARE(restored.first()->m_custom.blocks, definition.blocks);
+        QCOMPARE(restored.first()->pos(), savedPosition); QVERIFY(restored.first()->m_customView);
+        QVERIFY(restored.first()->m_ownsTray);
+        QTRY_VERIFY_WITH_TIMEOUT(restored.first()->m_customView->hasLoaded() || !restored.first()->m_customView->errorText().isEmpty(), 20000);
+        QVERIFY2(restored.first()->m_customView->hasLoaded(), qPrintable(restored.first()->m_customView->errorText()));
+    }
+
+    void customSaveRollsBackOnCatalogFailure() {
+        auto cleanup = qScopeGuard([]() { DesktopWidget::shutdown(); });
+        auto definition = CustomWidgets::makeTemplate(); QString error;
+        QVERIFY(DesktopWidget::saveCustomDefinition(definition, &error));
+        auto* widget = DesktopWidget::addCustomWidget(definition, QGuiApplication::primaryScreen()->availableGeometry().topLeft() + QPoint(40, 40));
+        QVERIFY(widget); const QRect geometry = widget->geometry();
+        QFile broken(CustomWidgets::catalogPath()); QVERIFY(broken.open(QIODevice::WriteOnly)); broken.write("broken"); broken.close();
+        definition.variant = 0; definition.name = QStringLiteral("不应覆盖旧组件");
+        QVERIFY(!DesktopWidget::saveCustomDefinition(definition, &error)); QVERIFY(!error.isEmpty());
+        QCOMPARE(widget->geometry(), geometry); QCOMPARE(widget->m_cardVariant, 1);
+        QVERIFY(widget->m_custom.name != definition.name);
+    }
+
+    void customEditorMaintainsBlocksAndSaves() {
+        WidgetEditorDialog dialog; dialog.setAttribute(Qt::WA_DeleteOnClose, false);
+        auto definition = CustomWidgets::makeTemplate(2); QVERIFY(dialog.selectDefinition(definition));
+        auto clickButton = [&dialog](const QString& text) {
+            for (auto* button : dialog.findChildren<QPushButton*>())
+                if (button->text() == text) { button->click(); return true; }
+            return false;
+        };
+        dialog.m_blockType->setCurrentIndex(2);
+        QVERIFY(clickButton(QStringLiteral("添加")));
+        QCOMPARE(dialog.m_draft.blocks.last().value("type").toString(), QString("clock"));
+        QVERIFY(dialog.m_draft.blocks.last().value("text").toString().isEmpty());
+        QVERIFY(clickButton(QStringLiteral("上移")));
+        QCOMPARE(dialog.m_draft.blocks[2].value("type").toString(), QString("clock"));
+        QVERIFY(clickButton(QStringLiteral("复制"))); QCOMPARE(dialog.m_draft.blocks.size(), 5);
+        QVERIFY(clickButton(QStringLiteral("删除"))); QCOMPARE(dialog.m_draft.blocks.size(), 4);
+        dialog.m_name->setText(QStringLiteral("编辑页面回归"));
+        dialog.m_blocks->setCurrentRow(0); dialog.m_blockText->setPlainText(QStringLiteral("本周目标"));
+        dialog.m_size->setCurrentIndex(2); dialog.m_mode->setCurrentIndex(1);
+        dialog.m_html->setPlainText("<h1>Custom</h1>");
+        QVERIFY(dialog.dirty()); QVERIFY(dialog.saveDraft()); QVERIFY(!dialog.dirty());
+        const auto saved = CustomWidgets::load(); QCOMPARE(saved.size(), 1);
+        QCOMPARE(saved.first().blocks.first().value("text").toString(), QStringLiteral("本周目标"));
+        QCOMPARE(saved.first().mode, QString("html")); QCOMPARE(saved.first().html, QString("<h1>Custom</h1>"));
+        QCOMPARE(saved.first().variant, 2);
+        dialog.m_mode->setCurrentIndex(0); QCOMPARE(dialog.collect().blocks.first().value("text").toString(), QStringLiteral("本周目标"));
+        QVERIFY(dialog.saveDraft());
+        dialog.newDraft();
+        QVERIFY(dialog.dirty());
+        QVERIFY(dialog.collect().id != saved.first().id);
+    }
+
+    void customSettingsOpensUsableEditorAndRetainsPendingSettings_data() {
+        QTest::addColumn<bool>("reuseEditor");
+        QTest::newRow("new-editor") << false;
+        QTest::newRow("reuse-desktop-editor") << true;
+    }
+
+    void customSettingsOpensUsableEditorAndRetainsPendingSettings() {
+        QFETCH(bool, reuseEditor);
+        auto cleanup = qScopeGuard([] { DesktopWidget::shutdown(); });
+        auto* owner = new DesktopWidget(nullptr, DesktopWidget::CardKind::Clock, false);
+        if (reuseEditor) DesktopWidget::openCustomWidgetEditor();
+        const bool originalDarkMode = AppSettings().value("appearance/darkMode", false).toBool();
+        bool foundEntry = false, usableEditor = false, saved = false, returnedToSettings = false;
+        bool ownedWindowModal = false, nativeEnabled = false, nativeOwnerMatches = false;
+        bool independentSettings = false;
+        QTimer::singleShot(0, owner, [&] {
+            auto* settingsDialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!settingsDialog) return;
+            independentSettings = settingsDialog->parentWidget() == nullptr;
+#ifdef Q_OS_WIN
+            independentSettings = independentSettings
+                && GetWindow(reinterpret_cast<HWND>(settingsDialog->winId()), GW_OWNER) != reinterpret_cast<HWND>(owner->winId());
+#endif
+            auto* entry = settingsDialog->findChild<QPushButton*>("customWidgetEditor");
+            auto* colorMode = settingsDialog->findChild<QComboBox*>("colorMode");
+            foundEntry = entry && colorMode;
+            if (!foundEntry) { settingsDialog->reject(); return; }
+            colorMode->setCurrentIndex(colorMode->findData(!originalDarkMode));
+            settingsDialog->grab().save("artifacts/settings-custom-widget-entry.png");
+            entry->click();
+            auto* editor = dynamic_cast<WidgetEditorDialog*>(QApplication::activeModalWidget());
+            usableEditor = editor && editor->isVisible() && editor->isEnabled();
+            if (editor) {
+                ownedWindowModal = editor->windowModality() == Qt::WindowModal && editor->parentWidget() == settingsDialog;
+#ifdef Q_OS_WIN
+                const HWND editorWindow = reinterpret_cast<HWND>(editor->winId());
+                nativeEnabled = IsWindowEnabled(editorWindow);
+                nativeOwnerMatches = GetWindow(editorWindow, GW_OWNER) == reinterpret_cast<HWND>(settingsDialog->winId());
+#else
+                nativeEnabled = nativeOwnerMatches = true;
+#endif
+                editor->m_name->setText(QStringLiteral("从设置创建"));
+                saved = editor->saveDraft();
+                editor->m_baseline = QJsonDocument(editor->collect().toJson()).toJson(QJsonDocument::Compact);
+                editor->close();
+            }
+            QTimer::singleShot(0, settingsDialog, [&, settingsDialog, colorMode] {
+                returnedToSettings = QApplication::activeModalWidget() == settingsDialog
+                    && colorMode->currentData().toBool() != originalDarkMode;
+                settingsDialog->reject();
+            });
+        });
+        owner->showSettingsDialog();
+        QVERIFY(foundEntry); QVERIFY(independentSettings); QVERIFY(usableEditor); QVERIFY(ownedWindowModal);
+        QVERIFY(nativeEnabled); QVERIFY(nativeOwnerMatches); QVERIFY(saved); QVERIFY(returnedToSettings);
+        QCOMPARE(CustomWidgets::load().first().name, QStringLiteral("从设置创建"));
+        QCOMPARE(AppSettings().value("appearance/darkMode", false).toBool(), originalDarkMode);
+    }
+
+    void customGallerySeparatesSearchesAndRefreshesCatalog() {
+        WidgetLibraryDialog library;
+        const int builtInCount = library.m_tiles.size();
+        QVERIFY(library.m_navButtons.last()->isHidden());
+        QVERIFY(library.m_categoryTitles.last()->isHidden());
+        auto definition = CustomWidgets::makeTemplate();
+        definition.name = QStringLiteral("读书笔记");
+        QString error;
+        QVERIFY(DesktopWidget::saveCustomDefinition(definition, &error));
+        QCOMPARE(library.m_tiles.size(), builtInCount + 1);
+        QVERIFY(!library.m_navButtons.last()->isHidden());
+        QVERIFY(!library.m_categoryTitles.last()->isHidden());
+        QCOMPARE(library.m_categoryTitles.last()->text(), QStringLiteral("自定义小组件"));
+        auto* tile = library.m_tiles.last();
+        QCOMPARE(tile->property("customDefinitionId").toString(), definition.id);
+        library.m_navButtons.last()->click();
+        QCOMPARE(library.m_tileLayout->count(), 1);
+        QCOMPARE(library.m_sectionTitle->text(), QStringLiteral("自定义小组件"));
+        for (int i = 0; i < builtInCount; ++i) QVERIFY(library.m_tiles.at(i)->isHidden());
+        library.m_search->setText(QStringLiteral("读书"));
+        QVERIFY(!tile->isHidden());
+        library.m_search->setText(QStringLiteral("没有这个组件"));
+        QVERIFY(tile->isHidden());
+        library.m_search->clear();
+        definition.name = QStringLiteral("每周阅读"); definition.variant = 2;
+        QVERIFY(DesktopWidget::saveCustomDefinition(definition, &error));
+        tile = library.m_tiles.last();
+        QCOMPARE(tile->property("tileTitle").toString(), definition.name);
+        QCOMPARE(tile->property("tileVariant").toInt(), 2);
+        QCOMPARE(tile->width(), library.scaled(128) * 2 + library.scaled(12));
+        QTemporaryDir directory;
+        const QString path = directory.filePath("widget.json");
+        QVERIFY(CustomWidgets::exportFile(path, definition, &error));
+        CustomWidgets::Definition imported;
+        QVERIFY(CustomWidgets::importFile(path, imported, &error));
+        WidgetEditorDialog editor; editor.setAttribute(Qt::WA_DeleteOnClose, false);
+        QVERIFY(editor.selectDefinition(imported));
+        QVERIFY(editor.saveDraft());
+        QCOMPARE(library.m_tiles.size(), builtInCount + 2);
+        QCOMPARE(library.m_tiles.last()->property("customDefinitionId").toString(), imported.id);
+        const auto removeCurrent = [&] {
+            QTimer::singleShot(0, &editor, [] {
+                auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+                if (!box) return;
+                for (auto* button : box->buttons())
+                    if (box->buttonRole(button) == QMessageBox::DestructiveRole) { button->click(); return; }
+                box->reject();
+            });
+            editor.deleteDefinition();
+        };
+        removeCurrent();
+        QCOMPARE(library.m_tiles.size(), builtInCount + 1);
+        removeCurrent();
+        QCOMPARE(library.m_tiles.size(), builtInCount);
+        QVERIFY(library.m_navButtons.last()->isHidden());
+        QVERIFY(library.m_categoryTitles.last()->isHidden());
+        QCOMPARE(library.m_selectedCategory, -1);
+        library.m_search->setText(QStringLiteral("词典详情"));
+        QCOMPARE(library.m_tileLayout->count(), 1);
+        QCOMPARE(library.m_tileLayout->itemAt(0)->widget(), library.m_tiles.at(10));
+    }
+
+    void customGalleryDefersRefreshUntilDragEnds() {
+        auto definition = CustomWidgets::makeTemplate();
+        QVERIFY(DesktopWidget::saveCustomDefinition(definition));
+        WidgetLibraryDialog library;
+        library.m_navButtons.last()->click();
+        QFrame* tile = library.m_tiles.last();
+        QSignalSpy drops(&library, &WidgetLibraryDialog::customWidgetDropped);
+        QSignalSpy builtInDrops(&library, &WidgetLibraryDialog::widgetDropped);
+        const QPoint outside = library.geometry().topLeft() - QPoint(40, 40);
+        const auto pressAndMove = [&] {
+            mouse(*tile, QEvent::MouseButtonPress, {20, 20}, tile->mapToGlobal(QPoint(20, 20)), Qt::LeftButton, Qt::LeftButton);
+            mouse(*tile, QEvent::MouseMove, {-80, -80}, outside, Qt::NoButton, Qt::LeftButton);
+        };
+        pressAndMove();
+        QTest::keyClick(tile, Qt::Key_Escape);
+        mouse(*tile, QEvent::MouseButtonRelease, {-80, -80}, outside, Qt::LeftButton, Qt::NoButton);
+        QCOMPARE(drops.size(), 0);
+        pressAndMove();
+        definition.name = QStringLiteral("拖动中更新");
+        QVERIFY(DesktopWidget::saveCustomDefinition(definition));
+        QCOMPARE(library.m_tiles.last(), tile);
+        QVERIFY(tile->property("tileTitle").toString() != definition.name);
+        mouse(*tile, QEvent::MouseButtonRelease, {-80, -80}, outside, Qt::LeftButton, Qt::NoButton);
+        QCOMPARE(drops.size(), 1); QCOMPARE(builtInDrops.size(), 0);
+        QCOMPARE(drops.first().first().toString(), definition.id);
+        QTRY_COMPARE(library.m_tiles.last()->property("tileTitle").toString(), definition.name);
+    }
+
+    void customGalleryDropAddsMatchingDefinitionAndSize() {
+        auto cleanup = qScopeGuard([] { DesktopWidget::shutdown(); });
+        auto first = CustomWidgets::makeTemplate(); first.variant = 2;
+        auto selected = CustomWidgets::makeTemplate(3); selected.variant = 0;
+        QVERIFY(DesktopWidget::saveCustomDefinition(first));
+        QVERIFY(DesktopWidget::saveCustomDefinition(selected));
+        auto* owner = new DesktopWidget(nullptr, DesktopWidget::CardKind::Clock, false);
+        owner->showWidgetLibrary();
+        auto* library = owner->m_library;
+        QVERIFY(library); QVERIFY(QTest::qWaitForWindowExposed(library));
+        library->m_navButtons.last()->click();
+        QTest::qWait(350);
+        auto* tile = library->m_tiles.last();
+        QCOMPARE(tile->property("customDefinitionId").toString(), selected.id);
+        QSignalSpy previews(library, &WidgetLibraryDialog::widgetDragPreview);
+        const QPoint outside = QGuiApplication::primaryScreen()->availableGeometry().topLeft() + QPoint(4, 4);
+        QVERIFY(!library->geometry().contains(outside));
+        mouse(*tile, QEvent::MouseButtonPress, {20, 20}, tile->mapToGlobal(QPoint(20, 20)), Qt::LeftButton, Qt::LeftButton);
+        mouse(*tile, QEvent::MouseMove, {-80, -80}, outside, Qt::NoButton, Qt::LeftButton);
+        QVERIFY(!previews.isEmpty());
+        QCOMPARE(previews.last().first().toInt(), int(DesktopWidget::CardKind::Custom) * 100 + selected.variant);
+        mouse(*tile, QEvent::MouseButtonRelease, {-80, -80}, outside, Qt::LeftButton, Qt::NoButton);
+        QCOMPARE(DesktopWidget::s_instances.size(), 2);
+        auto* added = DesktopWidget::s_instances.last();
+        QCOMPARE(added->cardKind(), DesktopWidget::CardKind::Custom);
+        QCOMPARE(added->cardVariant(), selected.variant);
+        QCOMPARE(added->m_custom.id, selected.id);
+        QCOMPARE(added->m_custom.html, selected.html);
+        QVERIFY(library->grab().save("artifacts/gallery-custom-widgets.png"));
+        library->hide();
+    }
+
+    void customEditorImportImmediatelyAddsToCatalogAndGallery() {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString htmlPath = directory.filePath("导入便签.html");
+        QFile html(htmlPath);
+        QVERIFY(html.open(QIODevice::WriteOnly));
+        const QByteArray source = QStringLiteral("<!doctype html><html><body><h1>导入后立即可用</h1></body></html>").toUtf8();
+        QCOMPARE(html.write(source), qint64(source.size())); html.close();
+        WidgetLibraryDialog library;
+        const int builtInCount = library.m_tiles.size();
+        WidgetEditorDialog editor; editor.setAttribute(Qt::WA_DeleteOnClose, false);
+        QVERIFY(editor.importFromFile(htmlPath));
+        auto definitions = CustomWidgets::load();
+        QCOMPARE(definitions.size(), 1);
+        QCOMPARE(definitions.first().mode, QString("html"));
+        QCOMPARE(definitions.first().html, QString::fromUtf8(source));
+        QCOMPARE(editor.collect().id, definitions.first().id);
+        QVERIFY(!editor.dirty());
+        QCOMPARE(library.m_tiles.size(), builtInCount + 1);
+        QCOMPARE(library.m_tiles.last()->property("customDefinitionId").toString(), definitions.first().id);
+        const QString originalId = editor.collect().id;
+        const QString jsonPath = directory.filePath("exported.json");
+        QVERIFY(CustomWidgets::exportFile(jsonPath, editor.collect()));
+        QVERIFY(editor.importFromFile(jsonPath));
+        QVERIFY(editor.collect().id != originalId);
+        QCOMPARE(CustomWidgets::load().size(), 2);
+        QCOMPARE(library.m_tiles.size(), builtInCount + 2);
+        QVERIFY(!editor.dirty());
+        const QString importedId = editor.collect().id;
+        const QString invalidPath = directory.filePath("invalid.json");
+        QFile invalid(invalidPath); QVERIFY(invalid.open(QIODevice::WriteOnly));
+        QCOMPARE(invalid.write("invalid widget"), qint64(14)); invalid.close();
+        QVERIFY(!editor.importFromFile(invalidPath));
+        QCOMPARE(editor.collect().id, importedId);
+        QCOMPARE(CustomWidgets::load().size(), 2);
+        QCOMPARE(library.m_tiles.size(), builtInCount + 2);
+    }
+
+    void customHtmlRunsScriptsInsideSandbox() {
+        auto definition = CustomWidgets::makeTemplate(3);
+        definition.javascript += QStringLiteral("document.getElementById('add').click();let isolated=false;try{parent.document.body}catch(e){isolated=true}let networkBlocked=false;document.addEventListener('securitypolicyviolation',e=>{if(e.violatedDirective==='connect-src')networkBlocked=true});fetch('http://127.0.0.1:9/widget-test').catch(()=>{});setInterval(()=>parent.postMessage({count:document.getElementById('count').textContent,isolated,networkBlocked,background:getComputedStyle(document.body).backgroundColor},'*'),100);");
+        HtmlWidgetView view; view.resize(400, 240); view.setDocument(CustomWidgets::sandboxedDocument(definition)); view.show();
+        QTRY_VERIFY_WITH_TIMEOUT(view.hasLoaded() || !view.errorText().isEmpty(), 20000);
+        QVERIFY2(view.hasLoaded(), qPrintable(view.errorText()));
+        bool listening = false;
+        view.evaluateScript("window.addEventListener('message',e=>window.probe=e.data);'listening'", [&listening](QString result) { listening = !result.isEmpty(); });
+        QTRY_VERIFY(listening); QTest::qWait(350);
+        QString probe; bool done = false;
+        view.evaluateScript("JSON.stringify(window.probe)", [&probe, &done](QString result) { probe = result; done = true; });
+        QTRY_VERIFY(done);
+        QVERIFY2(probe.contains("isolated\\\":true"), qPrintable(probe));
+        QVERIFY2(probe.contains("count\\\":\\\"1"), qPrintable(probe));
+        QVERIFY2(probe.contains("rgb(24, 36, 59)"), qPrintable(probe));
+        QVERIFY2(probe.contains("networkBlocked\\\":true"), qPrintable(probe));
+        const QString sandbox = CustomWidgets::sandboxedDocument(definition);
+        QVERIFY(sandbox.contains("sandbox=\"allow-scripts\"")); QVERIFY(sandbox.contains("connect-src &#39;none&#39;") || sandbox.contains("connect-src 'none'"));
+        definition.allowNetwork = true; QVERIFY(CustomWidgets::sandboxedDocument(definition).contains("connect-src https: http:"));
+        QVERIFY(view.grab().save("artifacts/custom-html-view.png"));
+        for (int i = 0; i < 6; ++i) view.setDocument(CustomWidgets::sandboxedDocument(definition));
+        QTRY_VERIFY_WITH_TIMEOUT(view.hasLoaded(), 10000);
+        QVERIFY(view.errorText().isEmpty());
+    }
+
+    void customEditorButtonsDoNotTreatReturnAsAnAction() {
+        WidgetEditorDialog dialog; dialog.setAttribute(Qt::WA_DeleteOnClose, false);
+        const QString originalId = dialog.collect().id;
+        for (auto* button : dialog.findChildren<QPushButton*>()) {
+            QVERIFY2(!button->autoDefault(), qPrintable(button->text()));
+            QVERIFY2(!button->isDefault(), qPrintable(button->text()));
+        }
+        dialog.show(); dialog.m_name->setFocus();
+        QTest::keyClick(dialog.m_name, Qt::Key_Return);
+        QCOMPARE(dialog.collect().id, originalId);
+        QVERIFY(QApplication::activeModalWidget() == nullptr);
+        dialog.m_baseline = QJsonDocument(dialog.collect().toJson()).toJson(QJsonDocument::Compact);
+    }
+
+    void customEditorShowsOnlyPropertiesForTheSelectedBlock() {
+        WidgetEditorDialog dialog; dialog.setAttribute(Qt::WA_DeleteOnClose, false);
+        auto definition = CustomWidgets::makeTemplate(2);
+        definition.blocks.append(QJsonObject{{"type", "clock"}, {"size", 32}, {"align", "center"}});
+        definition.blocks.append(QJsonObject{{"type", "divider"}, {"size", 18}, {"align", "left"}});
+        QVERIFY(dialog.selectDefinition(definition));
+        dialog.show();
+        QVERIFY(dialog.m_stylePanel->isHidden());
+        QVERIFY(!dialog.m_network->isVisible());
+        dialog.m_blocks->setCurrentRow(0);
+        QVERIFY(dialog.m_blockForm->isRowVisible(dialog.m_blockText));
+        QVERIFY(dialog.m_blockForm->isRowVisible(dialog.m_fontSize));
+        QVERIFY(!dialog.m_blockForm->isRowVisible(dialog.m_progress));
+        dialog.m_blocks->setCurrentRow(2);
+        QVERIFY(dialog.m_blockForm->isRowVisible(dialog.m_blockText));
+        QVERIFY(dialog.m_blockForm->isRowVisible(dialog.m_progress));
+        dialog.m_blocks->setCurrentRow(3);
+        QVERIFY(!dialog.m_blockForm->isRowVisible(dialog.m_blockText));
+        QVERIFY(!dialog.m_blockForm->isRowVisible(dialog.m_progress));
+        QVERIFY(dialog.m_blockForm->isRowVisible(dialog.m_fontSize));
+        dialog.m_blocks->setCurrentRow(4);
+        for (QWidget* field : QList<QWidget*>{dialog.m_blockText, dialog.m_fontSize,
+                                            dialog.m_align, dialog.m_bold, dialog.m_progress})
+            QVERIFY(!dialog.m_blockForm->isRowVisible(field));
+        dialog.m_mode->setCurrentIndex(1);
+        QVERIFY(dialog.m_network->isVisible());
+        dialog.m_mode->setCurrentIndex(0);
+        QVERIFY(!dialog.m_network->isVisible());
+        dialog.m_baseline = QJsonDocument(dialog.collect().toJson()).toJson(QJsonDocument::Compact);
+    }
+
+    void customEditorUndoRedoRestoresBlockContentAndStructure() {
+        WidgetEditorDialog dialog; dialog.setAttribute(Qt::WA_DeleteOnClose, false);
+        const auto definition = CustomWidgets::makeTemplate(2);
+        QVERIFY(dialog.selectDefinition(definition));
+        dialog.m_blocks->setCurrentRow(0);
+        dialog.m_blockText->setPlainText(QStringLiteral("撤销和重做后的目标"));
+        QCOMPARE(dialog.collect().blocks.first().value("text").toString(), QStringLiteral("撤销和重做后的目标"));
+        QTest::keyClick(dialog.m_blockText, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(dialog.collect().blocks, definition.blocks);
+        QTest::keyClick(dialog.m_blockText, Qt::Key_Y, Qt::ControlModifier);
+        QCOMPARE(dialog.collect().blocks.first().value("text").toString(), QStringLiteral("撤销和重做后的目标"));
+        const auto beforeAdd = dialog.collect().blocks;
+        dialog.m_blockType->setCurrentIndex(dialog.m_blockType->findData("clock"));
+        auto* add = dialog.findChild<QPushButton*>("addCustomBlock");
+        if (!add) for (auto* button : dialog.findChildren<QPushButton*>())
+            if (button->text() == QStringLiteral("添加")) { add = button; break; }
+        QVERIFY(add); add->click();
+        QCOMPARE(dialog.collect().blocks.size(), beforeAdd.size() + 1);
+        QCOMPARE(dialog.collect().blocks.last().value("type").toString(), QString("clock"));
+        dialog.undoEdit();
+        QCOMPARE(dialog.collect().blocks, beforeAdd);
+        dialog.redoEdit();
+        QCOMPARE(dialog.collect().blocks.size(), beforeAdd.size() + 1);
+        dialog.undoEdit();
+        dialog.m_blocks->setCurrentRow(0);
+        dialog.m_blockText->setPlainText(QStringLiteral("撤销后另写内容"));
+        const auto afterBranch = dialog.collect().blocks;
+        dialog.redoEdit();
+        QCOMPARE(dialog.collect().blocks, afterBranch);
+        dialog.m_baseline = QJsonDocument(dialog.collect().toJson()).toJson(QJsonDocument::Compact);
+    }
+
+    void customEditorBlockDragOrderMatchesSavedOrder() {
+        WidgetEditorDialog dialog; dialog.setAttribute(Qt::WA_DeleteOnClose, false);
+        const auto definition = CustomWidgets::makeTemplate(2);
+        QVERIFY(dialog.selectDefinition(definition));
+        QVERIFY(dialog.m_blocks->model()->moveRows(QModelIndex(), 0, 1, QModelIndex(), definition.blocks.size()));
+        auto reordered = definition.blocks;
+        reordered.move(0, reordered.size() - 1);
+        QCOMPARE(dialog.collect().blocks, reordered);
+        QVERIFY(dialog.saveDraft());
+        QCOMPARE(CustomWidgets::load().first().blocks, reordered);
+        dialog.undoEdit();
+        QCOMPARE(dialog.collect().blocks, definition.blocks);
+    }
+
+    void customEditorKeepsPrimaryActionsInsideCompactWindow() {
+        WidgetEditorDialog dialog; dialog.setAttribute(Qt::WA_DeleteOnClose, false);
+        dialog.resize(720, 540); dialog.show();
+        QTest::qWait(100);
+        QCOMPARE(dialog.size(), QSize(720, 540));
+        auto* save = dialog.findChild<QPushButton*>("saveCustomWidget");
+        QVERIFY(save); QVERIFY(save->isVisible());
+        const QRect saveRect(save->mapTo(&dialog, QPoint()), save->size());
+        QVERIFY2(dialog.rect().contains(saveRect), qPrintable(QString("Save button outside compact window: %1,%2 %3x%4")
+            .arg(saveRect.x()).arg(saveRect.y()).arg(saveRect.width()).arg(saveRect.height())));
+        QVERIFY(saveRect.bottom() > dialog.height() - 110);
+        const QRect nameRect(dialog.m_name->mapTo(&dialog, QPoint()), dialog.m_name->size());
+        QVERIFY(dialog.rect().contains(nameRect));
+        QVERIFY(dialog.grab().save("artifacts/custom-editor-compact.png"));
+    }
+
+    void customEditorKeepsInteractivePreviewWhenRenamedOrResized() {
+        WidgetEditorDialog dialog; dialog.setAttribute(Qt::WA_DeleteOnClose, false);
+        QVERIFY(dialog.selectDefinition(CustomWidgets::makeTemplate(3)));
+        dialog.show();
+        QTRY_VERIFY_WITH_TIMEOUT(dialog.m_preview->hasLoaded() || !dialog.m_preview->errorText().isEmpty(), 20000);
+        QVERIFY2(dialog.m_preview->hasLoaded(), qPrintable(dialog.m_preview->errorText()));
+        bool installed = false;
+        dialog.m_preview->evaluateScript("window.__editorInteraction = 7; window.__editorInteraction", [&installed](QString result) { installed = result == "7"; });
+        QTRY_VERIFY(installed);
+        dialog.m_name->setText(QStringLiteral("重命名时保留交互"));
+        dialog.resize(dialog.size() - QSize(24, 24));
+        QTest::qWait(700);
+        QString state; bool read = false;
+        dialog.m_preview->evaluateScript("window.__editorInteraction", [&state, &read](QString result) { state = result; read = true; });
+        QTRY_VERIFY(read);
+        QCOMPARE(state, QString("7"));
+        dialog.m_html->appendPlainText("<!-- changed source -->");
+        QTest::qWait(700);
+        QTRY_VERIFY_WITH_TIMEOUT(dialog.m_preview->hasLoaded(), 10000);
+        read = false;
+        dialog.m_preview->evaluateScript("typeof window.__editorInteraction", [&state, &read](QString result) { state = result; read = true; });
+        QTRY_VERIFY(read);
+        QCOMPARE(state, QString("\"undefined\""));
+        QPointer<HtmlWidgetView> previousPreview(dialog.m_preview);
+        dialog.restartPreview();
+        QTRY_VERIFY(previousPreview.isNull());
+        QTRY_VERIFY_WITH_TIMEOUT(dialog.m_preview->hasLoaded() || !dialog.m_preview->errorText().isEmpty(), 20000);
+        QVERIFY2(dialog.m_preview->hasLoaded(), qPrintable(dialog.m_preview->errorText()));
+        QCOMPARE(dialog.m_status->text(), QStringLiteral("有未保存的修改"));
+        dialog.m_baseline = QJsonDocument(dialog.collect().toJson()).toJson(QJsonDocument::Compact);
+    }
+
+    void customEditorManualVisualCheck() {
+        const int duration = qEnvironmentVariableIntValue("WIDGET_EDITOR_PREVIEW_MS");
+        if (duration <= 0) QSKIP("Set WIDGET_EDITOR_PREVIEW_MS for manual visual verification");
+        auto cleanup = qScopeGuard([]() { DesktopWidget::shutdown(); });
+        const int settingsMode = qEnvironmentVariableIntValue("WIDGET_EDITOR_OPEN_SETTINGS");
+        if (settingsMode > 0) {
+            auto* owner = new DesktopWidget(nullptr, DesktopWidget::CardKind::Clock, false);
+            owner->show();
+            QPointer<QDialog> settings;
+            bool sawEditor = false;
+            QTimer observer;
+            observer.setInterval(100);
+            connect(&observer, &QTimer::timeout, owner, [&] {
+                for (auto* widget : QApplication::topLevelWidgets()) {
+                    if (auto* editor = dynamic_cast<WidgetEditorDialog*>(widget); editor && editor->isVisible()) {
+                        if (!sawEditor) {
+                            sawEditor = true;
+#ifdef Q_OS_WIN
+                            qInfo() << "Manual editor HWND enabled:" << bool(IsWindowEnabled(reinterpret_cast<HWND>(editor->winId())))
+                                    << "owner:" << reinterpret_cast<quintptr>(GetWindow(reinterpret_cast<HWND>(editor->winId()), GW_OWNER));
+#endif
+                        }
+                    }
+                }
+            });
+            observer.start();
+            QTimer timeout;
+            timeout.setSingleShot(true);
+            connect(&timeout, &QTimer::timeout, owner, [&] {
+                for (auto* widget : QApplication::topLevelWidgets()) {
+                    auto* dialog = qobject_cast<QDialog*>(widget);
+                    if (dialog && dialog != settings && !dynamic_cast<WidgetEditorDialog*>(dialog)) dialog->reject();
+                }
+                QTimer::singleShot(0, owner, [&] {
+                    for (auto* widget : QApplication::topLevelWidgets()) {
+                        if (auto* editor = dynamic_cast<WidgetEditorDialog*>(widget)) {
+                            if (editor->isVisible()) editor->grab().save("artifacts/custom-editor-from-settings.png");
+                            editor->m_baseline = QJsonDocument(editor->collect().toJson()).toJson(QJsonDocument::Compact);
+                            editor->close();
+                        }
+                    }
+                    if (settings) settings->reject();
+                });
+            });
+            timeout.start(qMin(duration, 180000));
+            QTimer::singleShot(0, owner, [&] {
+                settings = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                if (settings) settings->grab().save("artifacts/custom-editor-settings-start.png");
+            });
+            if (settingsMode == 2) QTimer::singleShot(500, owner, [&] {
+                if (settings) if (auto* entry = settings->findChild<QPushButton*>("customWidgetEditor")) entry->click();
+            });
+            owner->showSettingsDialog();
+            timeout.stop(); observer.stop();
+            qInfo() << "Manual settings flow opened editor:" << sawEditor;
+            return;
+        }
+        WidgetEditorDialog dialog; dialog.setAttribute(Qt::WA_DeleteOnClose, false);
+        QVERIFY(dialog.selectDefinition(CustomWidgets::makeTemplate(3)));
+        dialog.show(); QTest::qWait(qMin(duration, 180000));
+        QVERIFY(dialog.grab().save("artifacts/custom-widget-editor.png"));
+        dialog.m_baseline = QJsonDocument(dialog.collect().toJson()).toJson(QJsonDocument::Compact);
+    }
+
     void opticalGlassKeepsCenterStableAndBendsOnlyRim() {
         PipelineProbe scene;
         scene.setNoiseAmount(0);
@@ -546,7 +1112,7 @@ private slots:
 
     void initTestCase() {
         QCoreApplication::setOrganizationName("macdowsOS-regression");
-        QCoreApplication::setApplicationName("widget-regression");
+        QCoreApplication::setApplicationName(qEnvironmentVariable("WIDGET_REGRESSION_APP_NAME", "widget-regression"));
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
         QStandardPaths::setTestModeEnabled(true);
@@ -560,6 +1126,7 @@ private slots:
         // 每个测试独立清理显示与交互设置，避免鼠标穿透或实时模式影响后续用例。
         QSettings().clear();
         QFile::remove(AppSettings::filePath());
+        QFile::remove(CustomWidgets::catalogPath());
         DesktopWidget::setGlobalFontSmoothing(4);
         QFile::remove(AppSettings::filePath());
     }
@@ -800,18 +1367,17 @@ private slots:
     void settingsAndWizardShareScaleSelector() {
         DesktopWidget widget(nullptr, DesktopWidget::CardKind::Clock, false);
         bool checked = false;
-        bool effectOptionsRemoved = false;
+        bool materialOptionsPresent = false;
         QTimer::singleShot(0, &widget, [&] {
             auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
             if (!dialog) return;
             auto* slider = dialog->findChild<QSlider*>("scaleSlider");
             auto* selector = slider ? dynamic_cast<ScaleSelector*>(slider->parentWidget()) : nullptr;
             if (selector) {
-                effectOptionsRemoved = dialog->findChildren<QSpinBox*>().isEmpty()
-                    && dialog->findChildren<QSlider*>().size() == 1;
-                for (const QLabel* label : dialog->findChildren<QLabel*>())
-                    effectOptionsRemoved &= label->text() != QStringLiteral("模糊程度")
-                        && label->text() != QStringLiteral("透明度");
+                materialOptionsPresent = dialog->findChildren<QSpinBox*>().size() == 1
+                    && dialog->findChildren<QDoubleSpinBox*>().size() == 4
+                    && dialog->findChildren<QSlider*>().size() == 1
+                    && dialog->findChild<QPushButton*>("resetMaterial");
                 slider->setValue(125);
                 checked = selector->previewSize() == DesktopWidget::cardSize(
                     DesktopWidget::CardKind::Battery, 0, 1.25, dialog->screen()->availableGeometry());
@@ -820,12 +1386,93 @@ private slots:
         });
         widget.showSettingsDialog();
         QVERIFY(checked);
-        QVERIFY(effectOptionsRemoved);
+        QVERIFY(materialOptionsPresent);
         QCOMPARE(widget.m_widgetScale, 1.25);
         QCOMPARE(AppSettings().value("appearance/scale").toDouble(), 1.25);
         QCOMPARE(widget.glassOpacity(), 1.0f);
         QVERIFY(!AppSettings().contains("appearance/blurStrength"));
         QVERIFY(!AppSettings().contains("appearance/opacity"));
+    }
+
+    void materialSettingsPreviewAndCancelRestoreEachSurface() {
+        DesktopWidget widget(nullptr, DesktopWidget::CardKind::Clock, false);
+        QtGlassFlowScene other;
+        other.setNoiseAmount(0.04f);
+        bool previewed = false;
+        QTimer::singleShot(0, &widget, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            auto* opacity = dialog->findChild<QDoubleSpinBox*>("materialOpacity");
+            auto* refraction = dialog->findChild<QDoubleSpinBox*>("materialRefraction");
+            auto* blur = dialog->findChild<QDoubleSpinBox*>("materialBlurRadius");
+            auto* iterations = dialog->findChild<QSpinBox*>("materialBlurIterations");
+            auto* noise = dialog->findChild<QDoubleSpinBox*>("materialNoise");
+            if (opacity && refraction && blur && iterations && noise) {
+                opacity->setValue(60);
+                refraction->setValue(2);
+                blur->setValue(4);
+                iterations->setValue(4);
+                noise->setValue(0.025);
+                const auto material = widget.materialParameters();
+                previewed = material.opacity == 0.6f && material.refraction == 2.0f
+                    && material.blurRadius == 4.0f && material.blurIterations == 4
+                    && material.noise == 0.025f && other.glassOpacity() == 0.6f;
+            }
+            dialog->reject();
+        });
+        widget.showSettingsDialog();
+        QVERIFY(previewed);
+        QCOMPARE(widget.materialParameters().opacity, 1.0f);
+        QCOMPARE(widget.materialParameters().refraction, LiquidGlassStyle::kRefractionPower);
+        QCOMPARE(widget.materialParameters().blurRadius, LiquidGlassStyle::kBlurRadius);
+        QCOMPARE(widget.materialParameters().blurIterations, LiquidGlassStyle::kBlurIterations);
+        QCOMPARE(widget.materialParameters().noise, LiquidGlassStyle::kNoiseAmount);
+        QCOMPARE(other.materialParameters().noise, 0.04f);
+        QVERIFY(!AppSettings().contains("material/opacity"));
+    }
+
+    void materialSettingsPersistAndResetToOriginalDefaults() {
+        DesktopWidget widget(nullptr, DesktopWidget::CardKind::Clock, false);
+        bool edited = false;
+        QTimer::singleShot(0, &widget, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            auto* opacity = dialog->findChild<QDoubleSpinBox*>("materialOpacity");
+            auto* blur = dialog->findChild<QDoubleSpinBox*>("materialBlurRadius");
+            if (opacity && blur) {
+                opacity->setValue(73);
+                blur->setValue(3.5);
+                edited = true;
+                dialog->accept();
+            } else dialog->reject();
+        });
+        widget.showSettingsDialog();
+        QVERIFY(edited);
+        QCOMPARE(AppSettings().value("material/opacity").toFloat(), 0.73f);
+        QCOMPARE(AppSettings().value("material/blurRadius").toFloat(), 3.5f);
+        QtGlassFlowScene restored;
+        QCOMPARE(restored.materialParameters().opacity, 0.73f);
+        QCOMPARE(restored.materialParameters().blurRadius, 3.5f);
+        bool reset = false;
+        QTimer::singleShot(0, &widget, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            auto* button = dialog->findChild<QPushButton*>("resetMaterial");
+            if (button) {
+                button->click();
+                reset = widget.glassOpacity() == 1.0f
+                    && restored.materialParameters().blurRadius == LiquidGlassStyle::kBlurRadius;
+                dialog->accept();
+            } else dialog->reject();
+        });
+        widget.showSettingsDialog();
+        QVERIFY(reset);
+        QtGlassFlowScene defaults;
+        QCOMPARE(defaults.materialParameters().opacity, 1.0f);
+        QCOMPARE(defaults.materialParameters().refraction, LiquidGlassStyle::kRefractionPower);
+        QCOMPARE(defaults.materialParameters().blurRadius, LiquidGlassStyle::kBlurRadius);
+        QCOMPARE(defaults.materialParameters().blurIterations, LiquidGlassStyle::kBlurIterations);
+        QCOMPARE(defaults.materialParameters().noise, LiquidGlassStyle::kNoiseAmount);
     }
 
     void unifiedGlassUsesSingleOpticalMaterialWithoutOverlayMasks() {
@@ -989,7 +1636,8 @@ private slots:
 
     void countdownGalleryFiltersAndKeepsGridScale() {
         WidgetLibraryDialog gallery;
-        QCOMPARE(gallery.m_navButtons.size(), 7);
+        QCOMPARE(gallery.m_navButtons.size(), 8);
+        QVERIFY(gallery.m_navButtons.last()->isHidden());
         gallery.selectCategory(6);
         int shown = 0;
         for (auto* tile : gallery.m_tiles) {

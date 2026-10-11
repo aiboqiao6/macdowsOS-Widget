@@ -32,7 +32,11 @@ QImage DesktopWidget::renderPreview(CardKind kind, int variant, const QSize& siz
     preview.m_dictionaryPartOfSpeech = QStringLiteral("n. 名词");
     preview.m_dictionaryDefinition = QStringLiteral("不期而遇的美好；意外发现的幸运。");
     preview.m_hasBattery = true;
-    preview.m_batteryLevel = 86;
+    preview.m_batteryLevel = 95;
+    if (kind == CardKind::Battery) {
+        preview.m_hostDeviceName = QStringLiteral("MacBook Air");
+        preview.m_connectedDevices = {{QStringLiteral("Maus@LOFREE"), 45, 1}};
+    }
     preview.m_countdown.title = QStringLiteral("下次旅行");
     // 保留卡片真实网格比例，不强行拉伸到图库统一矩形。
     const QSize reference = gridWidgetSize(kind, variant, kGridBaseCell,
@@ -67,4 +71,3 @@ QImage DesktopWidget::renderPreview(CardKind kind, int variant, const QSize& siz
     painter.end();
     return image;
 }
-

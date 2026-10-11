@@ -38,14 +38,30 @@ void DesktopWidget::showWidgetLibrary()
         connect(m_library, &WidgetLibraryDialog::widgetDragPreview, this,
                 [this](int encoded, const QPoint& globalPos, bool visible) {
                     if (visible)
-                        showGridPreview(static_cast<CardKind>(qBound(0, encoded / 100, int(CardKind::Countdown))),
+                        showGridPreview(static_cast<CardKind>(qBound(0, encoded / 100, int(CardKind::Custom))),
                                         encoded % 100, globalPos);
                     else
                         hideGridPreview();
                 });
+        connect(m_library, &WidgetLibraryDialog::customWidgetDropped, this,
+                [](const QString& definitionId, const QPoint& globalPos) {
+                    QString error;
+                    const auto definitions = CustomWidgets::load(&error);
+                    for (const auto& definition : definitions) {
+                        if (definition.id != definitionId)
+                            continue;
+                        if (!addCustomWidget(definition, globalPos))
+                            QToolTip::showText(globalPos, QStringLiteral("当前屏幕没有足够的空位，可缩小组件后重试"));
+                        return;
+                    }
+                    QToolTip::showText(globalPos, error.isEmpty()
+                        ? QStringLiteral("此自定义组件已从组件库移除，请重新选择") : error);
+                    QTimer::singleShot(0, qApp, &WidgetLibraryDialog::refreshCustomWidgets);
+                });
     }
     // 图库可能比设置窗口存活更久，每次打开时重新同步全局显示配置。
     m_library->updateScreenLayout();
+    m_library->reloadCustomWidgets();
     m_library->setLiveBackdropEnabled(liveBackdropEnabled());
     m_library->setRenderScale(renderScale());
     if (!m_library->isVisible()) {
@@ -59,6 +75,11 @@ void DesktopWidget::showWidgetLibrary()
 void DesktopWidget::mouseDoubleClickEvent(QMouseEvent* event)
 {
     if (event->button() == Qt::LeftButton) {
+        if (m_cardKind == CardKind::Custom) {
+            openCustomWidgetEditor(m_custom.id);
+            event->accept();
+            return;
+        }
         if (m_cardKind == CardKind::Countdown) {
             editCountdown();
             event->accept();
@@ -168,6 +189,8 @@ void DesktopWidget::contextMenuEvent(QContextMenuEvent* event)
     applyFontSmoothing(menuFont);
     LiquidGlassMenu menu(menuFont, this);
     QAction* addAction = menu.addGlassAction(QStringLiteral("添加小组件…"), LiquidGlassMenu::Icon::Add);
+    QAction* editorAction = m_cardKind == CardKind::Custom
+        ? menu.addGlassAction(QStringLiteral("编辑此组件…"), LiquidGlassMenu::Icon::Edit) : nullptr;
     menu.addSeparator();
     QAction* cityAction = nullptr;
     QAction* countdownAction = nullptr;
@@ -185,6 +208,8 @@ void DesktopWidget::contextMenuEvent(QContextMenuEvent* event)
     QAction* selected = menu.exec(event->globalPos());
     if (selected == addAction) {
         showWidgetLibrary();
+    } else if (editorAction && selected == editorAction) {
+        openCustomWidgetEditor(m_custom.id);
     } else if (cityAction && selected == cityAction) {
         searchWeatherCity();
     } else if (countdownAction && selected == countdownAction) {

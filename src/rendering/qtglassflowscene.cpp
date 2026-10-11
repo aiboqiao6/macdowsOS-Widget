@@ -67,7 +67,15 @@ QtGlassFlowScene::QtGlassFlowScene(QWidget *parent)
       m_animationEnabled(false),
       m_dragIndex(-1)
 {
-    m_darkModeEnabled = AppSettings().value(QStringLiteral("appearance/darkMode"), false).toBool();
+    AppSettings settings;
+    m_darkModeEnabled = settings.value(QStringLiteral("appearance/darkMode"), false).toBool();
+    MaterialParameters material;
+    material.opacity = settings.value(QStringLiteral("material/opacity"), material.opacity).toFloat();
+    material.refraction = settings.value(QStringLiteral("material/refraction"), material.refraction).toFloat();
+    material.blurRadius = settings.value(QStringLiteral("material/blurRadius"), material.blurRadius).toFloat();
+    material.blurIterations = settings.value(QStringLiteral("material/blurIterations"), material.blurIterations).toInt();
+    material.noise = settings.value(QStringLiteral("material/noise"), material.noise).toFloat();
+    setMaterialParameters(material);
     setMouseTracking(true);
     setAttribute(Qt::WA_OpaquePaintEvent, true);
 
@@ -313,6 +321,24 @@ void QtGlassFlowScene::setRenderScale(float scale)
     m_blurKernelSamples.clear();
     m_blurCacheDirty = true;
     update();
+}
+
+QtGlassFlowScene::MaterialParameters QtGlassFlowScene::materialParameters() const
+{
+    return {m_glassOpacity, m_fPower, m_blurRadius, m_blurIterations, m_noiseAmount};
+}
+
+void QtGlassFlowScene::setMaterialParameters(const MaterialParameters& parameters)
+{
+    const MaterialParameters defaults;
+    const auto bounded = [](float value, float minimum, float maximum, float fallback) {
+        return std::isfinite(value) ? qBound(minimum, value, maximum) : fallback;
+    };
+    setGlassOpacity(bounded(parameters.opacity, 0.05f, 1.0f, defaults.opacity));
+    setRefractionPower(bounded(parameters.refraction, 0.0f, 3.0f, defaults.refraction));
+    setBlurRadius(bounded(parameters.blurRadius, 0.0f, 12.0f, defaults.blurRadius));
+    setBlurIterations(qBound(1, parameters.blurIterations, 6));
+    setNoiseAmount(bounded(parameters.noise, 0.0f, 0.1f, defaults.noise));
 }
 
 void QtGlassFlowScene::setPowerFactor(float value) { m_globalPower = value; update(); }

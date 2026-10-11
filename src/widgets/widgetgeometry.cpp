@@ -14,6 +14,7 @@ int defaultVariant(DesktopWidget::CardKind kind)
     case DesktopWidget::CardKind::Dictionary: return 1; // 横向释义。
     case DesktopWidget::CardKind::Music: return 1;
     case DesktopWidget::CardKind::Countdown: return 0;
+    case DesktopWidget::CardKind::Custom: return 1;
     }
     return 0;
 }
@@ -38,6 +39,8 @@ int gridColumnSpan(DesktopWidget::CardKind kind, int variant)
         return variant == 7 || variant == 8 ? 2 : 1;
     if (kind == DesktopWidget::CardKind::Battery || kind == DesktopWidget::CardKind::Weather)
         return variant == 1 || variant == 2 ? 2 : 1;
+    if (kind == DesktopWidget::CardKind::Custom)
+        return variant == 0 ? 1 : 2;
     return variant == 1 ? 2 : 1;
 }
 
@@ -47,7 +50,7 @@ int gridRowSpan(DesktopWidget::CardKind kind, int variant)
     if (kind == DesktopWidget::CardKind::Clock)
         return 1;
     return ((kind == DesktopWidget::CardKind::Battery
-             || kind == DesktopWidget::CardKind::Weather)
+             || kind == DesktopWidget::CardKind::Weather || kind == DesktopWidget::CardKind::Custom)
             && normalized == 2) ? 2 : 1;
 }
 
@@ -77,4 +80,3 @@ QPoint gridOrigin(const QRect& area, int gap)
 
 
 }
-

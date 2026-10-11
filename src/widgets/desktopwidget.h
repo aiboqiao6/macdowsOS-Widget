@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rendering/liquidglasswidget.h"
+#include "widgets/customwidget.h"
 #include "rendering/nativewindows.h"
 #include "platform/powerdevices.h"
 #include "widgets/countdowncard.h"
@@ -25,13 +26,14 @@ class QPainter;
 class QMoveEvent;
 class QContextMenuEvent;
 class WidgetLibraryDialog;
+class HtmlWidgetView;
 
 // 独立桌面卡片：本类协调生命周期、放置和持久化，绘制、数据与设置分文件实现。
 class DesktopWidget final : public LiquidGlassWidget
 {
 public:
     // 图库拖动编码使用枚举值，新增类型必须追加，避免改变已有编码。
-    enum class CardKind { Battery, Weather, Clock, Dictionary, Music, Countdown };
+    enum class CardKind { Battery, Weather, Clock, Dictionary, Music, Countdown, Custom };
 
     explicit DesktopWidget(QWidget* parent = nullptr,
                            CardKind kind = CardKind::Battery,
@@ -47,6 +49,11 @@ public:
     void saveConfiguration() const;
     void showSettingsDialog();
     void editCountdown();
+    static void openCustomWidgetEditor(const QString& definitionId = {},
+                                       QWidget* modalParent = nullptr);
+    static DesktopWidget* addCustomWidget(const CustomWidgets::Definition& definition, const QPoint& desktopPoint);
+    static bool saveCustomDefinition(const CustomWidgets::Definition& definition, QString* error = nullptr);
+    static bool confirmCustomWidgetEditorClose();
 
     static QList<DesktopWidget*> restoreWidgets();
     static DesktopWidget* addWidget(CardKind kind, const QPoint& desktopPoint,
@@ -76,6 +83,8 @@ protected:
     void windowDragFinished() override;
     void showEvent(QShowEvent* event) override;
     void hideEvent(QHideEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
+    bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
     bool wallpaperOnlyWhenIdle() const override { return !liveBackdropEnabled(); }
     bool directBackdropDuringDrag() const override { return true; }
 
@@ -105,8 +114,7 @@ private:
     void drawBatteryIcon(QPainter& painter, const QRectF& rect, int level, bool charging) const;
     void drawDeviceRing(QPainter& painter, const QPointF& center, qreal radius,
                          int level, int iconKind, bool connected,
-                         bool showCaption = true,
-                         qreal strokeMultiplier = 1.0) const;
+                         bool showCaption = true) const;
     void setupTrayIcon();
     void toggleWidgetVisibility();
     void rearrangeWidgets();
@@ -136,6 +144,8 @@ private:
                            bool liveBackdrop, qreal renderQuality, int fontSmoothing);
     void moveToGroupPosition();
     void showWidgetLibrary();
+    void applyCustomContent();
+    static void closeCustomWidgetEditor();
     static QRect nearestGridRect(CardKind kind, int variant,
                                  const QPoint& requestedTopLeft, qreal scale,
                                  const DesktopWidget* ignored = nullptr);
@@ -163,6 +173,8 @@ private:
     int m_cardVariant = 0;
     bool m_previewOnly = false;
     CountdownCard::Event m_countdown;
+    CustomWidgets::Definition m_custom;
+    HtmlWidgetView* m_customView = nullptr;
     QDate m_countdownLastDate = QDate::currentDate();
     QString m_hostDeviceName;
     bool m_ownsTray = true;

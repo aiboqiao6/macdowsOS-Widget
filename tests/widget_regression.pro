@@ -5,6 +5,12 @@ TEMPLATE = app
 TARGET = widget_regression
 DEFINES += NOMINMAX
 INCLUDEPATH += ../src
+INCLUDEPATH += ../third_party/WebView2/include
+win32 {
+    CONFIG(debug, debug|release): WIDGET_WEBVIEW_DEST = $$OUT_PWD/debug
+    else: WIDGET_WEBVIEW_DEST = $$OUT_PWD/release
+    QMAKE_POST_LINK += $$QMAKE_COPY $$shell_quote($$shell_path($$PWD/../third_party/WebView2/bin/WebView2Loader.dll)) $$shell_quote($$shell_path($$WIDGET_WEBVIEW_DEST/WebView2Loader.dll))
+}
 RESOURCES += ../resources.qrc ../src/rendering/shaders.qrc
 win32-msvc {
     QMAKE_CXXFLAGS += /utf-8
@@ -12,6 +18,10 @@ win32-msvc {
 }
 
 SOURCES += ../src/app/fontsettings.cpp \
+    ../src/widgets/customwidget.cpp \
+    ../src/widgets/desktopwidget_custom.cpp \
+    ../src/ui/htmlwidgetview.cpp \
+    ../src/ui/widgeteditordialog.cpp \
     ../src/media/systemmediasession.cpp \
     ../src/network/cardrequest.cpp \
     ../src/platform/powerdevices.cpp \
@@ -49,6 +59,9 @@ SOURCES += ../src/app/fontsettings.cpp \
     widget_regression.cpp
 
 HEADERS += ../src/app/fontsettings.h \
+    ../src/widgets/customwidget.h \
+    ../src/ui/htmlwidgetview.h \
+    ../src/ui/widgeteditordialog.h \
     ../src/config.h \
     ../src/media/systemmediasession.h \
     ../src/network/cardrequest.h \

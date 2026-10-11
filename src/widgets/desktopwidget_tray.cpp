@@ -65,7 +65,9 @@ void DesktopWidget::setupTrayIcon()
     connect(aboutAction, &QAction::triggered, this, &DesktopWidget::showAboutDialog);
     menu->addSeparator();
     auto* quitAction = menu->addAction(QStringLiteral("退出"));
-    connect(quitAction, &QAction::triggered, qApp, &QApplication::quit);
+    connect(quitAction, &QAction::triggered, qApp, []() {
+        if (confirmCustomWidgetEditorClose()) qApp->quit();
+    });
 
     m_trayIcon = new QSystemTrayIcon(this);
     m_trayIcon->setIcon(createTrayIcon());
@@ -130,4 +132,3 @@ void DesktopWidget::rearrangeWidgets()
     saveAllConfigurations();
     updateRearrangeLabel();
 }
-

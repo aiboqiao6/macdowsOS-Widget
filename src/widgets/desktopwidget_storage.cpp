@@ -25,6 +25,7 @@ QString DesktopWidget::kindName(CardKind kind)
     case CardKind::Dictionary: return QStringLiteral("dictionary");
     case CardKind::Music: return QStringLiteral("music");
     case CardKind::Countdown: return QStringLiteral("countdown");
+    case CardKind::Custom: return QStringLiteral("custom");
     }
     return QStringLiteral("battery");
 }
@@ -36,6 +37,7 @@ DesktopWidget::CardKind DesktopWidget::kindFromName(const QString& value)
     if (value == QStringLiteral("dictionary")) return CardKind::Dictionary;
     if (value == QStringLiteral("music")) return CardKind::Music;
     if (value == QStringLiteral("countdown")) return CardKind::Countdown;
+    if (value == QStringLiteral("custom")) return CardKind::Custom;
     return CardKind::Battery;
 }
 
@@ -64,6 +66,8 @@ void DesktopWidget::saveAllConfigurations()
         item.insert(QStringLiteral("x"), widget->x());
         item.insert(QStringLiteral("y"), widget->y());
         item.insert(QStringLiteral("visible"), widget->isVisible());
+        if (widget->m_cardKind == CardKind::Custom)
+            item.insert(QStringLiteral("custom"), widget->m_custom.toJson());
         if (widget->m_cardKind == CardKind::Countdown) {
             QJsonObject event;
             event.insert(QStringLiteral("title"), widget->m_countdown.title);
@@ -92,6 +96,8 @@ void DesktopWidget::saveAllConfigurations()
 
 DesktopWidget* DesktopWidget::addWidget(CardKind kind, const QPoint& desktopPoint, int variant)
 {
+    if (kind == CardKind::Custom)
+        return nullptr;
     auto* widget = new DesktopWidget(nullptr, kind, false, QString(), variant);
     widget->setAttribute(Qt::WA_DeleteOnClose, true);
     if (!widget->placeAtDesktopPoint(desktopPoint)) {
@@ -114,23 +120,31 @@ QList<DesktopWidget*> DesktopWidget::restoreWidgets()
     const int version = root.value(QStringLiteral("version")).toInt();
     const QJsonArray widgets = root.value(QStringLiteral("widgets")).toArray();
     bool primaryAssigned = false;
+    const auto customDefinitions = CustomWidgets::load();
     for (const QJsonValue& value : widgets) {
         const QJsonObject item = value.toObject();
         const QString type = item.value(QStringLiteral("type")).toString();
         if (type != QStringLiteral("battery") && type != QStringLiteral("weather")
             && type != QStringLiteral("clock") && type != QStringLiteral("dictionary")
-            && type != QStringLiteral("music") && type != QStringLiteral("countdown"))
+            && type != QStringLiteral("music") && type != QStringLiteral("countdown") && type != QStringLiteral("custom"))
             continue;
         const CardKind kind = kindFromName(type);
+        CustomWidgets::Definition custom;
+        if (kind == CardKind::Custom) {
+            if (!CustomWidgets::fromJson(item.value(QStringLiteral("custom")).toObject(), custom)) continue;
+            for (const auto& definition : customDefinitions)
+                if (definition.id == custom.id) { custom = definition; break; }
+        }
         // 优先由电量组件持有托盘，配置次序变化不改变此规则。
         const bool primary = kind == CardKind::Battery && !primaryAssigned;
-        const int storedVariant = item.contains(QStringLiteral("variant"))
+        const int storedVariant = kind == CardKind::Custom ? custom.variant : item.contains(QStringLiteral("variant"))
             ? item.value(QStringLiteral("variant")).toInt() : defaultVariant(kind);
         auto* widget = new DesktopWidget(nullptr,
                                          kind,
                                          primary,
                                          item.value(QStringLiteral("id")).toString(),
                                          storedVariant);
+        if (kind == CardKind::Custom) widget->m_custom = custom;
         if (kind == CardKind::Countdown) {
             const QJsonObject event = item.value(QStringLiteral("countdown")).toObject();
             const QString title = event.value(QStringLiteral("title")).toString().simplified().left(80);
@@ -212,6 +226,7 @@ QList<DesktopWidget*> DesktopWidget::restoreWidgets()
         widget->move(restoredTarget.topLeft());
         widget->m_restoringPosition = false;
         widget->m_hasSavedPosition = true;
+        if (kind == CardKind::Custom) widget->applyCustomContent();
         if (item.value(QStringLiteral("visible")).toBool(true))
             widget->show();
         result.append(widget);
@@ -226,4 +241,3 @@ QList<DesktopWidget*> DesktopWidget::restoreWidgets()
         saveAllConfigurations();
     return result;
 }
-

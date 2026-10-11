@@ -54,6 +54,8 @@ DesktopWidget::DesktopWidget(QWidget* parent, CardKind kind, bool ownsTray,
     AppSettings settings;
     m_widgetScale = qBound<qreal>(0.40, settings.value(QStringLiteral("appearance/scale"), 1.0).toDouble(), 2.0);
     setGlassMargins(0);
+    if (m_cardKind == CardKind::Custom)
+        setWindowFlag(Qt::WindowDoesNotAcceptFocus, false);
     const int initialCell = qMax(1, qRound(kGridBaseCell * m_widgetScale));
     QScreen* initialScreen = QGuiApplication::primaryScreen();
     const int initialGap = initialScreen
@@ -203,6 +205,7 @@ DesktopWidget::~DesktopWidget()
 
 void DesktopWidget::shutdown()
 {
+    closeCustomWidgetEditor();
     const auto widgets = s_instances;
     qDeleteAll(widgets);
 }

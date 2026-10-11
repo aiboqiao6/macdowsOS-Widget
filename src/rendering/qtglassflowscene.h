@@ -29,6 +29,15 @@ class QtGlassFlowScene : public QOpenGLWidget, protected QOpenGLFunctions
     Q_OBJECT
     ClearTypeText::Renderer m_textRenderer;
 public:
+    // 未保存自定义设置时，完全沿用原有液态玻璃材质。
+    struct MaterialParameters {
+        float opacity = 1.0f;
+        float refraction = LiquidGlassStyle::kRefractionPower;
+        float blurRadius = LiquidGlassStyle::kBlurRadius;
+        int blurIterations = LiquidGlassStyle::kBlurIterations;
+        float noise = LiquidGlassStyle::kNoiseAmount;
+    };
+
     struct GlassObject {
         QPointF position;
         QSizeF size;
@@ -66,6 +75,8 @@ public:
     float glassOpacity() const { return m_glassOpacity; }
     void setDarkModeEnabled(bool enabled);
     bool darkModeEnabled() const { return m_darkModeEnabled; }
+    MaterialParameters materialParameters() const;
+    void setMaterialParameters(const MaterialParameters& parameters);
     void setRefreshInterval(int intervalMs);
     int refreshInterval() const { return m_refreshInterval; }
     // 由宿主处理窗口拖动时，仍可启用交互刷新节奏。

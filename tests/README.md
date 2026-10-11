@@ -31,6 +31,59 @@ set WIDGET_STRESS_MS=
 python -X utf8 tests\review_comments.py
 ```
 
+自定义组件定向回归：
+
+```bat
+release\widget_regression.exe ^
+  customWidgetValidationAndImportExport customCatalogPreservesBrokenFiles ^
+  customWidgetDesktopUpdatesAndRestoresSnapshot customSaveRollsBackOnCatalogFailure ^
+  customEditorMaintainsBlocksAndSaves customEditorImportImmediatelyAddsToCatalogAndGallery ^
+  customEditorButtonsDoNotTreatReturnAsAnAction customEditorShowsOnlyPropertiesForTheSelectedBlock ^
+  customEditorUndoRedoRestoresBlockContentAndStructure customEditorBlockDragOrderMatchesSavedOrder ^
+  customEditorKeepsPrimaryActionsInsideCompactWindow customEditorKeepsInteractivePreviewWhenRenamedOrResized ^
+  customSettingsOpensUsableEditorAndRetainsPendingSettings ^
+  customGallerySeparatesSearchesAndRefreshesCatalog customGalleryDefersRefreshUntilDragEnds ^
+  customGalleryDropAddsMatchingDefinitionAndSize customHtmlRunsScriptsInsideSandbox ^
+  -o custom-widgets.txt,txt
+```
+
+`customHtmlRunsScriptsInsideSandbox` 使用系统 WebView2 Runtime 验证真实 CSS、按钮脚本和 iframe 隔离，不访问在线服务。构建后自动复制官方 WebView2Loader.dll。测试组件库与正式配置隔离。
+
+自定义图库用例覆盖空库隐藏、独立分类、搜索、保存与导入后的刷新、删除后移除、拖动取消、拖动中的延迟刷新，以及将正确的组件和尺寸添加到桌面。设置用例同时覆盖新建与复用工作室，检查设置窗口的独立原生 owner、工作室的窗口模态关系及 Win32 输入启用状态，并在返回设置后保留未提交的选择。
+
+本轮工作室用例范围：
+
+- `customEditorImportImmediatelyAddsToCatalogAndGallery` 检查 HTML / JSON 导入后立即进入组件库和图库，重复导入使用新 ID，失败时保留已有内容。
+- `customEditorButtonsDoNotTreatReturnAsAnAction` 检查 Enter 不触发新建、保存等默认按钮操作。
+- `customEditorShowsOnlyPropertiesForTheSelectedBlock` 检查文本、时钟、进度和分隔线只显示适用属性，外观默认折叠，联网选项仅显示于 HTML 模式。
+- `customEditorUndoRedoRestoresBlockContentAndStructure` 检查文字编辑快捷键、内容块添加的撤销重做，以及撤销后新修改会清除旧的重做分支。
+- `customEditorBlockDragOrderMatchesSavedOrder` 检查拖动排序同步到保存内容，并可撤销恢复原顺序。
+- `customEditorKeepsPrimaryActionsInsideCompactWindow` 检查 720×540 窗口内的名称输入和固定底部保存按钮。
+- `customEditorKeepsInteractivePreviewWhenRenamedOrResized` 检查重命名、调整窗口大小时保留 HTML 交互状态，修改源码与重新启动预览时正确加载。
+
+手动检查工作室界面：
+
+```bat
+set WIDGET_EDITOR_OPEN_SETTINGS=
+set WIDGET_EDITOR_PREVIEW_MS=60000
+release\widget_regression.exe customEditorManualVisualCheck -o custom-editor-visual.txt,txt
+set WIDGET_EDITOR_PREVIEW_MS=
+```
+
+窗口将在指定毫秒数后关闭；输出截图至 `artifacts/custom-widget-editor.png`。此项默认跳过，不改变正式组件库。
+
+从设置开始做真实鼠标检查：
+
+```bat
+set WIDGET_EDITOR_OPEN_SETTINGS=1
+set WIDGET_EDITOR_PREVIEW_MS=120000
+release\widget_regression.exe customEditorManualVisualCheck -o custom-editor-settings-manual.txt,txt
+set WIDGET_EDITOR_OPEN_SETTINGS=
+set WIDGET_EDITOR_PREVIEW_MS=
+```
+
+模式 `1` 由真实鼠标点击设置中的工作室入口。模式 `2` 在 500 ms 后程序调用该入口，适用于自动化工具无法列出设置工具窗时；工作室显示后的按钮、输入框和预览仍需真实鼠标验证，不能代替入口本身的点击验证。时限最长 180 秒，超时会清理未保存状态并关闭工作室与设置。截图输出至 `artifacts/custom-editor-settings-start.png` 和 `artifacts/custom-editor-from-settings.png`。
+
 审查跳过字符串中的网址，检查自有 C++、GLSL 和回归源码中的英文注释、英文句子与遗留待办标记。注释的语义和必要性仍需人工审查。
 
 本次新增重点用例：

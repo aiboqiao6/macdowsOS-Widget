@@ -31,18 +31,22 @@ public:
     explicit WidgetLibraryDialog(QWidget* parent = nullptr);
     ~WidgetLibraryDialog() override;
     static void refreshPreviews();
+    static void refreshCustomWidgets();
+    void reloadCustomWidgets();
     void updateScreenLayout();
 
     // 图库隐藏时捕获完整桌面，再由共享玻璃管线处理模糊和折射。
     void prepareBackdrop();
 
     void notifyWidgetDropped(int kind, const QPoint& globalPos);
+    void notifyCustomWidgetDropped(const QString& definitionId, const QPoint& globalPos);
     void notifyWidgetDragStarted(int kind);
     void notifyWidgetDragFinished(int kind);
     void notifyWidgetDragPreview(int kind, const QPoint& globalPos, bool visible);
 
 signals:
     void widgetDropped(int kind, const QPoint& globalPos);
+    void customWidgetDropped(const QString& definitionId, const QPoint& globalPos);
     void widgetDragStarted(int kind);
     void widgetDragFinished(int kind);
     void widgetDragPreview(int kind, const QPoint& globalPos, bool visible);
@@ -84,6 +88,8 @@ private:
     int m_tileColumns = 0;
     int m_selectedCategory = -1;
     QList<int> m_recommendedTiles;
+    QByteArray m_customCatalogSnapshot;
+    QTimer m_customRefreshTimer;
     QPropertyAnimation* m_slideAnimation = nullptr;
     QTimer m_renderTimer;
     QTimer m_liveBackdropTimer;
