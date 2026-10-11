@@ -1,7 +1,8 @@
 #include "widgets/musiccard.h"
 #include "app/fontsettings.h"
+#include "rendering/liquidglassstyle.h"
 #include "rendering/responsivelayout.h"
-#include <QCache>
+#include "widgets/cardmetrics.h"
 #include <QLinearGradient>
 #include <QPainter>
 #include <QPainterPath>
@@ -24,31 +25,6 @@ void note(QPainter& painter, const QRectF& bounds, const QColor& ink)
     path.cubicTo(m.point(.22, .74), m.point(.35, .70), m.point(.40, .73));
     path.closeSubpath();
     painter.fillPath(path, ink);
-}
-
-struct Palette { QColor top; QColor bottom; };
-Palette artworkPalette(const QImage& artwork)
-{
-    if (artwork.isNull())
-        return {QColor(122, 30, 51), QColor(43, 19, 32)};
-    // 仅封面变化时抽样取色；播放进度刷新复用小缓存，不逐帧模糊封面。
-    static QCache<qint64, Palette> cache(32);
-    if (const auto* found = cache.object(artwork.cacheKey()))
-        return *found;
-    const QImage sample = artwork.scaled(12, 12, Qt::IgnoreAspectRatio, Qt::FastTransformation);
-    qreal r = 0, g = 0, b = 0;
-    for (int y = 0; y < sample.height(); ++y)
-        for (int x = 0; x < sample.width(); ++x) {
-            const QColor pixel = sample.pixelColor(x, y);
-            r += pixel.red(); g += pixel.green(); b += pixel.blue();
-        }
-    const qreal count = sample.width() * sample.height();
-    Palette result{QColor(qRound(r / count * .46 + 22), qRound(g / count * .46 + 18),
-                         qRound(b / count * .46 + 20)),
-                   QColor(qRound(r / count * .20 + 12), qRound(g / count * .20 + 10),
-                         qRound(b / count * .20 + 14))};
-    cache.insert(artwork.cacheKey(), new Palette(result));
-    return result;
 }
 
 QString timeLabel(qint64 milliseconds)
@@ -101,22 +77,19 @@ void paint(QPainter& painter, const QRectF& bounds, const MediaSnapshot& media)
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setRenderHint(QPainter::SmoothPixmapTransform);
+    const qreal cardRadius = m.size(LiquidGlassStyle::kCardCornerRadius / CardMetrics::kGridBaseCell);
+    // 封面与卡片采用同心的大圆角，扣除边距后保持内外轮廓协调。
+    const qreal artworkRadius = qMax(m.size(.04), cardRadius - m.size(.073));
     QPainterPath cardClip;
-    cardClip.addRoundedRect(bounds, m.size(.0915), m.size(.0915));
+    cardClip.addRoundedRect(bounds, cardRadius, cardRadius);
     painter.setClipPath(cardClip, Qt::IntersectClip);
-    const Palette palette = artworkPalette(media.artwork);
-    QLinearGradient wash(bounds.topLeft(), bounds.bottomRight());
-    QColor top = palette.top, bottom = palette.bottom;
-    top.setAlpha(230); bottom.setAlpha(242);
-    wash.setColorAt(0, top);
-    wash.setColorAt(1, bottom);
-    painter.fillRect(bounds, wash);
+    // 整面材质由宿主液态玻璃提供，专辑图像仅绘制在封面区域。
 
     painter.setPen(Qt::NoPen);
     painter.setBrush(QColor(0, 0, 0, 32));
-    painter.drawRoundedRect(regions.artwork.translated(0, m.size(.012)), m.size(.035), m.size(.035));
+    painter.drawRoundedRect(regions.artwork.translated(0, m.size(.012)), artworkRadius, artworkRadius);
     QPainterPath artworkClip;
-    artworkClip.addRoundedRect(regions.artwork, m.size(.03), m.size(.03));
+    artworkClip.addRoundedRect(regions.artwork, artworkRadius, artworkRadius);
     painter.save();
     painter.setClipPath(artworkClip, Qt::IntersectClip);
     if (!media.artwork.isNull()) {
@@ -137,10 +110,7 @@ void paint(QPainter& painter, const QRectF& bounds, const MediaSnapshot& media)
     const auto text = [&](const QRectF& area, const QString& value, qreal ratio,
                           const QColor& color, QFont::Weight weight = QFont::Normal,
                           Qt::Alignment alignment = Qt::AlignLeft | Qt::AlignVCenter) {
-        QFont font(AppFonts::family());
-        font.setPixelSize(qMax(1, qRound(m.size(ratio))));
-        font.setWeight(weight);
-        AppFonts::applySmoothing(font);
+        const QFont font = AppFonts::displayFont(qMax(1, qRound(m.size(ratio))), weight);
         painter.setFont(font);
         painter.setPen(color);
         ResponsiveLayout::drawSingleLine(painter, area, alignment,
@@ -149,7 +119,7 @@ void paint(QPainter& painter, const QRectF& bounds, const MediaSnapshot& media)
     if (wide) {
         const QRectF symbol(regions.branding.topLeft(), QSizeF(m.size(.065), m.size(.065)));
         note(painter, symbol, QColor(255, 255, 255, 235));
-        text(regions.branding.adjusted(m.size(.077), 0, 0, 0), QStringLiteral("Music"), .062,
+        text(regions.branding.adjusted(m.size(.077), 0, 0, 0), QStringLiteral("Music"), .046,
              QColor(255, 255, 255, 235), QFont::DemiBold);
     } else {
         note(painter, regions.branding, QColor(255, 255, 255, 235));
@@ -160,8 +130,8 @@ void paint(QPainter& painter, const QRectF& bounds, const MediaSnapshot& media)
     const QString artist = media.available
         ? (media.artist.isEmpty() ? QStringLiteral("未知艺术家") : media.artist)
         : (!media.error.isEmpty() ? QStringLiteral("暂时无法读取音乐") : QStringLiteral("打开音乐播放器"));
-    text(regions.title, title, wide ? .095 : .075, Qt::white, QFont::DemiBold);
-    text(regions.artist, artist, wide ? .064 : .055, QColor(255, 255, 255, 166));
+    text(regions.title, title, .068, Qt::white, QFont::DemiBold);
+    text(regions.artist, artist, .043, QColor(255, 255, 255, 166));
 
     if (wide) {
         const qint64 position = qBound<qint64>(0, media.positionMs, qMax<qint64>(0, media.durationMs));
@@ -174,9 +144,9 @@ void paint(QPainter& painter, const QRectF& bounds, const MediaSnapshot& media)
             painter.drawLine(QPointF(regions.progress.left(), y), QPointF(regions.progress.left() + regions.progress.width() * progress, y));
         }
         const bool hasTime = media.available && media.durationMs > 0;
-        text(regions.elapsed, hasTime ? timeLabel(position) : QStringLiteral("–:––"), .037, QColor(255, 255, 255, 145));
+        text(regions.elapsed, hasTime ? timeLabel(position) : QStringLiteral("–:––"), .027, QColor(255, 255, 255, 145));
         text(regions.remaining, hasTime ? QLatin1Char('-') + timeLabel(media.durationMs - position) : QStringLiteral("–:––"),
-             .037, QColor(255, 255, 255, 145), QFont::Normal, Qt::AlignRight | Qt::AlignVCenter);
+             .027, QColor(255, 255, 255, 145), QFont::Normal, Qt::AlignRight | Qt::AlignVCenter);
     }
     const auto control = [&](const QRectF& area, bool enabled, int direction) {
         if (area.isEmpty())
@@ -187,7 +157,7 @@ void paint(QPainter& painter, const QRectF& bounds, const MediaSnapshot& media)
         if (direction == 0) {
             painter.setBrush(QColor(255, 255, 255, enabled ? 245 : 45));
             painter.drawEllipse(area);
-            ink = enabled ? palette.bottom : QColor(255, 255, 255, 100);
+            ink = enabled ? QColor(30, 34, 40) : QColor(255, 255, 255, 100);
         }
         painter.setBrush(ink);
         if (direction == 0 && media.playing) {

@@ -6,6 +6,7 @@
 #include <QOpenGLContext>
 #include <QOpenGLExtraFunctions>
 #include <QPainter>
+#include <QRegion>
 #include <QVector2D>
 #include <QVector4D>
 
@@ -13,6 +14,101 @@ namespace ClearTypeText {
 namespace {
 bool s_enabled = true;
 thread_local Renderer* s_activeRenderer = nullptr;
+thread_local quint64 s_rasterDraws = 0;
+
+QFont nativeFont(const QPainter& painter)
+{
+    const QFont font = painter.font();
+    QFont result(font);
+    const qreal scale = painter.deviceTransform().m11();
+    const qreal pixels = font.pixelSize() > 0 ? font.pixelSize()
+        : font.pointSizeF() * painter.device()->logicalDpiY() / 72.0;
+    result.setPixelSize(qMax(1, qRound(pixels * scale)));
+    if (font.letterSpacingType() == QFont::AbsoluteSpacing)
+        result.setLetterSpacing(QFont::AbsoluteSpacing, font.letterSpacing() * scale);
+    result.setWordSpacing(font.wordSpacing() * scale);
+    return result;
+}
+
+bool paintRaster(QPainter& painter, const QPointF& baseline, const QString& text)
+{
+    const auto transform = painter.deviceTransform();
+    if (transform.type() > QTransform::TxScale || transform.m11() <= 0
+        || !qFuzzyCompare(transform.m11(), transform.m22())
+        || painter.pen().brush().style() != Qt::SolidPattern)
+        return false;
+    QFont font = nativeFont(painter);
+    const bool rgb = enabled() && !(font.styleStrategy() & (QFont::NoAntialias | QFont::NoSubpixelAntialias));
+    if (!rgb && !(font.styleStrategy() & QFont::NoAntialias))
+        font.setStyleStrategy(static_cast<QFont::StyleStrategy>(font.styleStrategy() | QFont::NoSubpixelAntialias));
+    QPoint offset;
+    const QImage mask = coverage(font, text, &offset);
+    if (mask.isNull())
+        return false;
+    const QPointF deviceBaseline = transform.map(baseline);
+    const QPoint origin(qRound(deviceBaseline.x()) + offset.x(), qRound(deviceBaseline.y()) + offset.y());
+    const QColor ink = painter.pen().color();
+    const qreal opacity = ink.alphaF() * painter.opacity();
+
+    // 图库原生像素画布直接按 RGB 覆盖率混合，使用与 GL 完全相同的字形及公式。
+    auto* target = painter.device()->devType() == QInternal::Image
+        ? static_cast<QImage*>(painter.device()) : nullptr;
+    if (rgb && target && target->isDetached()
+        && (target->format() == QImage::Format_RGB32 || target->format() == QImage::Format_ARGB32_Premultiplied)
+        && painter.compositionMode() == QPainter::CompositionMode_SourceOver) {
+        const QRect destination(origin, mask.size());
+        QRegion clip(target->rect());
+        if (painter.hasClipping())
+            clip &= transform.map(painter.clipRegion());
+        clip &= destination;
+        for (const QRect& rect : clip) {
+            for (int y = rect.top(); y <= rect.bottom(); ++y) {
+                auto* pixels = reinterpret_cast<QRgb*>(target->scanLine(y));
+                const auto* coverageRow = reinterpret_cast<const QRgb*>(mask.constScanLine(y - origin.y()));
+                for (int x = rect.left(); x <= rect.right(); ++x) {
+                    const QRgb sample = coverageRow[x - origin.x()];
+                    const qreal ar = qRed(sample) / 255.0 * opacity;
+                    const qreal ag = qGreen(sample) / 255.0 * opacity;
+                    const qreal ab = qBlue(sample) / 255.0 * opacity;
+                    const qreal alpha = qMax(ar, qMax(ag, ab));
+                    const QRgb old = pixels[x];
+                    pixels[x] = qRgba(qRound(ink.red() * ar + qRed(old) * (1 - ar)),
+                                      qRound(ink.green() * ag + qGreen(old) * (1 - ag)),
+                                      qRound(ink.blue() * ab + qBlue(old) * (1 - ab)),
+                                      qRound(255 * alpha + qAlpha(old) * (1 - alpha)));
+                }
+            }
+        }
+    } else {
+        // 透明控件不能取得目标背景，复用同一字形的灰阶覆盖并由 Qt 合成。
+        const QString key = font.key() + QChar('|') + QString::number(ink.rgba(), 16) + QChar('|') + text;
+        static thread_local QCache<QString, QImage> colored(8 * 1024);
+        QImage* image = colored.object(key);
+        std::unique_ptr<QImage> oversized;
+        if (!image) {
+            QImage pixels(mask.size(), QImage::Format_ARGB32_Premultiplied);
+            for (int y = 0; y < pixels.height(); ++y) {
+                auto* row = reinterpret_cast<QRgb*>(pixels.scanLine(y));
+                const auto* samples = reinterpret_cast<const QRgb*>(mask.constScanLine(y));
+                for (int x = 0; x < pixels.width(); ++x) {
+                    const int alpha = qRound(qGray(samples[x]) * ink.alphaF());
+                    row[x] = qRgba((ink.red() * alpha + 127) / 255, (ink.green() * alpha + 127) / 255,
+                                   (ink.blue() * alpha + 127) / 255, alpha);
+                }
+            }
+            image = new QImage(std::move(pixels));
+            const int cost = qMax(1, int(image->sizeInBytes() / 1024));
+            if (cost > colored.maxCost()) oversized.reset(image);
+            else colored.insert(key, image, cost);
+        }
+        painter.save();
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+        painter.drawImage(QRectF(transform.inverted().map(QPointF(origin)), QSizeF(image->size()) / transform.m11()), *image);
+        painter.restore();
+    }
+    ++s_rasterDraws;
+    return true;
+}
 }
 
 void setEnabled(bool enabled) { s_enabled = enabled; }
@@ -20,27 +116,54 @@ bool enabled() { return s_enabled; }
 
 QImage coverage(const QFont& font, const QString& text, QPoint* offset)
 {
+    struct Glyph { QImage mask; QPoint offset; };
+    static thread_local QCache<QString, Glyph> cache(16 * 1024);
+    const QString key = font.key() + QChar('|') + text;
+    if (const auto* glyph = cache.object(key)) {
+        if (offset) *offset = glyph->offset;
+        return glyph->mask;
+    }
     const QRect bounds = QFontMetricsF(font).boundingRect(text).toAlignedRect().adjusted(-2,-2,2,2);
     if (offset)
         *offset = bounds.topLeft();
     if (bounds.isEmpty() || qint64(bounds.width()) * bounds.height() > 1024 * 1024)
         return {};
-    // Windows 字体引擎仅在不透明 RGB 目标上保留 ClearType 三通道覆盖率。
-    // 白字黑底直接得到覆盖掩码，避免透明 QImage 自动退回灰阶。
-    QImage result(bounds.size(), QImage::Format_RGB32);
-    result.fill(Qt::black);
+    // RGB 模式保留系统三通道覆盖率；灰阶模式读取透明画布的原生 alpha。
+    const bool grayscale = font.styleStrategy() & (QFont::NoSubpixelAntialias | QFont::NoAntialias);
+    QImage result(bounds.size(), grayscale ? QImage::Format_ARGB32_Premultiplied : QImage::Format_RGB32);
+    result.fill(grayscale ? Qt::transparent : Qt::black);
     QPainter painter(&result);
     painter.setRenderHint(QPainter::TextAntialiasing);
     painter.setFont(font);
     painter.setPen(Qt::white);
     painter.drawText(-QPointF(bounds.topLeft()), text);
+    painter.end();
+    if (grayscale) {
+        QImage mask(result.size(), QImage::Format_RGB32);
+        for (int y = 0; y < result.height(); ++y) {
+            const auto* source = reinterpret_cast<const QRgb*>(result.constScanLine(y));
+            auto* row = reinterpret_cast<QRgb*>(mask.scanLine(y));
+            for (int x = 0; x < result.width(); ++x) {
+                const int alpha = qAlpha(source[x]);
+                row[x] = qRgb(alpha, alpha, alpha);
+            }
+        }
+        result = std::move(mask);
+    }
+    const int cost = qMax(1, int(result.sizeInBytes() / 1024));
+    if (cost <= cache.maxCost())
+        cache.insert(key, new Glyph{result, bounds.topLeft()}, cost);
     return result;
 }
 
 bool draw(QPainter& painter, const QPointF& baseline, const QString& text)
 {
-    return enabled() && s_activeRenderer && s_activeRenderer->paint(painter, baseline, text);
+    if (enabled() && s_activeRenderer && s_activeRenderer->paint(painter, baseline, text))
+        return true;
+    return paintRaster(painter, baseline, text);
 }
+
+quint64 rasterDrawCount() { return s_rasterDraws; }
 
 void Renderer::begin(QPaintDevice* device, const QSize& nativeSize)
 {
@@ -95,13 +218,7 @@ bool Renderer::paint(QPainter& painter, const QPointF& baseline, const QString& 
     const QFont font = painter.font();
     if (font.styleStrategy() & (QFont::NoAntialias | QFont::NoSubpixelAntialias))
         return false;
-    QFont rasterFont(font);
-    const qreal logicalPixels = font.pixelSize() > 0 ? font.pixelSize()
-        : font.pointSizeF() * painter.device()->logicalDpiY() / 72.0;
-    rasterFont.setPixelSize(qMax(1, qRound(logicalPixels * transform.m11())));
-    if (font.letterSpacingType() == QFont::AbsoluteSpacing)
-        rasterFont.setLetterSpacing(QFont::AbsoluteSpacing, font.letterSpacing() * transform.m11());
-    rasterFont.setWordSpacing(font.wordSpacing() * transform.m11());
+    const QFont rasterFont = nativeFont(painter);
     const QString key = rasterFont.key() + QChar('|') + text;
     Mask* mask = m_masks.object(key);
     auto* gl = QOpenGLContext::currentContext()->extraFunctions();

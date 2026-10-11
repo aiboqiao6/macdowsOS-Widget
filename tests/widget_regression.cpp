@@ -559,6 +559,103 @@ private slots:
         QVERIFY(gray.save("artifacts/grayscale-native.png"));
     }
 
+    void unifiedTextMatchesNativeImageAndGlCoverage() {
+        DesktopWidget::setGlobalFontSmoothing(4);
+        ClearTypeGlass glass;
+        glass.setGlassRenderingEnabled(false);
+        glass.setDesktopCaptureEnabled(false);
+        glass.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&glass));
+        const QImage gl = glass.grabFramebuffer().convertToFormat(QImage::Format_ARGB32_Premultiplied);
+        const qreal dpr = glass.devicePixelRatioF();
+        QImage cpu(gl.size(), QImage::Format_ARGB32_Premultiplied);
+        cpu.setDevicePixelRatio(dpr);
+        cpu.fill(Qt::transparent);
+        QPainter painter(&cpu);
+        painter.setRenderHint(QPainter::Antialiasing);
+        glass.paintOverlay(painter);
+        painter.end();
+        QVERIFY(gl.save("artifacts/unified-text-gl.png"));
+        QVERIFY(cpu.save("artifacts/unified-text-cpu.png"));
+        int maximum = 0;
+        // 只逐像素比较完整文字区域；下方红条的绘制恢复由独立检查覆盖。
+        for (int y = 0; y < qRound(90 * dpr); ++y)
+            for (int x = 0; x < gl.width(); ++x) {
+                const QColor a = gl.pixelColor(x, y), b = cpu.pixelColor(x, y);
+                maximum = qMax(maximum, qMax(qAbs(a.red() - b.red()), qMax(qAbs(a.green() - b.green()), qAbs(a.blue() - b.blue()))));
+                QCOMPARE(a.alpha(), b.alpha());
+            }
+        QVERIFY2(maximum <= 1, qPrintable(QStringLiteral("CPU/GL native glyph difference: %1").arg(maximum)));
+        PipelineProbe colored;
+        colored.withText = true;
+        colored.setGlassRenderingEnabled(false);
+        colored.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&colored));
+        const QImage reference = colored.grabFramebuffer().convertToFormat(QImage::Format_ARGB32_Premultiplied);
+        QImage actual(reference.size(), reference.format());
+        actual.setDevicePixelRatio(colored.devicePixelRatioF());
+        actual.fill(Qt::transparent);
+        QPainter raster(&actual);
+        raster.setRenderHint(QPainter::Antialiasing);
+        colored.paintOverlay(raster);
+        raster.end();
+        maximum = 0;
+        for (int y = 0; y < qRound(270 * colored.devicePixelRatioF()); ++y) {
+            const auto* a = reinterpret_cast<const QRgb*>(reference.constScanLine(y));
+            const auto* b = reinterpret_cast<const QRgb*>(actual.constScanLine(y));
+            for (int x = 0; x < reference.width(); ++x) {
+                maximum = qMax(maximum, qMax(qAbs(qRed(a[x]) - qRed(b[x])),
+                    qMax(qAbs(qGreen(a[x]) - qGreen(b[x])), qAbs(qBlue(a[x]) - qBlue(b[x])))));
+                QVERIFY(qAbs(qAlpha(a[x]) - qAlpha(b[x])) <= 1);
+            }
+        }
+        QVERIFY2(maximum <= 1, qPrintable(QStringLiteral("CPU/GL translucent glyph difference: %1").arg(maximum)));
+    }
+
+    void globalControlsUseSharedNativeGlyphPipeline() {
+        QLabel label(QStringLiteral("添加小组件\n原生字体"));
+        QPushButton button(QStringLiteral("完成"));
+        QCheckBox check(QStringLiteral("每年重复"));
+        QComboBox combo;
+        combo.addItem(QStringLiteral("暗色模式"));
+        for (QWidget* control : QList<QWidget*>{&label, &button, &check, &combo}) {
+            control->resize(240, 80);
+            control->ensurePolished();
+            QImage image(control->size() * control->devicePixelRatioF(), QImage::Format_ARGB32_Premultiplied);
+            image.setDevicePixelRatio(control->devicePixelRatioF());
+            image.fill(QColor(24, 35, 45));
+            const quint64 before = ClearTypeText::rasterDrawCount();
+            control->render(&image);
+            QVERIFY2(ClearTypeText::rasterDrawCount() > before, control->metaObject()->className());
+        }
+        WidgetLibraryDialog gallery;
+        gallery.ensurePolished();
+        const quint64 before = ClearTypeText::rasterDrawCount();
+        gallery.m_navButtons.first()->grab();
+        QVERIFY(ClearTypeText::rasterDrawCount() > before);
+    }
+
+    void musicLeavesLiquidGlassBackgroundVisible() {
+        DesktopWidget music(nullptr, DesktopWidget::CardKind::Music, false, "glass-music", 1, true);
+        music.setAnimationEnabled(false);
+        QImage background(music.size(), QImage::Format_RGB32);
+        background.fill(QColor(190, 40, 35));
+        music.setBackgroundImage(background);
+        music.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&music));
+        const qreal dpr = music.devicePixelRatioF();
+        const QPoint sample(qRound(music.width() * .65 * dpr), qRound(music.height() * .95 * dpr));
+        const QColor red = music.grabFramebuffer().pixelColor(sample);
+        background.fill(QColor(30, 60, 190));
+        music.setBackgroundImage(background);
+        const QColor blue = music.grabFramebuffer().pixelColor(sample);
+        QVERIFY(red.red() > blue.red() + 60);
+        QVERIFY(blue.blue() > red.blue() + 60);
+        music.setDarkModeEnabled(true);
+        const QColor dark = music.grabFramebuffer().pixelColor(sample);
+        QVERIFY(qGray(dark.rgb()) < qGray(blue.rgb()));
+    }
+
     void previewDoesNotStartServicesOrCreateConfiguration() {
         const auto services = qApp->findChildren<SystemMediaSession*>().size();
         for (auto kind : {DesktopWidget::CardKind::Battery, DesktopWidget::CardKind::Weather,

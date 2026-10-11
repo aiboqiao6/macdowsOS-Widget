@@ -230,7 +230,7 @@ protected:
             painter.restore();
         } else {
             painter.setPen(QColor(220, 225, 235));
-            painter.drawText(preview, Qt::AlignCenter, QStringLiteral("预览暂不可用"));
+            ResponsiveLayout::drawSingleLine(painter, preview, Qt::AlignCenter, QStringLiteral("预览暂不可用"));
         }
 
     }
@@ -498,7 +498,7 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     addTile(QStringLiteral("词典详情"), QStringLiteral("单词、音标与释义"), 3, 1, 4);
     addTile(QStringLiteral("词典卡片"), QStringLiteral("轻量词汇提醒"), 3, 2, 4);
     addTile(QStringLiteral("音乐 · 紧凑"), QStringLiteral("专辑封面、曲目与播放按钮"), 4, 0, 5);
-    addTile(QStringLiteral("音乐 · 正在播放"), QStringLiteral("封面取色、曲目信息与播放控制"), 4, 1, 5);
+    addTile(QStringLiteral("音乐 · 正在播放"), QStringLiteral("液态玻璃、曲目信息与播放控制"), 4, 1, 5);
     addTile(QStringLiteral("倒数日"), QStringLiteral("重要日期、剩余天数与每年重复纪念日"), 5, 0, 6);
     addTile(QStringLiteral("倒数日 · 横向"), QStringLiteral("目标日期与天数，支持每年重复纪念日"), 5, 1, 6);
     tileLayout->setAlignment(Qt::AlignLeft | Qt::AlignTop);

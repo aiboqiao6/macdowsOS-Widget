@@ -29,3 +29,13 @@
 默认启动路径保留 `x64/Release/macdowsOSWidget.exe`。替换前保存带时间戳的备份，复制后校验 SHA-256，不终止正在运行的应用。用户从托盘退出旧程序后重开即可使用。
 
 已完成更新。备份：`x64/Release/macdowsOSWidget-before-music-countdown-20261011-062728.exe`。新程序 SHA-256：`2AE03D7E556B12EBBFCED3C94B0B9A6C1FD8A55DD206B18774217461EBFA2B07`。
+
+## 音乐字体与大圆角跟进
+
+音乐字体改为复用天气、电量、时钟的 `AppFonts::displayFont`，统一点字号、字体族和抗锯齿配置。紧凑与横向标题使用相同的 22 点半粗体基准，正文 14 点常规字重，全部随组件缩放。修正原先音乐独立使用像素字号导致的尺寸差异。
+
+音乐外层裁剪复用 100% 尺寸下的 52 圆角；封面及其投影使用扣除约 24 边距后的约 28 圆角，替代原约 10 圆角。缩放时按短边同比例变化，实际封面和缺省音乐图标共用轮廓。
+
+应用 Release 与回归程序构建成功。现有渲染、音乐状态与恢复、离线预览和原生像素检查共 6 项通过（含初始化与清理），零失败，日志 `obj/regression/music-rounded-font-final.txt`。已重新查看更新后的亮暗预览；中文注释与差异格式检查通过。本次未新增测试或重跑完整套件。
+
+构建产物为 `artifacts/music-rounded-font-build/macdowsOSWidget.exe`，默认程序已备份并替换，复制后校验 SHA-256。

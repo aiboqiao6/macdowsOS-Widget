@@ -18,67 +18,7 @@ namespace ResponsiveLayout {
 inline bool drawHighQualityText(QPainter& painter, const QPointF& baseline,
                                 const QString& value)
 {
-    if (ClearTypeText::draw(painter, baseline, value))
-        return true;
-    const QFont font = painter.font();
-    if (font.hintingPreference() != QFont::PreferFullHinting
-        || !(font.styleStrategy() & QFont::PreferQuality))
-        return false;
-    const QTransform transform = painter.deviceTransform();
-    if (transform.type() > QTransform::TxScale || transform.m11() <= 0
-        || !qFuzzyCompare(transform.m11(), transform.m22())
-        || painter.pen().brush().style() != Qt::SolidPattern)
-        return false;
-    const qreal logicalPixels = font.pixelSize() > 0 ? font.pixelSize()
-        : font.pointSizeF() * painter.device()->logicalDpiY() / 72.0;
-    QFont rasterFont(font);
-    rasterFont.setPixelSize(qMax(1, qRound(logicalPixels * transform.m11())));
-    // 透明图像使用灰阶覆盖率；真正的 RGB 子像素混合由 ClearType GL 路径处理。
-    rasterFont.setStyleStrategy(static_cast<QFont::StyleStrategy>(
-        rasterFont.styleStrategy() | QFont::NoSubpixelAntialias));
-    if (font.letterSpacingType() == QFont::AbsoluteSpacing)
-        rasterFont.setLetterSpacing(QFont::AbsoluteSpacing,
-                                   font.letterSpacing() * transform.m11());
-    rasterFont.setWordSpacing(font.wordSpacing() * transform.m11());
-    const QColor color = painter.pen().color();
-    const QString key = rasterFont.key() + QChar('|')
-        + QString::number(color.rgba(), 16) + QChar('|') + value;
-    struct GlyphImage { QImage pixels; QPoint offset; };
-    static thread_local QCache<QString, GlyphImage> cache(8 * 1024);
-    GlyphImage* glyph = cache.object(key);
-    std::unique_ptr<GlyphImage> oversized;
-    if (!glyph) {
-        const QRect bounds = QFontMetricsF(rasterFont).boundingRect(value)
-            .toAlignedRect().adjusted(-2, -2, 2, 2);
-        if (bounds.isEmpty() || qint64(bounds.width()) * bounds.height() > 1024 * 1024)
-            return false;
-        QImage coverage(bounds.size(), QImage::Format_ARGB32_Premultiplied);
-        if (coverage.isNull())
-            return false;
-        coverage.fill(Qt::transparent);
-        QPainter raster(&coverage);
-        raster.setRenderHint(QPainter::TextAntialiasing, true);
-        raster.setFont(rasterFont);
-        raster.setPen(color);
-        raster.drawText(-QPointF(bounds.topLeft()), value);
-        raster.end();
-        glyph = new GlyphImage{coverage, bounds.topLeft()};
-        const int cost = qMax(1, int(glyph->pixels.sizeInBytes() / 1024));
-        if (cost > cache.maxCost())
-            oversized.reset(glyph);
-        else
-            cache.insert(key, glyph, cost);
-    }
-    const QPointF deviceBaseline = transform.map(baseline);
-    const QPoint deviceOrigin(qRound(deviceBaseline.x()) + glyph->offset.x(),
-                              qRound(deviceBaseline.y()) + glyph->offset.y());
-    const QRectF destination(transform.inverted().map(QPointF(deviceOrigin)),
-                             QSizeF(glyph->pixels.size()) / transform.m11());
-    painter.save();
-    painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-    painter.drawImage(destination, glyph->pixels);
-    painter.restore();
-    return true;
+    return ClearTypeText::draw(painter, baseline, value);
 }
 
 class Metrics

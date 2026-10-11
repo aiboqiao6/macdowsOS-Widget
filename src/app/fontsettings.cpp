@@ -1,11 +1,14 @@
 #include "app/fontsettings.h"
 #include "app/appsettings.h"
 #include "rendering/cleartypetext.h"
+#include "rendering/responsivelayout.h"
 #include <QApplication>
 #include <QDir>
 #include <QFile>
 #include <QFontDatabase>
 #include <QWidget>
+#include <QProxyStyle>
+#include <QTextLayout>
 
 namespace AppFonts {
 namespace {
@@ -62,12 +65,91 @@ QString pingFangFamily()
     return family;
 }
 
+class UnifiedTextStyle final : public QProxyStyle
+{
+public:
+    explicit UnifiedTextStyle(QStyle* base) : QProxyStyle(base) {}
+
+    void drawItemText(QPainter* painter, const QRect& rect, int flags,
+                      const QPalette& palette, bool enabled, const QString& source,
+                      QPalette::ColorRole role = QPalette::NoRole) const override
+    {
+        if (!painter || source.isEmpty())
+            return;
+        QString text = source;
+        int mnemonic = -1;
+        if (flags & (Qt::TextShowMnemonic | Qt::TextHideMnemonic)) {
+            text.clear();
+            for (int i = 0; i < source.size(); ++i) {
+                if (source[i] == QLatin1Char('&') && i + 1 < source.size()) {
+                    if (source[i + 1] == QLatin1Char('&')) ++i;
+                    else { mnemonic = text.size(); continue; }
+                }
+                text += source[i];
+            }
+        }
+        painter->save();
+        QFont font = painter->font();
+        font.setFamily(pingFangFamily());
+        configureFontSmoothing(font, s_fontSmoothingLevel);
+        painter->setFont(font);
+        if (role != QPalette::NoRole)
+            painter->setPen(palette.color(enabled ? palette.currentColorGroup() : QPalette::Disabled, role));
+        if (!(flags & Qt::TextDontClip))
+            painter->setClipRect(rect, Qt::IntersectClip);
+        text.replace(QLatin1Char('\n'), flags & Qt::TextSingleLine ? QChar(' ') : QChar(QChar::LineSeparator));
+        QTextLayout layout(text, font);
+        QTextOption option;
+        option.setWrapMode(flags & Qt::TextWordWrap ? QTextOption::WordWrap : QTextOption::NoWrap);
+        option.setTextDirection(painter->layoutDirection());
+        layout.setTextOption(option);
+        layout.beginLayout();
+        qreal height = 0;
+        while (true) {
+            QTextLine line = layout.createLine();
+            if (!line.isValid()) break;
+            line.setLineWidth(qMax(1, rect.width()));
+            line.setPosition(QPointF(0, height));
+            height += line.height();
+        }
+        layout.endLayout();
+        qreal top = rect.top();
+        if (flags & Qt::AlignVCenter) top += (rect.height() - height) / 2;
+        else if (flags & Qt::AlignBottom) top += rect.height() - height;
+        for (int i = 0; i < layout.lineCount(); ++i) {
+            const QTextLine line = layout.lineAt(i);
+            qreal left = rect.left();
+            if (flags & Qt::AlignHCenter) left += (rect.width() - line.naturalTextWidth()) / 2;
+            else if (flags & Qt::AlignRight) left += rect.width() - line.naturalTextWidth();
+            const QPointF baseline(left, top + line.y() + line.ascent());
+            QString part = text.mid(line.textStart(), line.textLength());
+            part.remove(QChar::LineSeparator);
+            if (!ResponsiveLayout::drawHighQualityText(*painter, baseline, part))
+                painter->drawText(baseline, part);
+            if (mnemonic >= line.textStart() && mnemonic < line.textStart() + line.textLength()
+                && (flags & Qt::TextShowMnemonic) && !(flags & Qt::TextHideMnemonic)) {
+                const QFontMetricsF metrics(font);
+                const int index = mnemonic - line.textStart();
+                const qreal x = baseline.x() + metrics.horizontalAdvance(part.left(index));
+                painter->drawLine(QPointF(x, baseline.y() + metrics.underlinePos()),
+                    QPointF(x + metrics.horizontalAdvance(part.mid(index, 1)), baseline.y() + metrics.underlinePos()));
+            }
+        }
+        painter->restore();
+    }
+};
+
 }
 
 QString family()
 {
     const QString family = pingFangFamily();
     if (auto* app = qobject_cast<QApplication*>(QCoreApplication::instance())) {
+        static bool styleInstalled = false;
+        if (!styleInstalled) {
+            styleInstalled = true;
+            app->setStyle(new UnifiedTextStyle(app->style()));
+        }
         QFont applicationFont = app->font();
         if (applicationFont.family() != family) {
             applicationFont.setFamily(family);
