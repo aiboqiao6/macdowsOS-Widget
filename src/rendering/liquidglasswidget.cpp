@@ -356,6 +356,8 @@ void LiquidGlassWidget::setDesktopCaptureEnabled(bool enabled)
         else
             m_backdropTimer->stop();
     }
+    if (enabled && isVisible())
+        captureDesktopBackdrop();
 }
 
 void LiquidGlassWidget::updateRefreshRate()
@@ -584,6 +586,7 @@ void LiquidGlassWidget::updateCaptureExclusion(bool resetBackdrop)
         m_backdropCache.clear();
         m_compositeCanvas = {};
         m_compositeCaptureClock.invalidate();
+        m_unchangedCaptures = 0;
     }
 #ifdef Q_OS_WIN
     if (!isVisible())
@@ -701,7 +704,7 @@ bool LiquidGlassWidget::captureCompositedBackdrop(QScreen* screen)
             updateCompositeCrop();
         }
         // 下一次捕获由定时器调度，静止背景退回低频探测，不在回调内忙循环。
-    }, m_dragging ? 1 : 0);
+    }, m_dragging ? 1 : 0, true);
     return true;
 }
 
@@ -870,6 +873,12 @@ void LiquidGlassWidget::resizeEvent(QResizeEvent* event)
 
 void LiquidGlassWidget::showEvent(QShowEvent* event)
 {
+    // 首帧不能依赖异步捕获或遮挡判断；每个窗口先准备当前档位的壁纸背景。
+    if (m_desktopCaptureEnabled) {
+        m_lastCompositedBackdrop = wallpaperBackdrop(frameGeometry(), devicePixelRatioF() * renderScale());
+        setBackgroundImage(m_lastCompositedBackdrop);
+    }
+    setRenderingSuspended(false);
     QtGlassFlowScene::showEvent(event);
     updateCaptureExclusion();
     // 显示窗口可能重置层级，强制同步一次原生层级。
@@ -1007,7 +1016,13 @@ bool LiquidGlassWidget::event(QEvent* event)
     }
     if (event->type() == QEvent::WinIdChange && isVisible()) {
         m_windowLayerInitialized = false;
-        QTimer::singleShot(0, this, [this]() { updateCaptureExclusion(); });
+        QTimer::singleShot(0, this, [this]() {
+            // showEvent 可能已注册新句柄，不能再次清空刚启动的捕获并使首个回调过期。
+            if (isVisible() && m_registeredGlassWindow != winId()) {
+                updateCaptureExclusion();
+                captureDesktopBackdrop();
+            }
+        });
     }
     if (event->type() == QEvent::DevicePixelRatioChange) {
         ++m_captureGeneration;

@@ -118,3 +118,15 @@ set WIDGET_PIPELINE_BASELINE=
 画质比较覆盖 0.60、0.80、1.00、1.25、1.50 五档；玻璃、模糊和文字路径均要求逐像素零差异。图像保存在指定目录，可直接用于修改前后视觉检查。结果记录见 [cleanup-performance-2026-10-11.md](cleanup-performance-2026-10-11.md)。
 
 统一液态玻璃样式有意移除了旧的明暗渐变与额外高光，因此跨样式版本的旧图不能用作零差异基线；同一样式下的管线优化和回退程序仍要求逐像素一致。
+
+多组件首帧、句柄重建与捕获调度定向检查：
+
+```bat
+release\widget_regression.exe ^
+  firstShowSeedsEveryGlassBackdrop sceneRepairsMissingBlurTargetAndReusesValidTargets ^
+  completeCaptureFramesAvoidFallbackAllocation duplicateNativeRegistrationDoesNotDiscardBackdrop ^
+  queuedBackdropRequestsCoalesceWithoutLosingCompletions partialCaptureStillPreservesFallbackAndCoverage ^
+  -o startup-probes.txt,txt
+```
+
+覆盖五档首帧背景、缺失模糊目标的自动恢复、有效目标复用、完整帧共享、部分捕获补洞、重复原生句柄通知及请求合并后的回调计数。修改前后检查、225 张图像的逐像素对比和持续捕获结果见 [startup-performance-2026-10-13.md](startup-performance-2026-10-13.md)。

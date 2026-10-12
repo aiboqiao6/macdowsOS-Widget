@@ -872,6 +872,25 @@ DesktopCapture::Frame grabFrame(const QVector<CapturePart>& parts, const QSize& 
 
 class CaptureWorker final : public QObject {
 public:
+    enum class RequestStatus { Pending, Running, Cancelled };
+    using RequestState = std::atomic<RequestStatus>;
+    std::shared_ptr<RequestState> prepare(QObject* receiver, WId target, bool latestOnly) {
+        auto state = std::make_shared<RequestState>(RequestStatus::Pending);
+        if (latestOnly) {
+            const auto key = qMakePair(receiver, target);
+            if (auto previous = pending.value(key).lock()) {
+                auto expected = RequestStatus::Pending;
+                previous->compare_exchange_strong(expected, RequestStatus::Cancelled);
+            }
+            pending.insert(key, state);
+            if (pending.size() > 64) {
+                for (auto it = pending.begin(); it != pending.end(); )
+                    if (it.value().expired()) it = pending.erase(it);
+                    else ++it;
+            }
+        }
+        return state;
+    }
     explicit CaptureWorker(QObject* parent) : QObject(parent) {
         // 使用单条捕获队列复用 WGC/D3D 流，避免争抢 GPU 回读带宽。
         pool.setMaxThreadCount(1);
@@ -906,6 +925,7 @@ public:
     }
     QThreadPool pool;
 private:
+    QHash<QPair<QObject*, WId>, std::weak_ptr<RequestState>> pending;
     QTimer idleCleanup;
     QElapsedTimer lastRequest;
 };
@@ -918,7 +938,7 @@ QPointer<CaptureWorker>& captureWorkerInstance()
 }
 
 void DesktopCapture::request(const QRect& area, qreal pixelScale, WId target, QObject* context,
-                             std::function<void(Frame)> completed, int priority)
+                             std::function<void(Frame)> completed, int priority, bool latestOnly)
 {
     auto& worker = captureWorkerInstance();
     if (!worker)
@@ -930,12 +950,23 @@ void DesktopCapture::request(const QRect& area, qreal pixelScale, WId target, QO
                      qMax(1, qRound(area.height() * pixelScale)));
     const auto queued = capturePlan(parts, size, target, NativeWindows::cachedStack());
     const QPointer<QObject> guard(context);
+    const auto state = owner->prepare(context, target, latestOnly);
+    const auto receiverDestroyed = QObject::connect(context, &QObject::destroyed, owner, [state]() {
+        auto expected = CaptureWorker::RequestStatus::Pending;
+        state->compare_exchange_strong(expected, CaptureWorker::RequestStatus::Cancelled);
+    });
     owner->pool.start(QRunnable::create([owner, parts, size, area, pixelScale, target, queued, guard,
-                                       completed = std::move(completed)]() {
+                                       state, receiverDestroyed, completed = std::move(completed)]() {
         Frame frame;
-        try { frame = grabFrame(parts, size, area, pixelScale, target, queued, false); }
+        auto expected = CaptureWorker::RequestStatus::Pending;
+        try {
+            // 工作线程只处理仍有用途的排队任务，已经运行的捕获不被中途打断。
+            if (state->compare_exchange_strong(expected, CaptureWorker::RequestStatus::Running))
+                frame = grabFrame(parts, size, area, pixelScale, target, queued, false);
+        }
         catch (...) { logCaptureFailure("worker-grab", target); } // 失败时也必须释放调用方的在途请求计数。
-        QMetaObject::invokeMethod(owner, [guard, completed, frame = std::move(frame)]() mutable {
+        QMetaObject::invokeMethod(owner, [guard, receiverDestroyed, completed, frame = std::move(frame)]() mutable {
+            QObject::disconnect(receiverDestroyed);
             if (guard) {
                 validate(frame);
                 completed(std::move(frame));
@@ -1018,14 +1049,16 @@ QImage DesktopCapture::Cache::merge(Frame frame, const std::function<QImage()>& 
         const QImage previous = image;
         const QRect previousArea = area;
         const bool sameScene = scene == frame.scene;
-        const QImage base = fallback();
-        image = base.isNull() ? QImage() : base.scaled(frame.image.size(), Qt::IgnoreAspectRatio,
-                                                       Qt::SmoothTransformation).convertToFormat(QImage::Format_RGB32);
+        // 完整有效的新帧会覆盖全部像素，直接共享，省去随后立即被丢弃的壁纸分配与填充。
+        const bool complete = frame.valid == QRegion(frame.image.rect());
+        const QImage base = complete ? frame.image : fallback();
+        image = complete ? frame.image : (base.isNull() ? QImage() : base.scaled(frame.image.size(), Qt::IgnoreAspectRatio,
+                                                       Qt::SmoothTransformation).convertToFormat(QImage::Format_RGB32));
         if (image.isNull()) {
             image = QImage(frame.image.size(), QImage::Format_RGB32);
             image.fill(Qt::black);
         }
-        if (sameScene && !previous.isNull() && previousArea.intersects(frame.area)) {
+        if (!complete && sameScene && !previous.isNull() && previousArea.intersects(frame.area)) {
             const QRect overlap = previousArea.intersected(frame.area);
             const qreal oldX = previous.width() / qreal(previousArea.width());
             const qreal oldY = previous.height() / qreal(previousArea.height());

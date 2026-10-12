@@ -127,7 +127,7 @@ private:
     void releaseFullscreenQuad(QOpenGLShaderProgram* program);
     void drawFullscreenQuad(QOpenGLShaderProgram *prog);
     QOpenGLShaderProgram* blurProgram(int sampleCount);
-    void createFBOs(int w, int h);
+    bool createFBOs(int w, int h);
     void destroyFBOs();
     void loadBackgroundTexture();
     void renderBackgroundToFbo();
@@ -152,6 +152,7 @@ private:
     QOpenGLBuffer m_quadVbo;
     bool m_quadInitialized;
     bool m_gpuReady = false;
+    bool m_fboRetryQueued = false;
     quint64 m_frameRevision = 0;
     QImage m_surfaceSnapshot;
     quint64 m_snapshotRevision = 0;

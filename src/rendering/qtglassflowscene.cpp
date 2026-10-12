@@ -561,6 +561,10 @@ void QtGlassFlowScene::resizeGL(int w, int h)
 void QtGlassFlowScene::showEvent(QShowEvent *event)
 {
     QOpenGLWidget::showEvent(event);
+    // 重新显示后从 CPU 背景重建缓存，避免沿用驱动在窗口重组期间丢弃的纹理内容。
+    m_bgDirty = !m_bgImage.isNull();
+    m_blurCacheDirty = true;
+    update();
     // 窗口重新显示时恢复所需刷新节奏，静态组件继续按需重绘。
     syncTimerCadence();
 }
@@ -572,8 +576,12 @@ void QtGlassFlowScene::hideEvent(QHideEvent *event)
     QOpenGLWidget::hideEvent(event);
 }
 
-void QtGlassFlowScene::createFBOs(int w, int h)
+bool QtGlassFlowScene::createFBOs(int w, int h)
 {
+    const QSize size(w, h);
+    if (m_sceneFbo && m_blurPingFbo && m_sceneFbo->isValid() && m_blurPingFbo->isValid()
+        && m_sceneFbo->size() == size && m_blurPingFbo->size() == size)
+        return true;
     destroyFBOs();
     QOpenGLFramebufferObjectFormat format;
     format.setAttachment(QOpenGLFramebufferObject::NoAttachment);
@@ -584,6 +592,19 @@ void QtGlassFlowScene::createFBOs(int w, int h)
         .arg(quintptr(this), 0, 16).arg(w).arg(h).arg(m_sceneFbo->handle())
         .arg(m_blurPingFbo->handle())
         .arg(m_sceneFbo->isValid()).arg(m_blurPingFbo->isValid()));
+    if (!m_sceneFbo->isValid() || !m_blurPingFbo->isValid()) {
+        destroyFBOs();
+        m_blurCacheDirty = true;
+        // 瞬时分配失败后自动重试，合并后备定时器，避免静态组件永久停留在纯色帧。
+        if (!m_fboRetryQueued) {
+            m_fboRetryQueued = true;
+            QTimer::singleShot(1000, this, [this]() {
+                m_fboRetryQueued = false;
+                if (isVisible()) update();
+            });
+        }
+        return false;
+    }
     const auto setLinear = [this](QOpenGLFramebufferObject *fbo) {
         glBindTexture(GL_TEXTURE_2D, fbo->texture());
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -596,6 +617,7 @@ void QtGlassFlowScene::createFBOs(int w, int h)
     setLinear(m_blurPingFbo);
     m_blurCacheDirty = true;
     reportGlErrors("fbo-create");
+    return true;
 }
 
 void QtGlassFlowScene::destroyFBOs()
@@ -917,11 +939,9 @@ void QtGlassFlowScene::paintGL()
     const int nativePixelHeight = qMax(1, qRound(height() * dpr));
     const int pixelWidth = qMax(1, qRound(nativePixelWidth * m_renderScale));
     const int pixelHeight = qMax(1, qRound(nativePixelHeight * m_renderScale));
-    if (m_gpuReady && (!m_sceneFbo || m_sceneFbo->width() != pixelWidth
-                       || m_sceneFbo->height() != pixelHeight))
-        createFBOs(pixelWidth, pixelHeight);
+    const bool targetsReady = m_gpuReady && createFBOs(pixelWidth, pixelHeight);
 
-    if (m_glassRenderingEnabled && m_gpuReady) {
+    if (m_glassRenderingEnabled && targetsReady) {
         if (m_bgDirty)
             loadBackgroundTexture();
         updateConnections();
@@ -938,7 +958,7 @@ void QtGlassFlowScene::paintGL()
     glDisable(GL_SCISSOR_TEST);
     glClearColor(0, 0, 0, 0);
     glClear(GL_COLOR_BUFFER_BIT);
-    if (m_glassRenderingEnabled && m_gpuReady) {
+    if (m_glassRenderingEnabled && targetsReady) {
         for (int i = 0; i < m_objects.size(); ++i)
             renderGlassObject(i);
     }

@@ -63,6 +63,7 @@
 #include <QMenu>
 #include <QtTest>
 #include <algorithm>
+#include <vector>
 #include <atomic>
 #include <memory>
 #include <thread>
@@ -5333,6 +5334,160 @@ private slots:
         const QImage actual = glass.surfaceSnapshot();
         glass.doneCurrent();
         QCOMPARE(actual, expected);
+    }
+
+    void firstShowSeedsEveryGlassBackdrop() {
+        const QPoint origin = QGuiApplication::primaryScreen()->availableGeometry().topLeft();
+        std::vector<std::unique_ptr<TestGlass>> windows;
+        for (float quality : {.6f, .8f, 1.f, 1.25f, 1.5f}) {
+            auto glass = std::make_unique<TestGlass>();
+            glass->setRenderScale(quality);
+            glass->setLiveBackdropEnabled(true, false);
+            glass->move(origin + QPoint(30 + int(windows.size()) * 205, 40));
+            glass->show();
+            // 不运行事件循环，模拟其他组件仍在初始化、异步捕获尚未返回的启动阶段。
+            QVERIFY(!glass->m_bgImage.isNull());
+            QCOMPARE(glass->m_bgImage.size(), QSize(qRound(glass->width() * glass->devicePixelRatioF() * quality),
+                                                   qRound(glass->height() * glass->devicePixelRatioF() * quality)));
+            windows.push_back(std::move(glass));
+        }
+        for (const auto& glass : windows) {
+            QVERIFY(QTest::qWaitForWindowExposed(glass.get()));
+            QTRY_VERIFY(glass->frameRevision() > 0);
+            QVERIFY(glass->m_bgTexture != 0);
+            QVERIFY(glass->m_sceneFbo && glass->m_sceneFbo->isValid());
+            QVERIFY(glass->m_blurPingFbo && glass->m_blurPingFbo->isValid());
+        }
+    }
+
+    void sceneRepairsMissingBlurTargetAndReusesValidTargets() {
+        TestGlass glass;
+        glass.setDesktopCaptureEnabled(false);
+        QImage background(200, 140, QImage::Format_RGB32);
+        for (int y = 0; y < background.height(); ++y)
+            for (int x = 0; x < background.width(); ++x)
+                background.setPixel(x, y, qRgb((x * 7 + y) % 256, (y * 3) % 256, (x + y * 5) % 256));
+        glass.setBackgroundImage(background);
+        glass.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&glass));
+        const QImage expected = glass.grabFramebuffer();
+        glass.makeCurrent();
+        const GLuint sceneTexture = glass.m_sceneFbo->texture();
+        const GLuint pingTexture = glass.m_blurPingFbo->texture();
+        glass.m_blurCacheDirty = false;
+        glass.createFBOs(glass.m_sceneFbo->width(), glass.m_sceneFbo->height());
+        QVERIFY(!glass.m_blurCacheDirty);
+        QCOMPARE(glass.m_sceneFbo->texture(), sceneTexture);
+        QCOMPARE(glass.m_blurPingFbo->texture(), pingTexture);
+        delete glass.m_blurPingFbo;
+        glass.m_blurPingFbo = nullptr;
+        glass.m_blurCacheDirty = true;
+        glass.paintGL();
+        QVERIFY(glass.m_blurPingFbo && glass.m_blurPingFbo->isValid());
+        glass.doneCurrent();
+        QCOMPARE(glass.grabFramebuffer(), expected);
+    }
+
+    void completeCaptureFramesAvoidFallbackAllocation() {
+        DesktopCapture::Cache cache;
+        QImage source(640, 400, QImage::Format_RGB32);
+        source.fill(QColor(42, 78, 110));
+        int fallbacks = 0;
+        QList<double> durations;
+        for (int i = 0; i < 58; ++i) {
+            DesktopCapture::Frame frame;
+            frame.image = source;
+            frame.valid = QRegion(source.rect());
+            frame.area = QRect(QPoint(100, 100), source.size());
+            frame.scene = i + 1;
+            frame.validated = true;
+            QElapsedTimer timer;
+            timer.start();
+            const QImage result = cache.merge(std::move(frame), [&]() {
+                ++fallbacks;
+                QImage wallpaper(source.size(), QImage::Format_RGB32);
+                wallpaper.fill(Qt::black);
+                return wallpaper;
+            });
+            if (i >= 10) durations.append(timer.nsecsElapsed() / 1e6);
+            QCOMPARE(result, source);
+            QCOMPARE(result.cacheKey(), source.cacheKey());
+        }
+        std::sort(durations.begin(), durations.end());
+        qInfo() << "Complete capture merge median_ms" << durations[durations.size() / 2]
+                << "p95_ms" << durations[qFloor(durations.size() * .95)] << "fallbacks" << fallbacks;
+        QCOMPARE(fallbacks, 0);
+    }
+
+    void duplicateNativeRegistrationDoesNotDiscardBackdrop() {
+        TestGlass glass;
+        glass.setDesktopCaptureEnabled(false);
+        glass.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&glass));
+        QTest::qWait(50);
+        const quint64 generation = glass.m_captureGeneration;
+        QEvent change(QEvent::WinIdChange);
+        QApplication::sendEvent(&glass, &change);
+        QTest::qWait(50);
+        QCOMPARE(glass.m_captureGeneration, generation);
+    }
+
+    void queuedBackdropRequestsCoalesceWithoutLosingCompletions() {
+        ColorWindow background;
+        background.setGeometry(QRect(QGuiApplication::primaryScreen()->availableGeometry().topLeft()
+                                     + QPoint(30, 30), QSize(800, 600)));
+        background.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&background));
+        QTest::qWait(150);
+        QObject receiver;
+        int completed = 0, skipped = 0;
+        bool lastValid = false;
+        QElapsedTimer timer;
+        timer.start();
+        for (int i = 0; i < 100; ++i) {
+            DesktopCapture::request(background.geometry(), background.devicePixelRatioF(), 0, &receiver,
+                [&, i](DesktopCapture::Frame frame) {
+                    ++completed;
+                    if (frame.image.isNull()) ++skipped;
+                    if (i == 99) lastValid = !frame.image.isNull();
+                }, 0, true);
+        }
+        QTRY_COMPARE_WITH_TIMEOUT(completed, 100, 5000);
+        QVERIFY(lastValid);
+        QVERIFY(skipped > 0);
+        qInfo() << "Coalesced capture requests" << skipped << "/100; completion_ms" << timer.elapsed();
+    }
+
+    void partialCaptureStillPreservesFallbackAndCoverage() {
+        DesktopCapture::Cache cache;
+        QImage source(80, 40, QImage::Format_RGB32);
+        source.fill(Qt::red);
+        QImage wallpaper(source.size(), source.format());
+        wallpaper.fill(Qt::blue);
+        int fallbacks = 0;
+        const auto frame = [&](quint64 scene, const QRegion& valid) {
+            DesktopCapture::Frame result;
+            result.image = source;
+            result.valid = valid;
+            result.area = source.rect();
+            result.scene = scene;
+            result.validated = true;
+            return result;
+        };
+        const auto fallback = [&]() { ++fallbacks; return wallpaper; };
+        const QImage first = cache.merge(frame(1, QRegion(QRect(0, 0, 40, 40))), fallback);
+        QCOMPARE(first.pixelColor(20, 20), QColor(Qt::red));
+        QCOMPARE(first.pixelColor(60, 20), QColor(Qt::blue));
+        const QImage protectedFrame = cache.merge(frame(1, QRegion(source.rect())), fallback);
+        QCOMPARE(protectedFrame, first);
+        QTest::qWait(130);
+        QCOMPARE(cache.merge(frame(1, QRegion(source.rect())), fallback), source);
+        QCOMPARE(fallbacks, 1);
+        // 下层场景改变后，缺失像素必须重新由壁纸补齐，不能沿用旧的外部窗口。
+        const QImage changed = cache.merge(frame(2, QRegion(QRect(40, 0, 40, 40))), fallback);
+        QCOMPARE(changed.pixelColor(20, 20), QColor(Qt::blue));
+        QCOMPARE(changed.pixelColor(60, 20), QColor(Qt::red));
+        QCOMPARE(fallbacks, 2);
     }
 
     void popupRecompositionPreservesMultipleGlassWindows() {
