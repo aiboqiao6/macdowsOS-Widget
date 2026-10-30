@@ -70,6 +70,7 @@ public:
     static int globalFontSmoothing();
     static void applyFontSmoothing(QFont& font);
     static void setGlobalDarkMode(bool enabled);
+    static void setGlobalImageAntialiasing(bool enabled);
     static void shutdown();
 
 protected:
@@ -141,7 +142,8 @@ private:
                            int weatherCode = -1) const;
     void arrangeGroup();
     void syncGroupSettings(qreal scale, bool mouseThrough, bool lowPower,
-                           bool liveBackdrop, qreal renderQuality, int fontSmoothing);
+                           bool liveBackdrop, qreal renderQuality, int fontSmoothing,
+                           bool imageAntialiasing = true);
     void moveToGroupPosition();
     void showWidgetLibrary();
     void applyCustomContent();

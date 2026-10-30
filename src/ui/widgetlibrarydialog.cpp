@@ -1,3 +1,4 @@
+#include "ui/textcontrols.h"
 #include "ui/widgetlibrarydialog.h"
 #include "widgets/desktopwidget.h"
 #include "widgets/widgetgeometry.h"
@@ -194,10 +195,10 @@ public:
         }
         const QSize previewSize = size();
         const qreal dpr = devicePixelRatioF();
-        const QString key = QStringLiteral("%1:%2:%3x%4:%5:%6:%7")
+        const QString key = QStringLiteral("%1:%2:%3x%4:%5:%6:%7:%8")
             .arg(m_cardKind).arg(m_cardVariant).arg(previewSize.width()).arg(previewSize.height())
             .arg(dpr, 0, 'g', 12).arg(DesktopWidget::globalFontSmoothing())
-            .arg(m_owner->darkModeEnabled());
+            .arg(m_owner->darkModeEnabled()).arg(m_owner->imageAntialiasingEnabled());
         if (const auto* cached = previewCache().object(key)) {
             m_preview = *cached;
         } else {
@@ -223,10 +224,11 @@ protected:
     void paintEvent(QPaintEvent*) override
     {
         QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing);
+        GraphicsQuality::Scope imageQuality(m_owner->imageAntialiasingEnabled());
+        painter.setRenderHint(QPainter::Antialiasing, GraphicsQuality::enabled());
         painter.setRenderHint(QPainter::TextAntialiasing,
                         DesktopWidget::globalFontSmoothing() > 0);
-        painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, GraphicsQuality::enabled());
         if (!m_custom.id.isEmpty()) {
             paintCustomPreview(painter);
             return;
@@ -329,6 +331,10 @@ private:
         // 自定义卡片展示名称、创作模式和尺寸，图库不启动脚本或网络请求。
         painter.scale(m_scale, m_scale);
         const QRectF card(0, 0, width() / m_scale, height() / m_scale);
+        const auto drawText = [&](const QRectF& area, int flags, const QString& text) {
+            // 自定义预览也经过统一字形入口，换行和裁剪沿用全局文字样式。
+            style()->drawItemText(&painter, area.toAlignedRect(), flags, palette(), true, text);
+        };
         const QColor foreground(m_custom.foreground);
         painter.setPen(QPen(QColor(255, 255, 255, 70), 1));
         painter.setBrush(QColor(m_custom.background));
@@ -341,19 +347,19 @@ private:
         font.setBold(true);
         painter.setFont(font);
         painter.setPen(QColor(m_custom.background));
-        painter.drawText(QRectF(14, 13, 31, 25), Qt::AlignCenter,
+        drawText(QRectF(14, 13, 31, 25), Qt::AlignCenter,
                          m_custom.mode == QStringLiteral("html") ? QStringLiteral("</>") : QStringLiteral("Aa"));
         font.setPixelSize(14);
         painter.setFont(font);
         painter.setPen(foreground);
-        painter.drawText(QRectF(14, 47, card.width() - 28, 21), Qt::AlignLeft | Qt::AlignVCenter,
+        drawText(QRectF(14, 47, card.width() - 28, 21), Qt::AlignLeft | Qt::AlignVCenter,
                          painter.fontMetrics().elidedText(m_title, Qt::ElideRight, int(card.width() - 28)));
         font.setPixelSize(10);
         font.setBold(false);
         painter.setFont(font);
         const QString size = m_cardVariant == 0 ? QStringLiteral("1 × 1")
                            : m_cardVariant == 1 ? QStringLiteral("2 × 1") : QStringLiteral("2 × 2");
-        painter.drawText(QRectF(14, 71, card.width() - 28, 17),
+        drawText(QRectF(14, 71, card.width() - 28, 17), Qt::AlignLeft | Qt::AlignVCenter,
                          (m_custom.mode == QStringLiteral("html") ? QStringLiteral("HTML") : QStringLiteral("低代码"))
                              + QStringLiteral(" · ") + size);
         if (card.height() > 180 && m_custom.mode == QStringLiteral("blocks")) {
@@ -363,13 +369,14 @@ private:
                 if (!text.isEmpty()) snippets.append(text);
                 if (snippets.size() >= 3) break;
             }
-            painter.drawText(QRectF(14, 101, card.width() - 28, card.height() - 139),
+            drawText(QRectF(14, 101, card.width() - 28, card.height() - 139),
                              Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, snippets.join(QStringLiteral("\n")));
         }
         QColor hint = foreground;
         hint.setAlpha(165);
         painter.setPen(hint);
-        painter.drawText(QRectF(14, card.height() - 28, card.width() - 28, 16), QStringLiteral("拖到桌面添加"));
+        drawText(QRectF(14, card.height() - 28, card.width() - 28, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                 QStringLiteral("拖到桌面添加"));
     }
 
     void updateTileSize()
@@ -532,7 +539,7 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     sideLayout->setContentsMargins(18, 22, 16, 18);
     sideLayout->setSpacing(5);
 
-    auto* search = new QLineEdit(sidebar);
+    auto* search = new AppText::LineEdit(sidebar);
     m_search = search;
     search->setPlaceholderText(QStringLiteral("搜索小组件"));
     search->setClearButtonEnabled(true);
@@ -572,7 +579,7 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     m_contentLayout = contentLayout;
     contentLayout->setContentsMargins(30, 23, 25, 12);
     contentLayout->setSpacing(12);
-    auto* sectionTitle = new QLabel(QStringLiteral("推荐"), content);
+    auto* sectionTitle = new AppText::Label(QStringLiteral("推荐"), content);
     m_sectionTitle = sectionTitle;
     sectionTitle->setObjectName(QStringLiteral("sectionTitle"));
     contentLayout->addWidget(sectionTitle);
@@ -588,7 +595,7 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     for (const QString& name : {QStringLiteral("电池"), QStringLiteral("天气"),
                                QStringLiteral("时钟"), QStringLiteral("词典"),
                                QStringLiteral("音乐"), QStringLiteral("倒数日"), QStringLiteral("自定义小组件")}) {
-        auto* heading = new QLabel(name, scrollHost);
+        auto* heading = new AppText::Label(name, scrollHost);
         heading->setObjectName(QStringLiteral("categoryTitle"));
         m_categoryTitles.append(heading);
     }
@@ -635,7 +642,7 @@ WidgetLibraryDialog::WidgetLibraryDialog(QWidget* parent)
     auto* footerLayout = new QHBoxLayout(footer);
     m_footerLayout = footerLayout;
     footerLayout->setContentsMargins(24, 0, 23, 0);
-    auto* footerHint = new QLabel(QStringLiteral("将小组件拖放到桌面 · 自定义组件在设置中管理"), footer);
+    auto* footerHint = new AppText::Label(QStringLiteral("将小组件拖放到桌面 · 自定义组件在设置中管理"), footer);
     footerHint->setObjectName(QStringLiteral("footerHint"));
     footerLayout->addWidget(footerHint);
     footerLayout->addStretch(1);

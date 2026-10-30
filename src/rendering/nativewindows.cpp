@@ -19,6 +19,22 @@ QElapsedTimer cacheClock;
 QMutex glassWindowsMutex;
 QSet<WId> glassWindows;
 
+#ifdef Q_OS_WIN
+bool isTransientCaptureWindow(HWND window)
+{
+    wchar_t name[128]{};
+    if (!GetClassNameW(window, name, int(std::size(name))))
+        return true;
+    const QString windowClass = QString::fromWCharArray(name);
+    return windowClass == QStringLiteral("SysShadow")
+        || windowClass == QStringLiteral("#32768")
+        || windowClass == QStringLiteral("ComboLBox")
+        || windowClass == QStringLiteral("tooltips_class32")
+        || windowClass.contains(QStringLiteral("QWindowPopup"))
+        || windowClass.contains(QStringLiteral("QWindowToolTip"));
+}
+#endif
+
 class TopologyWatcher final : public QObject {
 public:
     explicit TopologyWatcher(QObject* parent) : QObject(parent) {
@@ -114,10 +130,10 @@ NativeWindows::Stack NativeWindows::snapshot()
         const LONG_PTR style = GetWindowLongPtrW(window, GWL_EXSTYLE);
         DWORD affinity = 0;
         GetWindowDisplayAffinity(window, &affinity);
-        // 进程内注册表只排除自身背景采样，系统截图和录屏仍可正常捕获玻璃窗口。
+        // 工具窗口仍参与遮挡；是否能作为 WGC 源另行检查，避免误删其上方普通窗口的有效像素。
         const bool excluded = affinity != 0
                               || NativeWindows::isGlassWindow(reinterpret_cast<WId>(window))
-                              || !NativeWindows::isCaptureCandidate(reinterpret_cast<WId>(window));
+                              || isTransientCaptureWindow(window);
         stack.append({reinterpret_cast<WId>(window),
                       QRect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top),
                       desktop, !desktop && !(style & (WS_EX_LAYERED | WS_EX_TRANSPARENT)) && !excluded,
@@ -174,20 +190,15 @@ bool NativeWindows::isCaptureCandidate(WId id)
         return false;
     if (GetWindowLongPtrW(window, GWL_STYLE) & WS_CHILD)
         return false;
+    const LONG_PTR extendedStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
+    // WGC 拒绝未带 APPWINDOW 的工具窗口，并可能在 CreateForWindow 内部抛出异常。
+    if ((extendedStyle & WS_EX_TOOLWINDOW) && !(extendedStyle & WS_EX_APPWINDOW))
+        return false;
     DWORD affinity = 0;
     if (GetWindowDisplayAffinity(window, &affinity) && affinity != 0)
         return false;
-    wchar_t name[128]{};
-    if (!GetClassNameW(window, name, int(std::size(name))))
-        return false;
-    const QString windowClass = QString::fromWCharArray(name);
     // WGC 可能对短暂存在的弹出窗口抛出内部异常，创建捕获项前先排除这些句柄。
-    return windowClass != QStringLiteral("SysShadow")
-        && windowClass != QStringLiteral("#32768")
-        && windowClass != QStringLiteral("ComboLBox")
-        && windowClass != QStringLiteral("tooltips_class32")
-        && !windowClass.contains(QStringLiteral("QWindowPopup"))
-        && !windowClass.contains(QStringLiteral("QWindowToolTip"));
+    return !isTransientCaptureWindow(window);
 #else
     Q_UNUSED(id);
     return false;

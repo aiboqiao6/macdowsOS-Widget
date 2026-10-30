@@ -32,6 +32,8 @@ public:
                                           qreal renderScale = 1.0);
     // 弹出面板复用下层玻璃合成；输入图像必须只包含验证过的外部像素。
     static void compositeDesktopGlass(QImage& image, const QRect& area, WId target = 0);
+    // Reuse a desktop widget's wallpaper cache when a panel has no verified capture pixels yet.
+    static QImage desktopWallpaper(const QRect& area, qreal scale);
 
     void setGlassMargins(int horizontal, int vertical = -1);
     void setGlassRadius(qreal radius);

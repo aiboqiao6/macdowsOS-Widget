@@ -35,7 +35,7 @@ void paint(QPainter& painter, const QRectF& bounds, const Event& event, const QD
     const QColor secondary(235, 237, 242, 160);
     const QColor accent(255, 114, 121);
     painter.save();
-    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setRenderHint(QPainter::Antialiasing, GraphicsQuality::enabled());
     const auto text = [&](const QRectF& area, const QString& label, qreal size,
                           const QColor& ink, QFont::Weight weight = QFont::Normal,
                           Qt::Alignment alignment = Qt::AlignLeft | Qt::AlignVCenter,

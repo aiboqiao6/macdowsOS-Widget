@@ -4,6 +4,7 @@
 #include "renderdiagnostics.h"
 #include "rendering/glpixeltransfer.h"
 #include "app/appsettings.h"
+#include "rendering/graphicsquality.h"
 
 #include <QFile>
 #include <QImage>
@@ -17,6 +18,7 @@
 #include <QDebug>
 #include <QOpenGLContext>
 #include <QOpenGLExtraFunctions>
+#include <QOpenGLPaintDevice>
 #include <QSurfaceFormat>
 #include <cmath>
 
@@ -69,6 +71,7 @@ QtGlassFlowScene::QtGlassFlowScene(QWidget *parent)
 {
     AppSettings settings;
     m_darkModeEnabled = settings.value(QStringLiteral("appearance/darkMode"), false).toBool();
+    m_imageAntialiasingEnabled = settings.value(QStringLiteral("appearance/imageAntialiasing"), true).toBool();
     MaterialParameters material;
     material.opacity = settings.value(QStringLiteral("material/opacity"), material.opacity).toFloat();
     material.refraction = settings.value(QStringLiteral("material/refraction"), material.refraction).toFloat();
@@ -115,6 +118,9 @@ void QtGlassFlowScene::cleanupGL()
     destroyFBOs();
     delete m_snapshotFbo;
     m_snapshotFbo = nullptr;
+    delete m_antialiasingFbo;
+    m_antialiasingFbo = nullptr;
+    m_antialiasingUnavailable = false;
     m_surfaceSnapshot = {};
     m_frameRevision = 0;
     m_snapshotRevision = 0;
@@ -853,6 +859,7 @@ void QtGlassFlowScene::renderGlassObject(int index)
                                    qBound(0.85f, 0.65f + m_renderScale * 0.45f, 1.30f));
     m_glassShader->setUniformValue("u_opacity", m_glassOpacity);
     m_glassShader->setUniformValue("u_darkMode", m_darkModeEnabled);
+    m_glassShader->setUniformValue("u_devicePixelRatio", dpr);
 
     QVector<QVector2D> centers, halves;
     QVector<float> powers, strengths;
@@ -924,6 +931,49 @@ void QtGlassFlowScene::updateConnections()
     m_connectionsDirty = false;
 }
 
+void QtGlassFlowScene::setImageAntialiasingEnabled(bool enabled)
+{
+    if (m_imageAntialiasingEnabled == enabled)
+        return;
+    m_imageAntialiasingEnabled = enabled;
+    update();
+}
+
+bool QtGlassFlowScene::prepareAntialiasingTarget(const QSize& nativeSize)
+{
+    if (!m_imageAntialiasingEnabled) {
+        delete m_antialiasingFbo;
+        m_antialiasingFbo = nullptr;
+        return false;
+    }
+    if (m_antialiasingUnavailable)
+        return false;
+    if (m_antialiasingFbo && m_antialiasingFbo->size() == nativeSize)
+        return true;
+    delete m_antialiasingFbo;
+    m_antialiasingFbo = nullptr;
+    if (QOpenGLFramebufferObject::hasOpenGLFramebufferBlit()) {
+        GLint maximum = 0;
+        glGetIntegerv(GL_MAX_SAMPLES, &maximum);
+        for (int samples = qMin(8, maximum); samples >= 2; samples /= 2) {
+            QOpenGLFramebufferObjectFormat format;
+            format.setAttachment(QOpenGLFramebufferObject::CombinedDepthStencil);
+            format.setInternalTextureFormat(GL_RGBA8);
+            format.setSamples(samples);
+            auto* target = new QOpenGLFramebufferObject(nativeSize, format);
+            if (target->isValid() && target->format().samples() >= 2) {
+                m_antialiasingFbo = target;
+                return true;
+            }
+            delete target;
+        }
+    }
+    // 不支持多重采样的驱动保留原生绘制，后续帧不重复申请失败的目标。
+    m_antialiasingUnavailable = true;
+    RenderDiagnostics::write("render.image-aa.unavailable", QStringLiteral("MSAA unavailable"));
+    return false;
+}
+
 void QtGlassFlowScene::paintGL()
 {
     // 暂停只停止自动调度；Qt 主动请求绘制时仍须完整重建帧，避免呈现失效 FBO 内容。
@@ -952,7 +1002,12 @@ void QtGlassFlowScene::paintGL()
         }
     }
 
-    glBindFramebuffer(GL_FRAMEBUFFER, defaultFramebufferObject());
+    const QSize nativeSize(nativePixelWidth, nativePixelHeight);
+    const bool multisampled = prepareAntialiasingTarget(nativeSize);
+    glBindFramebuffer(GL_FRAMEBUFFER, multisampled ? m_antialiasingFbo->handle()
+                                                 : defaultFramebufferObject());
+    if (multisampled)
+        glEnable(GL_MULTISAMPLE);
     // 最终帧缓冲始终使用屏幕原生分辨率，仅背景和模糊缓存随画质缩放。
     glViewport(0, 0, nativePixelWidth, nativePixelHeight);
     glDisable(GL_SCISSOR_TEST);
@@ -965,14 +1020,30 @@ void QtGlassFlowScene::paintGL()
     glDisable(GL_BLEND);
     reportGlErrors("glass-paint");
 
-    m_textRenderer.begin(this, QSize(nativePixelWidth, nativePixelHeight));
-    QPainter painter(this);
-    painter.setRenderHint(QPainter::Antialiasing, true);
+    // 多重采样只增加几何覆盖率，文字仍在原生像素上生成和混合，不经过缩放。
+    QOpenGLPaintDevice device(nativeSize);
+    device.setDevicePixelRatio(dpr);
+    QPaintDevice* overlayDevice = multisampled ? static_cast<QPaintDevice*>(&device) : this;
+    m_textRenderer.begin(overlayDevice, nativeSize);
+    GraphicsQuality::Scope imageQuality(m_imageAntialiasingEnabled);
+    QPainter painter(overlayDevice);
+    painter.setRenderHint(QPainter::Antialiasing, m_imageAntialiasingEnabled);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, m_imageAntialiasingEnabled);
     painter.setRenderHint(QPainter::TextAntialiasing,
                           !(painter.font().styleStrategy() & QFont::NoAntialias));
     paintOverlay(painter);
     painter.end();
     m_textRenderer.end();
+    if (multisampled) {
+        glDisable(GL_SCISSOR_TEST);
+        auto* gl = context()->extraFunctions();
+        gl->glBindFramebuffer(GL_READ_FRAMEBUFFER, m_antialiasingFbo->handle());
+        gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, defaultFramebufferObject());
+        gl->glBlitFramebuffer(0, 0, nativePixelWidth, nativePixelHeight,
+                              0, 0, nativePixelWidth, nativePixelHeight,
+                              GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER, defaultFramebufferObject());
+    }
     reportGlErrors("overlay-paint");
     ++m_frameRevision;
     if (RenderDiagnostics::enabled() && m_diagnosticsClock.elapsed() >= 5000) {

@@ -12,7 +12,7 @@ using AppFonts::displayFont;
 void DesktopWidget::drawAnalogClock(QPainter& painter, const QRectF& rect, int hourOffset) const
 {
     painter.save();
-    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::Antialiasing, GraphicsQuality::enabled());
     const ResponsiveLayout::Metrics metrics(rect);
     const QPointF c = rect.center();
     const qreal r = qMin(rect.width(), rect.height()) * kClockDialRadiusRatio;
@@ -64,7 +64,7 @@ void DesktopWidget::drawDigitalClock(QPainter& painter, const QRectF& rect,
                                      bool transparentFace) const
 {
     painter.save();
-    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::Antialiasing, GraphicsQuality::enabled());
     const ResponsiveLayout::Metrics metrics(rect);
     const qreal faceInset = metrics.size(kClockFaceInsetRatio);
     const QRectF face = rect.adjusted(faceInset, faceInset,

@@ -1,3 +1,4 @@
+#include "ui/textcontrols.h"
 #include "ui/firstrunwizard.h"
 #include "widgets/desktopwidget.h"
 #include "app/appsettings.h"
@@ -85,7 +86,7 @@ FirstRunWizard::FirstRunWizard(QWidget* parent)
         return page;
     };
     const auto heading = [](const QString& text, QWidget* parent) {
-        auto* label = new QLabel(text, parent);
+        auto* label = new AppText::Label(text, parent);
         label->setAlignment(Qt::AlignCenter);
         label->setStyleSheet(QStringLiteral("font-size:29px; font-weight:600; color:#ffffff;"));
         return label;
@@ -104,7 +105,7 @@ FirstRunWizard::FirstRunWizard(QWidget* parent)
     auto* welcomeLayout = new QVBoxLayout(welcome);
     welcomeLayout->setContentsMargins(55, 35, 55, 35);
     welcomeLayout->addStretch(2);
-    auto* welcomeTitle = new QLabel(QStringLiteral("欢迎使用\nmacdowsOS Widget"), welcome);
+    auto* welcomeTitle = new AppText::Label(QStringLiteral("欢迎使用\nmacdowsOS Widget"), welcome);
     welcomeTitle->setObjectName(QStringLiteral("welcomeTitle"));
     welcomeTitle->setAlignment(Qt::AlignCenter);
     welcomeTitle->setStyleSheet(QStringLiteral(
@@ -122,7 +123,7 @@ FirstRunWizard::FirstRunWizard(QWidget* parent)
     scaleLayout->setContentsMargins(48, 28, 48, 28);
     scaleLayout->setSpacing(11);
     scaleLayout->addWidget(heading(QStringLiteral("选择适合的缩放"), scalePage));
-    auto* scaleDescription = new QLabel(QStringLiteral("拖动滑块，选择桌面小组件的显示大小。"), scalePage);
+    auto* scaleDescription = new AppText::Label(QStringLiteral("拖动滑块，选择桌面小组件的显示大小。"), scalePage);
     scaleDescription->setAlignment(Qt::AlignCenter);
     scaleDescription->setStyleSheet(QStringLiteral("font-size:15px; color:#d9e8f6;"));
     scaleLayout->addWidget(scaleDescription);
@@ -156,7 +157,7 @@ FirstRunWizard::FirstRunWizard(QWidget* parent)
     auto* controls = new QVBoxLayout(settingsPanel);
     controls->setContentsMargins(28, 22, 28, 22);
     controls->setSpacing(9);
-    auto* qualityLabel = new QLabel(QStringLiteral("渲染清晰度"), settingsPanel);
+    auto* qualityLabel = new AppText::Label(QStringLiteral("渲染清晰度"), settingsPanel);
     qualityLabel->setStyleSheet(QStringLiteral("font-size:17px; font-weight:600;"));
     controls->addWidget(qualityLabel);
     m_qualityBox = new QComboBox(settingsPanel);
@@ -175,7 +176,7 @@ FirstRunWizard::FirstRunWizard(QWidget* parent)
     }
     m_qualityBox->setCurrentIndex(qualityIndex);
     controls->addWidget(m_qualityBox);
-    auto* qualityHint = new QLabel(QStringLiteral("画质越高，图形资源占用也会增加。"), settingsPanel);
+    auto* qualityHint = new AppText::Label(QStringLiteral("画质越高，图形资源占用也会增加。"), settingsPanel);
     qualityHint->setStyleSheet(QStringLiteral("font-size:13px; color:#c9daeb;"));
     controls->addWidget(qualityHint);
     controls->addSpacing(12);

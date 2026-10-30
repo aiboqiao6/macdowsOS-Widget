@@ -2,15 +2,18 @@
 #include "widgets/musiccard.h"
 #include <QPainter>
 #include <QPainterPath>
+#include "rendering/responsivelayout.h"
 
 void DesktopWidget::paintOverlay(QPainter& painter)
 {
     const qreal scale = qMax<qreal>(0.1, m_widgetScale);
     painter.save();
+    GraphicsQuality::Scope imageQuality(imageAntialiasingEnabled());
     if (darkModeEnabled())
         painter.setOpacity(painter.opacity() * .90);
     painter.scale(scale, scale);
-    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::Antialiasing, GraphicsQuality::enabled());
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, GraphicsQuality::enabled());
     painter.setRenderHint(QPainter::TextAntialiasing, globalFontSmoothing() > 0);
 
     // 内容按 100% 参考坐标绘制，只缩放一次；玻璃覆盖完整窗口，避免额外内缩产生外圈。
@@ -37,7 +40,7 @@ void DesktopWidget::paintOverlay(QPainter& painter)
         QFont font(pingFangFontFamily()); font.setPixelSize(12); applyFontSmoothing(font); painter.setFont(font);
         painter.setPen(QColor(220, 230, 246));
         const QString name = m_custom.name.isEmpty() ? QStringLiteral("自定义组件") : m_custom.name;
-        painter.drawText(QRectF(16, 5, card.width() - 32, 24), Qt::AlignVCenter | Qt::AlignLeft,
+        ResponsiveLayout::drawSingleLine(painter, QRectF(16, 5, card.width() - 32, 24), Qt::AlignVCenter | Qt::AlignLeft,
             painter.fontMetrics().elidedText(name + QStringLiteral("  ···"), Qt::ElideRight, qRound(card.width() - 32)));
         break;
     }

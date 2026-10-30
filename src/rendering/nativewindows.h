@@ -32,7 +32,7 @@ int indexOf(const Stack& stack, WId id);
 void registerGlassWindow(WId id);
 void unregisterGlassWindow(WId id);
 bool isGlassWindow(WId id);
-// 创建 WGC 捕获项前检查句柄，排除临时弹窗、提示框和受保护窗口。
+// 创建 WGC 捕获项前检查句柄，排除临时弹窗、受保护窗口及未带 APPWINDOW 的工具窗口。
 bool isCaptureCandidate(WId id);
 // 检测前台系统截图覆盖层，用于临时暂停内部采样；不改变组件的系统截图可见性。
 bool isSystemCaptureActive();

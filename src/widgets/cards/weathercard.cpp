@@ -20,8 +20,8 @@ QRectF DesktopWidget::drawWeatherIcon(QPainter& painter, const QRectF& rect, boo
                                       int weatherCode) const
 {
     painter.save();
-    painter.setRenderHint(QPainter::Antialiasing, true);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    painter.setRenderHint(QPainter::Antialiasing, GraphicsQuality::enabled());
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, GraphicsQuality::enabled());
 
     // 使用随程序打包的白色天气素材，保留原始抗锯齿透明通道。
     QString iconName = weatherCode >= 0 ? QString::number(weatherCode)

@@ -385,8 +385,10 @@ private:
             m_window, winrt::guid_of<wgc::GraphicsCaptureItem>(), winrt::put_abi(m_item));
         if (FAILED(itemResult)) {
             m_item = nullptr;
-            qWarning("Windows Graphics Capture cannot create an item for HWND %p (HRESULT 0x%08lx)",
-                     static_cast<void*>(m_window), static_cast<unsigned long>(itemResult));
+            wchar_t windowClass[128]{};
+            GetClassNameW(m_window, windowClass, int(std::size(windowClass)));
+            qWarning("Windows Graphics Capture cannot create an item for HWND %p class=%ls (HRESULT 0x%08lx)",
+                     static_cast<void*>(m_window), windowClass, static_cast<unsigned long>(itemResult));
             return;
         }
         m_size = m_item.Size();
@@ -704,13 +706,20 @@ CapturedWindowImage captureWindowGraphics(HWND window, const QRect& windowBounds
 #endif
 
 TargetReconstruction reconstructTarget(QImage& image, const QVector<CapturePart>& parts,
-                                       WId target, const NativeWindows::Stack& stack)
+                                       WId target, const NativeWindows::Stack& stack,
+                                       bool fullArea = false)
 {
     TargetReconstruction result;
     const int targetIndex = target ? NativeWindows::indexOf(stack, target) : -1;
     if (targetIndex < 0 || image.isNull())
         return result;
-    const QRect targetBounds = stack.at(targetIndex).bounds;
+    QRect targetBounds = stack.at(targetIndex).bounds;
+    if (fullArea) {
+        // Moving settings windows crop at delivery time. Rebuild the entire requested
+        // desktop area from windows below the target, including the overscan margin.
+        targetBounds = {};
+        for (const auto& part : parts) targetBounds |= part.source;
+    }
     for (const CapturePart& part : parts)
         result.target += projectToCapture(targetBounds, part);
 #ifdef Q_OS_WIN
@@ -829,7 +838,7 @@ Plan capturePlan(const QVector<CapturePart>& parts, const QSize& size, WId targe
 
 DesktopCapture::Frame grabFrame(const QVector<CapturePart>& parts, const QSize& size,
                                 const QRect& area, qreal scale, WId target, const Plan& queued,
-                                bool validateOnReturn = true)
+                                bool validateOnReturn = true, bool targetMayMove = false)
 {
 #ifdef Q_OS_WIN
     pruneWindowCaptureStreams();
@@ -837,13 +846,14 @@ DesktopCapture::Frame grabFrame(const QVector<CapturePart>& parts, const QSize& 
     const NativeWindows::Stack beforeStack = NativeWindows::snapshot();
     const Plan before = capturePlan(parts, size, target, beforeStack);
     if (!queued.scene || (target ? queued.topology != before.topology : queued.scene != before.scene)
-        || queued.targetBounds != before.targetBounds)
+        || (targetMayMove ? queued.targetBounds.size() != before.targetBounds.size()
+                          : queued.targetBounds != before.targetBounds))
         return {};
     if ((queued.valid & before.valid).isEmpty()) {
         QImage blank(size, QImage::Format_RGB32);
         blank.fill(Qt::black);
         return {std::move(blank), {}, area, before.scene, target, scale, before.targetBounds,
-                false, target ? before.topology : 0};
+                false, target ? before.topology : 0, targetMayMove};
     }
     const bool targeted = target && NativeWindows::indexOf(beforeStack, target) >= 0;
     QImage image;
@@ -855,11 +865,12 @@ DesktopCapture::Frame grabFrame(const QVector<CapturePart>& parts, const QSize& 
         image = grabParts(parts, size);
     }
     const TargetReconstruction reconstructed = reconstructTarget(
-        image, parts, target, beforeStack);
+        image, parts, target, beforeStack, targetMayMove);
     // 异步结果在界面线程交付前验证窗口层级，避免重复枚举。
     const Plan after = validateOnReturn ? capturePlan(parts, size, target) : before;
     if ((targeted ? before.topology != after.topology : before.scene != after.scene)
-        || before.targetBounds != after.targetBounds || image.isNull())
+        || (targetMayMove ? before.targetBounds.size() != after.targetBounds.size()
+                          : before.targetBounds != after.targetBounds) || image.isNull())
         return {};
     const QRegion stable = queued.valid & before.valid & after.valid;
     const QRegion valid = targeted
@@ -867,7 +878,7 @@ DesktopCapture::Frame grabFrame(const QVector<CapturePart>& parts, const QSize& 
         : ((stable - reconstructed.target) | (reconstructed.valid & stable));
     // 缓存布局仍需比较几何位置，新增露出区域应由壁纸重建，不能沿用窗口残影。
     return {std::move(image), valid, area, before.scene, target, scale, before.targetBounds,
-            false, targeted ? before.topology : 0};
+            false, targeted ? before.topology : 0, targetMayMove};
 }
 
 class CaptureWorker final : public QObject {
@@ -938,7 +949,8 @@ QPointer<CaptureWorker>& captureWorkerInstance()
 }
 
 void DesktopCapture::request(const QRect& area, qreal pixelScale, WId target, QObject* context,
-                             std::function<void(Frame)> completed, int priority, bool latestOnly)
+                             std::function<void(Frame)> completed, int priority, bool latestOnly,
+                             bool targetMayMove)
 {
     auto& worker = captureWorkerInstance();
     if (!worker)
@@ -956,13 +968,13 @@ void DesktopCapture::request(const QRect& area, qreal pixelScale, WId target, QO
         state->compare_exchange_strong(expected, CaptureWorker::RequestStatus::Cancelled);
     });
     owner->pool.start(QRunnable::create([owner, parts, size, area, pixelScale, target, queued, guard,
-                                       state, receiverDestroyed, completed = std::move(completed)]() {
+                                       state, receiverDestroyed, targetMayMove, completed = std::move(completed)]() {
         Frame frame;
         auto expected = CaptureWorker::RequestStatus::Pending;
         try {
             // 工作线程只处理仍有用途的排队任务，已经运行的捕获不被中途打断。
             if (state->compare_exchange_strong(expected, CaptureWorker::RequestStatus::Running))
-                frame = grabFrame(parts, size, area, pixelScale, target, queued, false);
+                frame = grabFrame(parts, size, area, pixelScale, target, queued, false, targetMayMove);
         }
         catch (...) { logCaptureFailure("worker-grab", target); } // 失败时也必须释放调用方的在途请求计数。
         QMetaObject::invokeMethod(owner, [guard, receiverDestroyed, completed, frame = std::move(frame)]() mutable {
@@ -1012,7 +1024,8 @@ bool DesktopCapture::validate(Frame& frame)
         return false;
     const Plan current = capturePlan(captureParts(frame.area, frame.scale), frame.image.size(), frame.target);
     if ((frame.topology ? current.topology != frame.topology : current.scene != frame.scene)
-        || current.targetBounds != frame.targetBounds) {
+        || (frame.targetMayMove ? current.targetBounds.size() != frame.targetBounds.size()
+                               : current.targetBounds != frame.targetBounds)) {
         frame = {};
         return false;
     }

@@ -16,7 +16,7 @@ class WidgetRegression;
 namespace ClearTypeText {
 void setEnabled(bool enabled);
 bool enabled();
-// 公开掩码生成供回归测试验证原生分辨率和 RGB 子像素覆盖率。
+// macOS 风格单通道面积覆盖率；Qt 仅负责整形和提供矢量轮廓。
 QImage coverage(const QFont& font, const QString& text, QPoint* offset = nullptr);
 bool draw(QPainter& painter, const QPointF& baseline, const QString& text);
 // 普通控件与 GL 共用字形缓存，统计用于验证控件确实经过统一入口。
@@ -46,7 +46,6 @@ private:
     int m_rectangleLocation = -1;
     int m_maskTextureLocation = -1;
     int m_inkLocation = -1;
-    int m_channelLocation = -1;
     QPaintDevice* m_device = nullptr;
     QSize m_nativeSize;
 };

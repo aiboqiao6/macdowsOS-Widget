@@ -61,8 +61,6 @@ void DesktopWidget::setupTrayIcon()
         if (!path.isEmpty())
             QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
     });
-    auto* aboutAction = menu->addAction(QStringLiteral("关于 macdowsOS Widget"));
-    connect(aboutAction, &QAction::triggered, this, &DesktopWidget::showAboutDialog);
     menu->addSeparator();
     auto* quitAction = menu->addAction(QStringLiteral("退出"));
     connect(quitAction, &QAction::triggered, qApp, []() {

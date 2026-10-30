@@ -1,5 +1,9 @@
+#include "ui/textcontrols.h"
 #include "widgets/desktopwidget.h"
 #include "ui/scaleselector.h"
+#include "ui/settingsdialog.h"
+#include "ui/settingsappearance.h"
+#include "ui/widgetlibrarydialog.h"
 #include "app/appsettings.h"
 #include "config.h"
 #include <QAction>
@@ -10,60 +14,33 @@
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QDir>
-#include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
-#include <QMessageBox>
-#include <QPointer>
 #include <QPushButton>
 #include <QSettings>
 #include <QScreen>
-#include <QScrollArea>
 #include <QSignalBlocker>
+#include <QSlider>
 #include <QSpinBox>
+#include <QTimer>
 #include <QVBoxLayout>
 
 void DesktopWidget::showSettingsDialog()
 {
     // 桌面卡片属于非激活桌面层，设置使用独立顶层窗口以正常接收焦点。
-    QDialog dialog;
-    dialog.setWindowTitle(QStringLiteral("macdowsOS Widget 设置"));
-    dialog.setModal(true);
-    dialog.setStyleSheet(QStringLiteral(
-        "QDialog { background:#171a21; color:#eef2fa; }"
-        "QLabel { color:#eef2fa; }"
-        "QComboBox { background:#252a35; color:#eef2fa; border:1px solid #596273; border-radius:6px; padding:5px 10px; }"
-        "QCheckBox { color:#eef2fa; spacing:8px; }"
-        "QDoubleSpinBox, QSpinBox { background:#252a35; color:#eef2fa; border:1px solid #596273; border-radius:6px; padding:5px 8px; }"
-        "QPushButton#resetMaterial, QPushButton#customWidgetEditor { background:#303746; color:#eef2fa; border:1px solid #68738a; border-radius:6px; padding:6px 12px; }"
-        "QPushButton#customWidgetEditor:hover { background:#424c60; }"
-        "QDialogButtonBox QPushButton { background:#303746; color:#eef2fa; border:1px solid #68738a; border-radius:6px; padding:6px 18px; }"
-        "QDialogButtonBox QPushButton:hover { background:#424c60; }"));
-
-    auto* layout = new QVBoxLayout(&dialog);
-    layout->setContentsMargins(24, 20, 24, 18);
-    layout->setSpacing(14);
-    auto* title = new QLabel(QStringLiteral("显示与启动"), &dialog);
-    title->setStyleSheet(QStringLiteral("font-size:18px; font-weight:600;"));
-    layout->addWidget(title);
-
-    auto* scroll = new QScrollArea(&dialog);
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setStyleSheet(QStringLiteral("QScrollArea, QWidget#settingsBody { background:#171a21; border:0; }"));
-    auto* settingsBody = new QWidget(scroll);
-    settingsBody->setObjectName(QStringLiteral("settingsBody"));
-    auto* form = new QFormLayout(settingsBody);
-    form->setLabelAlignment(Qt::AlignLeft);
-    form->setFormAlignment(Qt::AlignTop);
-    auto* customEditor = new QPushButton(QStringLiteral("打开小组件工作室…"), settingsBody);
+    SettingsDialog dialog(darkModeEnabled());
+    dialog.setInterfaceScale(m_widgetScale);
+    auto* generalGroup = dialog.addGroup(SettingsDialog::General, QStringLiteral("桌面交互"));
+    auto* appearanceGroup = dialog.addGroup(SettingsDialog::Appearance, QStringLiteral("显示"));
+    auto* materialGroup = dialog.addGroup(SettingsDialog::Material, QStringLiteral("材质参数"));
+    auto* weatherGroup = dialog.addGroup(SettingsDialog::Weather, QStringLiteral("位置"));
+    auto* customGroup = dialog.addGroup(SettingsDialog::Widgets, QStringLiteral("小组件工作室"));
+    auto* customEditor = new QPushButton(QStringLiteral("打开工作室…"), &dialog);
     customEditor->setObjectName(QStringLiteral("customWidgetEditor"));
-    form->addRow(QStringLiteral("自定义小组件"), customEditor);
-    auto* customHint = new QLabel(QStringLiteral("低代码或 HTML 创建组件，支持导入、导出。保存后会出现在添加窗口的“自定义小组件”分区。"), settingsBody);
-    customHint->setWordWrap(true);
-    customHint->setStyleSheet(QStringLiteral("color:#9da8bd;"));
-    form->addRow(customHint);
+    customEditor->setAutoDefault(false);
+    dialog.addRow(customGroup, QStringLiteral("创建你的组件"), customEditor,
+        QStringLiteral("使用低代码或 HTML 创建，支持导入和导出。保存后可在组件库中添加到桌面。"));
     connect(customEditor, &QPushButton::clicked, &dialog, [&dialog]() {
         openCustomWidgetEditor({}, &dialog);
     });
@@ -72,20 +49,41 @@ void DesktopWidget::showSettingsDialog()
     colorMode->addItem(QStringLiteral("亮色"), false);
     colorMode->addItem(QStringLiteral("暗色"), true);
     colorMode->setCurrentIndex(colorMode->findData(darkModeEnabled()));
-    form->addRow(QStringLiteral("外观模式"), colorMode);
+    dialog.addRow(appearanceGroup, QStringLiteral("外观模式"), colorMode);
+    connect(colorMode, &QComboBox::currentIndexChanged, &dialog, [&] {
+        const bool dark = colorMode->currentData().toBool();
+        setGlobalDarkMode(dark);
+        dialog.setDarkAppearance(dark);
+    });
     auto* scaleSelector = new ScaleSelector(qRound(m_widgetScale * 100), &dialog);
-    form->addRow(QStringLiteral("显示大小"), scaleSelector);
+    scaleSelector->findChild<QLabel*>(QStringLiteral("scaleValue"))->setStyleSheet(
+        QStringLiteral("font-size:20px; font-weight:600; color:#0a84ff;"));
+    auto* scaleHint = scaleSelector->findChild<QLabel*>(QStringLiteral("scalePreviewHint"));
+    scaleHint->setStyleSheet({});
+    scaleHint->setProperty("secondary", true);
+    scaleSelector->findChild<QSlider*>(QStringLiteral("scaleSlider"))->setStyleSheet(QStringLiteral(
+        "QSlider::groove:horizontal { height:5px; border:0; border-radius:2px; background:#86868b; }"
+        "QSlider::sub-page:horizontal { border:0; border-radius:2px; background:#0a84ff; }"
+        "QSlider::handle:horizontal { width:18px; margin:-7px 0; border:1px solid #b9b9bf; border-radius:9px; background:white; }"));
+    auto* scaleGroup = dialog.addGroup(SettingsDialog::Appearance, QStringLiteral("小组件大小"));
+    SettingsAppearance::margins(scaleGroup, "groupInset", "rowPadding", "groupInset", "rowPadding");
+    scaleGroup->addWidget(scaleSelector);
 
-    auto* liveBackdrop = new QCheckBox(QStringLiteral("实时渲染窗口后的内容"), &dialog);
+    auto* renderingGroup = dialog.addGroup(SettingsDialog::Appearance, QStringLiteral("渲染"));
+    auto* liveBackdrop = new QCheckBox(&dialog);
+    liveBackdrop->setObjectName(QStringLiteral("liveBackdrop"));
     liveBackdrop->setChecked(liveBackdropEnabled());
-    form->addRow(QStringLiteral("背景采样"), liveBackdrop);
+    dialog.addRow(renderingGroup, QStringLiteral("实时背景"), liveBackdrop,
+        QStringLiteral("显示组件下方的窗口内容。关闭时使用桌面壁纸。"));
 
     auto* qualityBox = new QComboBox(&dialog);
-    qualityBox->addItem(QStringLiteral("节能（60% 设备像素）"), 0.60);
-    qualityBox->addItem(QStringLiteral("均衡（80% 设备像素）"), 0.80);
-    qualityBox->addItem(QStringLiteral("原生（100% 设备像素）"), 1.00);
-    qualityBox->addItem(QStringLiteral("高质量（125% 超采样，推荐）"), 1.25);
-    qualityBox->addItem(QStringLiteral("极致（150% 超采样）"), 1.50);
+    qualityBox->setObjectName(QStringLiteral("renderQuality"));
+    qualityBox->addItem(QStringLiteral("节能 · 60%"), 0.60);
+    qualityBox->addItem(QStringLiteral("均衡 · 80%"), 0.80);
+    qualityBox->addItem(QStringLiteral("原生 · 100%"), 1.00);
+    qualityBox->addItem(QStringLiteral("高质量 · 125%（推荐）"), 1.25);
+    qualityBox->addItem(QStringLiteral("极致 · 150%"), 1.50);
+    qualityBox->setToolTip(QStringLiteral("按设备像素设置渲染比例，超过 100% 时使用超采样。"));
     int qualityIndex = 2;
     for (int i = 0; i < qualityBox->count(); ++i) {
         if (qAbs(qualityBox->itemData(i).toDouble() - qreal(renderScale())) < 0.001) {
@@ -94,33 +92,25 @@ void DesktopWidget::showSettingsDialog()
         }
     }
     qualityBox->setCurrentIndex(qualityIndex);
-    form->addRow(QStringLiteral("渲染清晰度"), qualityBox);
+    dialog.addRow(renderingGroup, QStringLiteral("渲染清晰度"), qualityBox);
 
-    auto* fontSmoothingBox = new QComboBox(&dialog);
-    fontSmoothingBox->addItem(QStringLiteral("关闭"), 0);
-    fontSmoothingBox->addItem(QStringLiteral("标准（灰阶）"), 1);
-    fontSmoothingBox->addItem(QStringLiteral("清晰（灰阶）"), 2);
-    fontSmoothingBox->addItem(QStringLiteral("最高（原生像素灰阶）"), 3);
-    fontSmoothingBox->addItem(QStringLiteral("ClearType（子像素，推荐）"), 4);
-    fontSmoothingBox->setCurrentIndex(
-        qMax(0, fontSmoothingBox->findData(globalFontSmoothing())));
-    form->addRow(QStringLiteral("字体抗锯齿"), fontSmoothingBox);
+    auto* imageAntialiasing = new QCheckBox(QStringLiteral("开启（推荐）"), &dialog);
+    imageAntialiasing->setObjectName(QStringLiteral("imageAntialiasing"));
+    imageAntialiasing->setChecked(imageAntialiasingEnabled());
+    dialog.addRow(renderingGroup, QStringLiteral("图像抗锯齿"), imageAntialiasing,
+        QStringLiteral("平滑电量圆环、设备图标、时钟指针与图片边缘。调整后立即应用到所有组件。"));
 
     const MaterialParameters originalMaterial = materialParameters();
-    auto* materialTitle = new QLabel(QStringLiteral("小组件材质"), &dialog);
-    materialTitle->setStyleSheet(QStringLiteral("font-size:16px; font-weight:600; margin-top:12px;"));
-    form->addRow(materialTitle);
     const auto addMaterialNumber = [&](const QString& name, const QString& label,
                                        double minimum, double maximum, int decimals,
                                        double step, double value) {
-        auto* number = new QDoubleSpinBox(&dialog);
+        auto* number = new AppText::DoubleSpinBox(&dialog);
         number->setObjectName(name);
         number->setRange(minimum, maximum);
         number->setDecimals(decimals);
         number->setSingleStep(step);
-        number->setKeyboardTracking(false);
         number->setValue(value);
-        form->addRow(label, number);
+        dialog.addRow(materialGroup, label, number);
         return number;
     };
     auto* materialOpacity = addMaterialNumber(QStringLiteral("materialOpacity"),
@@ -130,46 +120,50 @@ void DesktopWidget::showSettingsDialog()
         QStringLiteral("折射强度"), 0, 3, 2, 0.05, originalMaterial.refraction);
     auto* materialBlur = addMaterialNumber(QStringLiteral("materialBlurRadius"),
         QStringLiteral("模糊半径"), 0, 12, 2, 0.05, originalMaterial.blurRadius);
-    auto* materialIterations = new QSpinBox(&dialog);
+    auto* materialIterations = new AppText::SpinBox(&dialog);
     materialIterations->setObjectName(QStringLiteral("materialBlurIterations"));
     materialIterations->setRange(1, 6);
     materialIterations->setValue(originalMaterial.blurIterations);
-    materialIterations->setKeyboardTracking(false);
-    form->addRow(QStringLiteral("模糊次数"), materialIterations);
+    dialog.addRow(materialGroup, QStringLiteral("模糊次数"), materialIterations);
     auto* materialNoise = addMaterialNumber(QStringLiteral("materialNoise"),
         QStringLiteral("颗粒强度"), 0, 0.1, 3, 0.001, originalMaterial.noise);
-    auto* materialHint = new QLabel(QStringLiteral("材质调整即时预览并统一应用到玻璃表面，不影响文字不透明度。模糊半径和次数越大，渲染开销越高。"), &dialog);
-    materialHint->setWordWrap(true);
-    materialHint->setStyleSheet(QStringLiteral("color:#9da8bd;"));
-    form->addRow(materialHint);
+    auto* materialInfo = dialog.addGroup(SettingsDialog::Material);
+    dialog.addRow(materialInfo, QStringLiteral("实时应用"), nullptr,
+        QStringLiteral("调整会立即应用并自动保存。\n较高的模糊设置会增加渲染开销。"));
+    auto* materialSaveError = new AppText::Label(
+        QStringLiteral("无法保存材质设置，请检查配置目录是否可写后重试。"), &dialog);
+    materialSaveError->setObjectName(QStringLiteral("materialSaveError"));
+    materialSaveError->setWordWrap(true);
+    materialSaveError->hide();
+    materialInfo->addWidget(materialSaveError);
     auto* resetMaterial = new QPushButton(QStringLiteral("恢复默认材质"), &dialog);
     resetMaterial->setObjectName(QStringLiteral("resetMaterial"));
-    form->addRow(QString(), resetMaterial);
+    resetMaterial->setAutoDefault(false);
+    dialog.addRow(materialInfo, QStringLiteral("还原材质"), resetMaterial);
 
     const auto selectedMaterial = [=]() {
         return MaterialParameters{float(materialOpacity->value() / 100.0),
             float(materialRefraction->value()), float(materialBlur->value()),
             materialIterations->value(), float(materialNoise->value())};
     };
-    // 每个表面单独记录预览前的值；取消时也恢复设置期间新出现的表面。
-    QList<QPair<QPointer<QtGlassFlowScene>, MaterialParameters>> materialSnapshots;
-    const auto previewMaterial = [&]() {
+    const auto applyMaterial = [&]() {
         const MaterialParameters parameters = selectedMaterial();
+        AppSettings settings;
+        settings.setValue(QStringLiteral("material/opacity"), parameters.opacity);
+        settings.setValue(QStringLiteral("material/refraction"), parameters.refraction);
+        settings.setValue(QStringLiteral("material/blurRadius"), parameters.blurRadius);
+        settings.setValue(QStringLiteral("material/blurIterations"), parameters.blurIterations);
+        settings.setValue(QStringLiteral("material/noise"), parameters.noise);
+        materialSaveError->setVisible(!settings.sync());
         for (QWidget* widget : QApplication::allWidgets()) {
             auto* surface = qobject_cast<QtGlassFlowScene*>(widget);
-            if (!surface)
-                continue;
-            bool recorded = false;
-            for (const auto& snapshot : materialSnapshots)
-                recorded = recorded || snapshot.first == surface;
-            if (!recorded)
-                materialSnapshots.append({surface, surface->materialParameters()});
-            surface->setMaterialParameters(parameters);
+            if (surface)
+                surface->setMaterialParameters(parameters);
         }
     };
     for (QDoubleSpinBox* number : {materialOpacity, materialRefraction, materialBlur, materialNoise})
-        connect(number, &QDoubleSpinBox::valueChanged, &dialog, previewMaterial);
-    connect(materialIterations, &QSpinBox::valueChanged, &dialog, previewMaterial);
+        connect(number, &QDoubleSpinBox::valueChanged, &dialog, applyMaterial);
+    connect(materialIterations, &QSpinBox::valueChanged, &dialog, applyMaterial);
     connect(resetMaterial, &QPushButton::clicked, &dialog, [&]() {
         const MaterialParameters defaults;
         const QSignalBlocker opacityBlock(materialOpacity), refractionBlock(materialRefraction),
@@ -179,93 +173,123 @@ void DesktopWidget::showSettingsDialog()
         materialBlur->setValue(defaults.blurRadius);
         materialIterations->setValue(defaults.blurIterations);
         materialNoise->setValue(defaults.noise);
-        previewMaterial();
+        applyMaterial();
     });
-    const auto restoreMaterial = [&]() {
-        for (const auto& snapshot : materialSnapshots)
-            if (snapshot.first)
-                snapshot.first->setMaterialParameters(snapshot.second);
-    };
 
     auto* locationRow = new QWidget(&dialog);
     auto* locationLayout = new QHBoxLayout(locationRow);
     locationLayout->setContentsMargins(0, 0, 0, 0);
     locationLayout->setSpacing(8);
-    auto* locationEdit = new QLineEdit(
+    auto* locationEdit = new AppText::LineEdit(
         AppSettings().value(QStringLiteral("weather/location"), m_weatherLocation).toString(),
         locationRow);
     locationEdit->setReadOnly(true);
     locationEdit->setPlaceholderText(QStringLiteral("请搜索并选择区县"));
     auto* locationButton = new QPushButton(QStringLiteral("搜索区县…"), locationRow);
+    locationButton->setAutoDefault(false);
     locationLayout->addWidget(locationEdit, 1);
     locationLayout->addWidget(locationButton);
-    form->addRow(QStringLiteral("天气地区"), locationRow);
+    dialog.addRow(weatherGroup, QStringLiteral("天气地区"), locationRow);
     connect(locationButton, &QPushButton::clicked, this, [this, locationEdit]() {
         searchWeatherCity();
         locationEdit->setText(
             AppSettings().value(QStringLiteral("weather/location"), m_weatherLocation).toString());
     });
 
-    auto* mouseThrough = new QCheckBox(QStringLiteral("鼠标穿透（组件不接收点击）"), &dialog);
+    auto* mouseThrough = new QCheckBox(&dialog);
+    mouseThrough->setObjectName(QStringLiteral("mouseThrough"));
     mouseThrough->setChecked(mouseThroughEnabled());
-    form->addRow(QString(), mouseThrough);
+    dialog.addRow(generalGroup, QStringLiteral("鼠标穿透"), mouseThrough,
+        QStringLiteral("让点击穿过小组件，直接操作桌面。"));
 
-    auto* lowPower = new QCheckBox(QStringLiteral("节能刷新（仅鼠标穿透时生效，4 FPS）"), &dialog);
+    auto* lowPower = new QCheckBox(&dialog);
+    lowPower->setObjectName(QStringLiteral("lowPowerRefresh"));
     lowPower->setChecked(lowPowerRefreshEnabled());
     lowPower->setEnabled(mouseThrough->isChecked());
-    connect(mouseThrough, &QCheckBox::toggled,
-            lowPower, &QWidget::setEnabled);
-    form->addRow(QString(), lowPower);
+    dialog.addRow(generalGroup, QStringLiteral("节能刷新"), lowPower,
+        QStringLiteral("鼠标穿透开启时可用，以 4 FPS 降低后台开销。"));
 
-    auto* startup = new QCheckBox(QStringLiteral("登录 Windows 时自动启动"), &dialog);
+    auto* startupGroup = dialog.addGroup(SettingsDialog::General, QStringLiteral("启动"));
+    auto* startup = new QCheckBox(&dialog);
+    startup->setObjectName(QStringLiteral("startupEnabled"));
     startup->setChecked(isStartupEnabled());
-    form->addRow(QString(), startup);
-    scroll->setWidget(settingsBody);
-    layout->addWidget(scroll, 1);
+    dialog.addRow(startupGroup, QStringLiteral("登录时自动启动"), startup,
+        QStringLiteral("登录 Windows 后自动显示桌面小组件。"));
 
-    auto* hint = new QLabel(QStringLiteral("关闭实时背景时使用壁纸采样；开启后显示组件下方的窗口。字体始终按屏幕像素绘制；ClearType 适合 RGB 排列屏幕，旋转屏幕或 BGR 屏幕可选择灰阶模式。"), &dialog);
-    hint->setStyleSheet(QStringLiteral("color:#9da8bd;"));
-    hint->setWordWrap(true);
-    layout->addWidget(hint);
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    layout->addWidget(buttons);
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-
-    // 高 DPI 下逻辑工作区较小，滚动设置项，始终保留底部确认与取消按钮。
-    const QSize available = dialog.screen()->availableGeometry().size() - QSize(32, 32);
-    dialog.setMaximumSize(available);
-    dialog.resize(QSize(640, 740).boundedTo(available));
-
-    if (dialog.exec() == QDialog::Accepted) {
-        const MaterialParameters material = selectedMaterial();
-        AppSettings settings;
-        settings.setValue(QStringLiteral("material/opacity"), material.opacity);
-        settings.setValue(QStringLiteral("material/refraction"), material.refraction);
-        settings.setValue(QStringLiteral("material/blurRadius"), material.blurRadius);
-        settings.setValue(QStringLiteral("material/blurIterations"), material.blurIterations);
-        settings.setValue(QStringLiteral("material/noise"), material.noise);
-        if (!settings.sync()) {
-            restoreMaterial();
-            QMessageBox::warning(this, QStringLiteral("保存失败"),
-                QStringLiteral("无法保存材质设置，请检查配置目录是否可写后重试。"));
-            return;
+    // Each option updates only its affected surfaces. In particular, dragging
+    // the scale slider must not rebuild every gallery preview or toggle input.
+    QTimer scaleTimer;
+    scaleTimer.setSingleShot(true);
+    scaleTimer.setInterval(16);
+    const auto applyScaleSelection = [&] {
+        const qreal scale = scaleSelector->percent() / 100.0;
+        bool changed = false;
+        for (DesktopWidget* widget : s_instances) {
+            if (!qFuzzyCompare(widget->m_widgetScale, scale)) {
+                widget->applyScale(scale);
+                changed = true;
+            }
         }
-        previewMaterial();
-        setGlobalDarkMode(colorMode->currentData().toBool());
-        setStartupEnabled(startup->isChecked());
-        syncGroupSettings(scaleSelector->percent() / 100.0,
-                          mouseThrough->isChecked(),
-                          lowPower->isChecked() && mouseThrough->isChecked(),
-                          liveBackdrop->isChecked(),
-                          qualityBox->currentData().toDouble(),
-                          fontSmoothingBox->currentData().toInt());
+        if (changed) saveAllConfigurations();
+    };
+    connect(&scaleTimer, &QTimer::timeout, &dialog, applyScaleSelection);
+    connect(scaleSelector->slider(), &QSlider::valueChanged, &dialog, [&] {
+        if (scaleSelector->slider()->isSliderDown()) {
+            if (!scaleTimer.isActive()) scaleTimer.start();
+        } else {
+            scaleTimer.stop();
+            applyScaleSelection();
+            dialog.setInterfaceScale(scaleSelector->percent() / 100.0);
+        }
+    });
+    connect(scaleSelector->slider(), &QSlider::sliderReleased, &dialog, [&] {
+        scaleTimer.stop();
+        applyScaleSelection();
+        dialog.setInterfaceScale(scaleSelector->percent() / 100.0);
+    });
+    connect(liveBackdrop, &QCheckBox::toggled, &dialog, [=](bool enabled) {
+        AppSettings().setValue(QStringLiteral("appearance/liveBackdrop"), enabled);
+        for (DesktopWidget* widget : s_instances) {
+            widget->setLiveBackdropEnabled(enabled, false);
+            if (widget->m_library) widget->m_library->setLiveBackdropEnabled(enabled, false);
+        }
+    });
+    connect(qualityBox, &QComboBox::currentIndexChanged, &dialog, [=] {
+        const float quality = qualityBox->currentData().toFloat();
+        AppSettings().setValue(QStringLiteral("performance/renderScale"), quality);
+        for (DesktopWidget* widget : s_instances) {
+            widget->setRenderScale(quality);
+            if (widget->m_library) widget->m_library->setRenderScale(quality);
+        }
+    });
+    connect(imageAntialiasing, &QCheckBox::toggled, &dialog, &DesktopWidget::setGlobalImageAntialiasing);
+    const auto applyInteraction = [=] {
+        const bool through = mouseThrough->isChecked();
+        lowPower->setEnabled(through);
+        if (!through) {
+            const QSignalBlocker blocker(lowPower);
+            lowPower->setChecked(false);
+        }
+        const bool power = through && lowPower->isChecked();
+        for (DesktopWidget* widget : s_instances) {
+            widget->setMouseThroughEnabled(through);
+            widget->setLowPowerRefreshEnabled(power);
+        }
+    };
+    connect(mouseThrough, &QCheckBox::toggled, &dialog, applyInteraction);
+    connect(lowPower, &QCheckBox::toggled, &dialog, applyInteraction);
+    connect(startup, &QCheckBox::toggled, &dialog, [=](bool enabled) {
+        setStartupEnabled(enabled);
         if (m_startupAction) {
             QSignalBlocker blocker(m_startupAction);
-            m_startupAction->setChecked(startup->isChecked());
+            m_startupAction->setChecked(enabled);
         }
-    } else {
-        restoreMaterial();
+    });
+    dialog.exec();
+    // Closing or pressing Escape also flushes the last coalesced drag value.
+    if (scaleTimer.isActive()) {
+        scaleTimer.stop();
+        applyScaleSelection();
     }
 }
 
@@ -312,10 +336,10 @@ void DesktopWidget::showAboutDialog()
         "QDialogButtonBox QPushButton { background:#303746; color:#eef2fa; border:1px solid #68738a; border-radius:6px; padding:6px 18px; }"));
     auto* layout = new QVBoxLayout(&dialog);
     layout->setContentsMargins(28, 24, 28, 20);
-    auto* title = new QLabel(QStringLiteral("macdowsOS Widget"), &dialog);
+    auto* title = new AppText::Label(QStringLiteral("macdowsOS Widget"), &dialog);
     title->setStyleSheet(QStringLiteral("font-size:20px; font-weight:600;"));
     layout->addWidget(title);
-    auto* text = new QLabel(QStringLiteral("雾蓝回针MistBlueSt 版本 %1 版本号 %2")
+    auto* text = new AppText::Label(QStringLiteral("雾蓝回针MistBlueSt 版本 %1 版本号 %2")
         .arg(QString::fromLatin1(AppConfig::Version),
             QString::fromLatin1(AppConfig::BuildId)), &dialog);
     text->setStyleSheet(QStringLiteral("color:#aab5c8; line-height:1.4;"));

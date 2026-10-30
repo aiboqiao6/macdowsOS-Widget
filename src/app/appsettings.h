@@ -162,6 +162,7 @@ private:
             {QStringLiteral("appearance/darkMode"), false},
             {QStringLiteral("appearance/liveBackdrop"), true},
             {QStringLiteral("appearance/fontSmoothing"), 4},
+            {QStringLiteral("appearance/imageAntialiasing"), true},
             {QStringLiteral("interaction/mouseThrough"), false},
             {QStringLiteral("interaction/lowPowerRefresh"), false},
             {QStringLiteral("performance/renderScale"), 0.60},

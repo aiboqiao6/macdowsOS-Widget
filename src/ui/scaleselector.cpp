@@ -1,3 +1,4 @@
+#include "ui/textcontrols.h"
 #include "ui/scaleselector.h"
 #include "widgets/desktopwidget.h"
 #include "rendering/nativewindows.h"
@@ -135,14 +136,14 @@ private:
 
 ScaleSelector::ScaleSelector(int percent, QWidget* parent)
     : QWidget(parent), m_slider(new QSlider(Qt::Horizontal, this)),
-      m_value(new QLabel(this)), m_dimensions(new QLabel(this)),
+      m_value(new AppText::Label(this)), m_dimensions(new AppText::Label(this)),
       m_preview(new ScalePreview(this))
 {
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(10);
     auto* labels = new QHBoxLayout;
-    auto* title = new QLabel(QStringLiteral("缩放比例"), this);
+    auto* title = new AppText::Label(QStringLiteral("缩放比例"), this);
     title->setStyleSheet(QStringLiteral("font-size:16px; font-weight:600;"));
     m_value->setObjectName(QStringLiteral("scaleValue"));
     m_value->setStyleSheet(QStringLiteral("font-size:20px; font-weight:600; color:#a9dcff;"));
@@ -162,12 +163,13 @@ ScaleSelector::ScaleSelector(int percent, QWidget* parent)
     m_slider->setValue(qBound(40, percent, 200));
     layout->addWidget(m_slider);
     auto* ends = new QHBoxLayout;
-    ends->addWidget(new QLabel(QStringLiteral("更精巧"), this));
+    ends->addWidget(new AppText::Label(QStringLiteral("更精巧"), this));
     ends->addStretch();
-    ends->addWidget(new QLabel(QStringLiteral("更醒目"), this));
+    ends->addWidget(new AppText::Label(QStringLiteral("更醒目"), this));
     layout->addLayout(ends);
     layout->addWidget(m_dimensions);
-    auto* hint = new QLabel(QStringLiteral("屏幕左下角的浮动卡片为桌面实际尺寸。"), this);
+    auto* hint = new AppText::Label(QStringLiteral("屏幕左下角的浮动卡片为桌面实际尺寸。"), this);
+    hint->setObjectName(QStringLiteral("scalePreviewHint"));
     hint->setWordWrap(true);
     hint->setStyleSheet(QStringLiteral("font-size:13px; color:#c8d9e8;"));
     layout->addWidget(hint);

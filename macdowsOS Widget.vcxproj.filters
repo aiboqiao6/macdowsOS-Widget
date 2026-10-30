@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
+    <ClCompile Include="src/network/updatechecker.cpp"><Filter>src\network</Filter></ClCompile>
+    <QtMoc Include="src/network/updatechecker.h"><Filter>src\network</Filter></QtMoc>
+    <ClCompile Include="src/ui/settingsdialog.cpp"><Filter>src\ui</Filter></ClCompile>
+    <ClInclude Include="src/ui/settingsdialog.h"><Filter>src\ui</Filter></ClInclude>
     <ClCompile Include="src/widgets/customwidget.cpp"><Filter>src\widgets</Filter></ClCompile>
     <ClCompile Include="src/widgets/desktopwidget_custom.cpp"><Filter>src\widgets</Filter></ClCompile>
     <ClCompile Include="src/ui/htmlwidgetview.cpp"><Filter>src\ui</Filter></ClCompile>
@@ -55,10 +59,14 @@
     <ClCompile Include="src/widgets/countdowncard.cpp"><Filter>src\widgets</Filter></ClCompile>
     <ClCompile Include="src/widgets/countdowneditor.cpp"><Filter>src\widgets</Filter></ClCompile>
     <ClCompile Include="src/rendering/cleartypetext.cpp"><Filter>src\rendering</Filter></ClCompile>
+    <ClCompile Include="src/rendering/textpaintdevice.cpp"><Filter>src\rendering</Filter></ClCompile>
     <ClInclude Include="src/ui/scaleselector.h"><Filter>src\ui</Filter></ClInclude>
     <ClInclude Include="src/widgets/musiccard.h"><Filter>src\widgets</Filter></ClInclude>
     <ClInclude Include="src/widgets/countdowncard.h"><Filter>src\widgets</Filter></ClInclude>
     <ClInclude Include="src/rendering/cleartypetext.h"><Filter>src\rendering</Filter></ClInclude>
+    <ClInclude Include="src/rendering/textpaintdevice.h"><Filter>src\rendering</Filter></ClInclude>
+    <ClInclude Include="src/ui/textcontrols.h"><Filter>src\ui</Filter></ClInclude>
+    <ClInclude Include="src/rendering/graphicsquality.h"><Filter>src\rendering</Filter></ClInclude>
     <QtMoc Include="src/media/systemmediasession.h"><Filter>src\media</Filter></QtMoc>
     <ClCompile Include="src/widgets/desktopwidget_paint.cpp"><Filter>src\widgets</Filter></ClCompile>
     <ClCompile Include="src/widgets/desktopwidget_settings.cpp"><Filter>src\widgets</Filter></ClCompile>

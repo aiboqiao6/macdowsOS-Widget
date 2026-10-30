@@ -137,6 +137,9 @@ if exist "$(QtToolsPath)\windeployqt.exe" "$(QtToolsPath)\windeployqt.exe" --no-
     <ClCompile Include="src/ui/gridplacementoverlay.cpp" />
     <ClInclude Include="src/rendering/glpixeltransfer.h" />
     <ClInclude Include="src/rendering/liquidglassstyle.h" />
+    <ClCompile Include="src/network/updatechecker.cpp" />
+    <ClCompile Include="src/ui/settingsdialog.cpp" />
+    <ClInclude Include="src/ui/settingsdialog.h" />
     <ClCompile Include="src/network/cardrequest.cpp" />
     <ClInclude Include="src/network/cardrequest.h" />
     <ClCompile Include="src/widgets/data/dictionarydata.cpp" />
@@ -158,6 +161,7 @@ if exist "$(QtToolsPath)\windeployqt.exe" "$(QtToolsPath)\windeployqt.exe" --no-
     <ClCompile Include="src/widgets/countdowncard.cpp" />
     <ClCompile Include="src/widgets/countdowneditor.cpp" />
     <ClCompile Include="src/rendering/cleartypetext.cpp" />
+    <ClCompile Include="src/rendering/textpaintdevice.cpp" />
     <ClCompile Include="src/widgets/desktopwidget_paint.cpp" />
     <ClCompile Include="src/widgets/desktopwidget_settings.cpp" />
     <ClCompile Include="src/app/main.cpp" />
@@ -176,6 +180,9 @@ if exist "$(QtToolsPath)\windeployqt.exe" "$(QtToolsPath)\windeployqt.exe" --no-
     <ClInclude Include="src/widgets/musiccard.h" />
     <ClInclude Include="src/widgets/countdowncard.h" />
     <ClInclude Include="src/rendering/cleartypetext.h" />
+    <ClInclude Include="src/rendering/textpaintdevice.h" />
+    <ClInclude Include="src/ui/textcontrols.h" />
+    <ClInclude Include="src/rendering/graphicsquality.h" />
     <ClInclude Include="src/widgets/cardmetrics.h" />
     <ClInclude Include="src/widgets/weatherformat.h" />
     <ClInclude Include="src/config.h" />
@@ -195,6 +202,7 @@ if exist "$(QtToolsPath)\windeployqt.exe" "$(QtToolsPath)\windeployqt.exe" --no-
   </ItemGroup>
   <ItemGroup>
     <QtMoc Include="src\rendering\qtglassflowscene.h" />
+    <QtMoc Include="src/network/updatechecker.h" />
     <QtMoc Include="src/media/systemmediasession.h" />
     <QtMoc Include="src/ui/widgetlibrarydialog.h" />
   </ItemGroup>

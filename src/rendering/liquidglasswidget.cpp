@@ -197,6 +197,13 @@ void LiquidGlassWidget::compositeDesktopGlass(QImage& image, const QRect& area, 
     compositeGlassWindows(image, area, nullptr, target);
 }
 
+QImage LiquidGlassWidget::desktopWallpaper(const QRect& area, qreal scale)
+{
+    if (s_liveGlassWidgets.isEmpty() || area.isEmpty())
+        return {};
+    return s_liveGlassWidgets.first()->wallpaperBackdrop(area, scale);
+}
+
 void LiquidGlassWidget::compositeGlassWindows(QImage& image, const QRect& area,
                                               const LiquidGlassWidget* excluded, WId target)
 {

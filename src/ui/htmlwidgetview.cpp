@@ -1,3 +1,5 @@
+#include "ui/textcontrols.h"
+#include "app/fontsettings.h"
 #include "ui/htmlwidgetview.h"
 #include <QCoreApplication>
 #include <QDir>
@@ -53,7 +55,7 @@ HtmlWidgetView::HtmlWidgetView(QWidget* parent) : QWidget(parent), m_impl(std::m
     setAttribute(Qt::WA_NativeWindow);
     setFocusPolicy(Qt::StrongFocus);
     auto* layout = new QVBoxLayout(this);
-    m_impl->message = new QLabel(QStringLiteral("正在加载 HTML 引擎…"), this);
+    m_impl->message = new AppText::Label(QStringLiteral("正在加载 HTML 引擎…"), this);
     m_impl->message->setWordWrap(true);
     m_impl->message->setAlignment(Qt::AlignCenter);
     m_impl->message->setStyleSheet("color:#9fb3ce;background:#18243b;padding:16px;border-radius:12px");
@@ -121,6 +123,34 @@ void HtmlWidgetView::initialize() {
                         if (SUCCEEDED(settings.As(&extra))) extra->put_AreBrowserAcceleratorKeysEnabled(FALSE);
                     }
                     EventRegistrationToken token{};
+                    impl.web->AddWebResourceRequestedFilter(
+                        reinterpret_cast<LPCWSTR>(AppFonts::webFontUrl().utf16()),
+                        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_FONT);
+                    impl.web->add_WebResourceRequested(Callback<ICoreWebView2WebResourceRequestedEventHandler>(
+                        [view, lifetime](ICoreWebView2*, ICoreWebView2WebResourceRequestedEventArgs* args) -> HRESULT {
+                            if (!lifetime->alive.load(std::memory_order_acquire)) return S_OK;
+                            ComPtr<ICoreWebView2WebResourceRequest> request;
+                            if (FAILED(args->get_Request(&request))) return S_OK;
+                            LPWSTR uri = nullptr;
+                            request->get_Uri(&uri);
+                            const bool font = QString::fromWCharArray(uri ? uri : L"") == AppFonts::webFontUrl();
+                            CoTaskMemFree(uri);
+                            if (!font) return S_OK;
+                            ComPtr<IStream> stream;
+                            if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, &stream))) return S_OK;
+                            const QByteArray bytes = AppFonts::webFontData();
+                            if (bytes.isEmpty()) return S_OK;
+                            ULONG written = 0;
+                            if (FAILED(stream->Write(bytes.constData(), ULONG(bytes.size()), &written))
+                                || written != ULONG(bytes.size())) return S_OK;
+                            LARGE_INTEGER start{};
+                            stream->Seek(start, STREAM_SEEK_SET, nullptr);
+                            ComPtr<ICoreWebView2WebResourceResponse> response;
+                            if (SUCCEEDED(view->m_impl->environment->CreateWebResourceResponse(stream.Get(), 200, L"OK",
+                                L"Content-Type: font/ttf\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: public, max-age=31536000, immutable", &response)))
+                                args->put_Response(response.Get());
+                            return S_OK;
+                        }).Get(), &token);
                     impl.web->add_NavigationStarting(Callback<ICoreWebView2NavigationStartingEventHandler>(
                         [view, lifetime](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
                             if (!lifetime->alive.load(std::memory_order_acquire)) { args->put_Cancel(TRUE); return S_OK; }

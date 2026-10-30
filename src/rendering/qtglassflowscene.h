@@ -94,6 +94,9 @@ public:
     void setRenderScale(float scale);
     float renderScale() const { return m_renderScale; }
 
+    void setImageAntialiasingEnabled(bool enabled);
+    bool imageAntialiasingEnabled() const { return m_imageAntialiasingEnabled; }
+
     void setPowerFactor(float v);
     void setRefractionPower(float v);
     void setBlurRadius(float v);
@@ -128,6 +131,7 @@ private:
     void drawFullscreenQuad(QOpenGLShaderProgram *prog);
     QOpenGLShaderProgram* blurProgram(int sampleCount);
     bool createFBOs(int w, int h);
+    bool prepareAntialiasingTarget(const QSize& nativeSize);
     void destroyFBOs();
     void loadBackgroundTexture();
     void renderBackgroundToFbo();
@@ -158,6 +162,9 @@ private:
     quint64 m_snapshotRevision = 0;
     quint64 m_snapshotReadbacks = 0;
     QOpenGLFramebufferObject* m_snapshotFbo = nullptr;
+    QOpenGLFramebufferObject* m_antialiasingFbo = nullptr;
+    bool m_imageAntialiasingEnabled = true;
+    bool m_antialiasingUnavailable = false;
 
     GLuint m_bgTexture;
     int m_bgWidth;

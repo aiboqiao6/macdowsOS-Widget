@@ -36,6 +36,15 @@ void DesktopWidget::setGlobalDarkMode(bool enabled)
     WidgetLibraryDialog::refreshPreviews();
 }
 
+void DesktopWidget::setGlobalImageAntialiasing(bool enabled)
+{
+    AppSettings().setValue(QStringLiteral("appearance/imageAntialiasing"), enabled);
+    for (QWidget* widget : QApplication::allWidgets())
+        if (auto* surface = qobject_cast<QtGlassFlowScene*>(widget))
+            surface->setImageAntialiasingEnabled(enabled);
+    WidgetLibraryDialog::refreshPreviews();
+}
+
 QList<DesktopWidget*> DesktopWidget::s_instances;
 
 DesktopWidget::DesktopWidget(QWidget* parent, CardKind kind, bool ownsTray,
@@ -74,16 +83,18 @@ DesktopWidget::DesktopWidget(QWidget* parent, CardKind kind, bool ownsTray,
     const bool savedMouseThrough = settings.value(QStringLiteral("interaction/mouseThrough"), false).toBool();
     const bool savedLowPowerRefresh = settings.value(QStringLiteral("interaction/lowPowerRefresh"), false).toBool();
     const bool savedLiveBackdrop = settings.value(QStringLiteral("appearance/liveBackdrop"), true).toBool();
-    const int savedFontSmoothing = qBound(0,
-        settings.value(QStringLiteral("appearance/fontSmoothing"), 4).toInt(), 4);
     const qreal savedRenderQuality = qBound<qreal>(0.5,
         settings.value(QStringLiteral("performance/renderScale"), 0.60).toDouble(), 1.5);
     setRenderScale(float(savedRenderQuality));
     setMouseThroughEnabled(savedMouseThrough);
     setLowPowerRefreshEnabled(savedLowPowerRefresh);
     setLiveBackdropEnabled(savedLiveBackdrop);
-    if (savedFontSmoothing != globalFontSmoothing())
-        setGlobalFontSmoothing(savedFontSmoothing);
+    // Migrate the retired font preference, including an older saved "off" value.
+    if (globalFontSmoothing() != 4
+        || settings.value(QStringLiteral("appearance/fontSmoothing"), 4).toInt() != 4) {
+        settings.setValue(QStringLiteral("appearance/fontSmoothing"), 4);
+        setGlobalFontSmoothing(4);
+    }
     setToolTip(m_cardKind == CardKind::Battery ? QStringLiteral("电量 · 拖动移动组件")
                : (m_cardKind == CardKind::Weather ? QStringLiteral("天气 · 拖动移动组件")
                   : (m_cardKind == CardKind::Clock ? QStringLiteral("时钟 · 拖动移动组件")
@@ -175,10 +186,9 @@ DesktopWidget::DesktopWidget(QWidget* parent, CardKind kind, bool ownsTray,
         const bool darkMode = current.value(QStringLiteral("appearance/darkMode"), false).toBool();
         if (darkMode != darkModeEnabled())
             setGlobalDarkMode(darkMode);
-        const int fontSmoothing = qBound(0,
-            current.value(QStringLiteral("appearance/fontSmoothing"), 4).toInt(), 4);
-        if (fontSmoothing != globalFontSmoothing())
-            setGlobalFontSmoothing(fontSmoothing);
+        const bool imageAntialiasing = current.value(QStringLiteral("appearance/imageAntialiasing"), true).toBool();
+        if (imageAntialiasing != imageAntialiasingEnabled())
+            setGlobalImageAntialiasing(imageAntialiasing);
         const qreal renderQuality = qBound<qreal>(0.5,
             current.value(QStringLiteral("performance/renderScale"), 0.60).toDouble(), 1.5);
         if (qAbs(renderQuality - qreal(renderScale())) > 0.001)
@@ -236,14 +246,17 @@ void DesktopWidget::hideEvent(QHideEvent* event)
 }
 
 void DesktopWidget::syncGroupSettings(qreal scale, bool mouseThrough, bool lowPower,
-                                      bool liveBackdrop, qreal renderQuality, int fontSmoothing)
+                                      bool liveBackdrop, qreal renderQuality, int fontSmoothing,
+                                      bool imageAntialiasing)
 {
     AppSettings settings;
     settings.setValue(QStringLiteral("performance/renderScale"), renderQuality);
     settings.setValue(QStringLiteral("appearance/liveBackdrop"), liveBackdrop);
     settings.setValue(QStringLiteral("appearance/fontSmoothing"), fontSmoothing);
+    settings.setValue(QStringLiteral("appearance/imageAntialiasing"), imageAntialiasing);
     settings.sync();
     setGlobalFontSmoothing(fontSmoothing);
+    setGlobalImageAntialiasing(imageAntialiasing);
     // 尺寸变化尽量保留自由放置位置，仅显式重新排列时布局整个网格。
     for (DesktopWidget* widget : s_instances) {
         if (!qFuzzyCompare(widget->m_widgetScale, scale))

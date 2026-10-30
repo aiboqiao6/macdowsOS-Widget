@@ -11,6 +11,7 @@
 #include <QtMath>
 #include <memory>
 #include "rendering/cleartypetext.h"
+#include "rendering/graphicsquality.h"
 
 namespace ResponsiveLayout {
 
@@ -99,8 +100,7 @@ inline QRectF drawSingleLine(QPainter& painter, const QRectF& area,
     const bool previousTextAntialiasing = painter.testRenderHint(QPainter::TextAntialiasing);
     painter.setRenderHint(QPainter::TextAntialiasing,
         !(fittedFont.styleStrategy() & QFont::NoAntialias));
-    if (!drawHighQualityText(painter, QPointF(x, baseline), value))
-        painter.drawText(QPointF(x, baseline), value);
+    drawHighQualityText(painter, QPointF(x, baseline), value);
     painter.setRenderHint(QPainter::TextAntialiasing, previousTextAntialiasing);
     painter.setFont(originalFont);
     return glyphBounds.translated(x, baseline);
@@ -116,10 +116,7 @@ inline QRectF drawImageFitted(QPainter& painter, const QRectF& area,
     const QRectF target(area.center().x() - fitted.width() * .5,
                         area.center().y() - fitted.height() * .5,
                         fitted.width(), fitted.height());
-    painter.save();
-    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-    painter.drawImage(target, image);
-    painter.restore();
+    GraphicsQuality::drawImage(painter, target, image);
     return target;
 }
 

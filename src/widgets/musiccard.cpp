@@ -75,8 +75,8 @@ void paint(QPainter& painter, const QRectF& bounds, const MediaSnapshot& media)
     const ResponsiveLayout::Metrics m(bounds);
     const bool wide = !regions.progress.isEmpty();
     painter.save();
-    painter.setRenderHint(QPainter::Antialiasing);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform);
+    painter.setRenderHint(QPainter::Antialiasing, GraphicsQuality::enabled());
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, GraphicsQuality::enabled());
     const qreal cardRadius = m.size(LiquidGlassStyle::kCardCornerRadius / CardMetrics::kGridBaseCell);
     // 封面与卡片采用同心的大圆角，扣除边距后保持内外轮廓协调。
     const qreal artworkRadius = qMax(m.size(.04), cardRadius - m.size(.073));
@@ -96,7 +96,7 @@ void paint(QPainter& painter, const QRectF& bounds, const MediaSnapshot& media)
         const qreal side = qMin(media.artwork.width(), media.artwork.height());
         const QRectF source((media.artwork.width() - side) / 2,
                             (media.artwork.height() - side) / 2, side, side);
-        painter.drawImage(regions.artwork, media.artwork, source);
+        GraphicsQuality::drawImage(painter, regions.artwork, media.artwork, source);
     } else {
         QLinearGradient placeholder(regions.artwork.topLeft(), regions.artwork.bottomLeft());
         placeholder.setColorAt(0, QColor(255, 83, 116));

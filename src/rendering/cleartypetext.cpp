@@ -1,14 +1,23 @@
 #include "rendering/cleartypetext.h"
 #include "rendering/renderdiagnostics.h"
 #include "rendering/glpixeltransfer.h"
+#include "rendering/textpaintdevice.h"
+#include "app/fontsettings.h"
 
 #include <QFontMetricsF>
 #include <QOpenGLContext>
 #include <QOpenGLExtraFunctions>
 #include <QPainter>
+#include <QPainterPath>
+#include <QPainterPathStroker>
+#include <QGlyphRun>
+#include <QRawFont>
 #include <QRegion>
+#include <QTextLayout>
 #include <QVector2D>
 #include <QVector4D>
+#include <algorithm>
+#include <cmath>
 
 namespace ClearTypeText {
 namespace {
@@ -16,18 +25,219 @@ bool s_enabled = true;
 thread_local Renderer* s_activeRenderer = nullptr;
 thread_local quint64 s_rasterDraws = 0;
 
+const QImage& metricDevice()
+{
+    static thread_local const QImage device = [] {
+        QImage result(1, 1, QImage::Format_Grayscale8);
+        result.setDotsPerMeterX(3780); result.setDotsPerMeterY(3780); // logical 96 DPI
+        return result;
+    }();
+    return device;
+}
+
+QPainterPath textOutline(const QFont& font, const QString& text)
+{
+    // Qt 只负责字体选择、字距与复杂文字整形；轮廓覆盖率由下方扫描器计算。
+    QTextLayout layout(text, font, const_cast<QImage*>(&metricDevice()));
+    layout.beginLayout();
+    const QTextLine line = layout.createLine();
+    layout.endLayout();
+    QPainterPath outline;
+    outline.setFillRule(Qt::WindingFill);
+    if (!line.isValid())
+        return outline;
+    for (const QGlyphRun& run : layout.glyphRuns()) {
+        const QRawFont raw = run.rawFont();
+        const QByteArray weightTable = raw.fontTable("OS/2");
+        const int faceWeight = weightTable.size() >= 6
+            ? (quint8(weightTable[4]) << 8) | quint8(weightTable[5]) : raw.weight();
+        const qreal embolden = raw.pixelSize() * qMax(0, int(font.weight()) - faceWeight) / 8500.0;
+        QPainterPathStroker stroke;
+        stroke.setWidth(embolden);
+        stroke.setJoinStyle(Qt::RoundJoin);
+        const auto indexes = run.glyphIndexes();
+        const auto positions = run.positions();
+        static thread_local QCache<QString, QPainterPath> outlines(2 * 1024);
+        const QString face = raw.familyName() + QChar('|') + raw.styleName()
+            + QChar('|') + QString::number(raw.pixelSize(), 'g', 12)
+            + QChar('|') + QString::number(font.weight()) + QChar('|')
+            + QString::number(font.italic()) + QChar('|');
+        for (qsizetype i = 0; i < indexes.size(); ++i) {
+            const QString key = face + QString::number(indexes[i]);
+            QPainterPath glyph;
+            if (const auto* cached = outlines.object(key)) glyph = *cached;
+            else {
+                glyph = raw.pathForGlyph(indexes[i]);
+                if (font.italic() && raw.style() == QFont::StyleNormal) {
+                    QTransform italic;
+                    italic.shear(-.2, 0);
+                    glyph = italic.map(glyph);
+                }
+                // 字体文件只有常规字重时补足轮廓厚度，避免提取轮廓后丢失半粗体。
+                if (embolden > 0 && !glyph.isEmpty())
+                    glyph = glyph.united(stroke.createStroke(glyph));
+                const int cost = qMax(1, int((glyph.elementCount() * sizeof(QPainterPath::Element)
+                    + key.size() * sizeof(QChar) + 1023) / 1024));
+                if (cost <= outlines.maxCost()) outlines.insert(key, new QPainterPath(glyph), cost);
+            }
+            glyph.translate(positions[i] - QPointF(0, line.ascent()));
+            outline.addPath(glyph);
+        }
+    }
+    const QFontMetricsF metrics(font, &metricDevice());
+    const qreal width = line.horizontalAdvance();
+    const qreal thickness = qMax(qreal(.5), metrics.lineWidth());
+    if (font.underline()) outline.addRect(QRectF(0, metrics.underlinePos(), width, thickness));
+    if (font.overline()) outline.addRect(QRectF(0, -metrics.ascent(), width, thickness));
+    if (font.strikeOut()) outline.addRect(QRectF(0, -metrics.strikeOutPos(), width, thickness));
+    return outline;
+}
+
+QImage rasterizeOutline(const QPainterPath& outline, const QRect& bounds, bool aliased)
+{
+    constexpr int verticalSamples = 16;
+    struct Edge { qreal x, y, endY, slope; int winding; };
+    struct Crossing { qreal x; int winding; };
+    QVector<Edge> edges;
+    QTransform samples;
+    samples.scale(1, verticalSamples);
+    samples.translate(-bounds.left(), -bounds.top());
+    // 在采样网格内细分曲线；不调用系统的字形位图或 QPainter 文字栅格器。
+    for (const QPolygonF& polygon : outline.toSubpathPolygons(samples)) {
+        for (qsizetype i = 0; i < polygon.size(); ++i) {
+            QPointF from = polygon[i], to = polygon[(i + 1) % polygon.size()];
+            if (qFuzzyCompare(from.y(), to.y()))
+                continue;
+            const int winding = from.y() < to.y() ? 1 : -1;
+            if (from.y() > to.y()) std::swap(from, to);
+            edges.append({from.x(), from.y(), to.y(),
+                          (to.x() - from.x()) / (to.y() - from.y()), winding});
+        }
+    }
+    const int width = bounds.width();
+    QVector<float> row(width);
+    QVector<Crossing> crossings;
+    crossings.reserve(edges.size());
+    QImage mask(bounds.size(), QImage::Format_Grayscale8);
+    std::sort(edges.begin(), edges.end(), [](const Edge& a, const Edge& b) { return a.y < b.y; });
+    QVector<Edge> active;
+    qsizetype nextEdge = 0;
+    for (int y = 0; y < bounds.height(); ++y) {
+        std::fill(row.begin(), row.end(), 0.0f);
+        for (int sample = 0; sample < verticalSamples; ++sample) {
+            const qreal scanY = y * verticalSamples + sample + .5;
+            crossings.clear();
+            while (nextEdge < edges.size() && edges[nextEdge].y <= scanY)
+                active.append(edges[nextEdge++]);
+            active.erase(std::remove_if(active.begin(), active.end(),
+                [scanY](const Edge& edge) { return edge.endY <= scanY; }), active.end());
+            for (const Edge& edge : active)
+                crossings.append({edge.x + (scanY - edge.y) * edge.slope, edge.winding});
+            std::sort(crossings.begin(), crossings.end(),
+                [](const Crossing& a, const Crossing& b) { return a.x < b.x; });
+            int winding = 0;
+            qreal start = 0;
+            for (const Crossing& crossing : crossings) {
+                const int next = winding + crossing.winding;
+                if (winding == 0 && next != 0) start = crossing.x;
+                if (winding != 0 && next == 0) {
+                    const qreal left = qMax<qreal>(0, start);
+                    const qreal right = qMin<qreal>(width, crossing.x);
+                    for (int x = qFloor(left); x < qCeil(right); ++x) {
+                        // 横向精确积分像素交集，纵向八次采样，保留细笔画的面积。
+                        row[x] += float(qMax<qreal>(0, qMin(right, qreal(x + 1))
+                            - qMax(left, qreal(x)))) / verticalSamples;
+                    }
+                }
+                winding = next;
+            }
+        }
+        auto* pixels = mask.scanLine(y);
+        for (int x = 0; x < bounds.width(); ++x) {
+            // One area coverage for all channels, as on modern macOS. Analytic
+            // horizontal integration preserves small strokes without color halos.
+            pixels[x] = uchar(aliased ? (row[x] >= .5f ? 255 : 0)
+                                     : qBound(0, qRound(row[x] * 255), 255));
+        }
+    }
+    return mask;
+}
+
 QFont nativeFont(const QPainter& painter)
 {
     const QFont font = painter.font();
     QFont result(font);
+    result.setFamily(AppFonts::family());
     const qreal scale = painter.deviceTransform().m11();
     const qreal pixels = font.pixelSize() > 0 ? font.pixelSize()
         : font.pointSizeF() * painter.device()->logicalDpiY() / 72.0;
-    result.setPixelSize(qMax(1, qRound(pixels * scale)));
+    // Fractional sizes preserve Qt's advances and keep editor cursors aligned.
+    result.setPointSizeF(qMax(qreal(.1), pixels * scale) * 72 / 96);
     if (font.letterSpacingType() == QFont::AbsoluteSpacing)
         result.setLetterSpacing(QFont::AbsoluteSpacing, font.letterSpacing() * scale);
     result.setWordSpacing(font.wordSpacing() * scale);
     return result;
+}
+
+QImage tinted(const QImage& mask, const QColor& ink)
+{
+    QImage pixels(mask.size(), QImage::Format_ARGB32_Premultiplied);
+    for (int y = 0; y < pixels.height(); ++y) {
+        auto* row = reinterpret_cast<QRgb*>(pixels.scanLine(y));
+        const auto* samples = mask.constScanLine(y);
+        for (int x = 0; x < pixels.width(); ++x) {
+            const int alpha = qRound(samples[x] * ink.alphaF());
+            row[x] = qRgba((ink.red() * alpha + 127) / 255, (ink.green() * alpha + 127) / 255,
+                           (ink.blue() * alpha + 127) / 255, alpha);
+        }
+    }
+    return pixels;
+}
+
+bool paintTransformed(QPainter& painter, const QPointF& baseline, const QString& text)
+{
+    const QTransform transform = painter.deviceTransform();
+    if (!transform.isInvertible()) return true;
+    QFont font = painter.font();
+    font.setFamily(AppFonts::family());
+    const qreal pixels = font.pixelSize() > 0 ? font.pixelSize()
+        : font.pointSizeF() * painter.device()->logicalDpiY() / 72;
+    font.setPointSizeF(qMax(qreal(.1), pixels) * 72 / 96);
+    const QPainterPath outline = transform.map(textOutline(font, text).translated(baseline));
+    QRect bounds = outline.boundingRect().toAlignedRect().adjusted(-2, -2, 2, 2);
+    // Bound long editor lines and transformed glyphs to the visible device.
+    bounds &= transform.mapRect(QRectF(painter.window())).toAlignedRect();
+    if (painter.hasClipping())
+        bounds &= transform.mapRect(painter.clipBoundingRect()).toAlignedRect();
+    if (bounds.isEmpty()) return true;
+    // Tiles keep allocation bounded even for printing or unusually large text.
+    for (int y = bounds.top(); y <= bounds.bottom(); y += 256) {
+        for (int x = bounds.left(); x <= bounds.right(); x += 512) {
+            const QRect tile = QRect(x, y, 512, 256).intersected(bounds);
+            const QImage mask = rasterizeOutline(outline, tile, font.styleStrategy() & QFont::NoAntialias);
+            QImage pixels;
+            if (painter.pen().brush().style() == Qt::SolidPattern)
+                pixels = tinted(mask, painter.pen().color());
+            else {
+                pixels = QImage(tile.size(), QImage::Format_ARGB32_Premultiplied);
+                pixels.fill(Qt::transparent);
+                QPainter brush(&pixels);
+                brush.setTransform(transform * QTransform::fromTranslate(-tile.x(), -tile.y()));
+                brush.setBrushOrigin(painter.brushOrigin());
+                brush.fillRect(transform.inverted().mapRect(QRectF(tile)), painter.pen().brush());
+                brush.resetTransform();
+                brush.setCompositionMode(QPainter::CompositionMode_DestinationIn);
+                brush.drawImage(QPoint(), tinted(mask, Qt::white));
+            }
+            painter.save();
+            painter.setWorldTransform(transform.inverted() * painter.worldTransform());
+            painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+            painter.drawImage(tile.topLeft(), pixels);
+            painter.restore();
+        }
+    }
+    ++s_rasterDraws;
+    return true;
 }
 
 bool paintRaster(QPainter& painter, const QPointF& baseline, const QString& text)
@@ -36,76 +246,29 @@ bool paintRaster(QPainter& painter, const QPointF& baseline, const QString& text
     if (transform.type() > QTransform::TxScale || transform.m11() <= 0
         || !qFuzzyCompare(transform.m11(), transform.m22())
         || painter.pen().brush().style() != Qt::SolidPattern)
-        return false;
+        return paintTransformed(painter, baseline, text);
     QFont font = nativeFont(painter);
-    const bool rgb = enabled() && !(font.styleStrategy() & (QFont::NoAntialias | QFont::NoSubpixelAntialias));
-    if (!rgb && !(font.styleStrategy() & QFont::NoAntialias))
-        font.setStyleStrategy(static_cast<QFont::StyleStrategy>(font.styleStrategy() | QFont::NoSubpixelAntialias));
     QPoint offset;
     const QImage mask = coverage(font, text, &offset);
     if (mask.isNull())
-        return false;
+        return paintTransformed(painter, baseline, text);
     const QPointF deviceBaseline = transform.map(baseline);
     const QPoint origin(qRound(deviceBaseline.x()) + offset.x(), qRound(deviceBaseline.y()) + offset.y());
     const QColor ink = painter.pen().color();
-    const qreal opacity = ink.alphaF() * painter.opacity();
-
-    // 图库原生像素画布直接按 RGB 覆盖率混合，使用与 GL 完全相同的字形及公式。
-    auto* target = painter.device()->devType() == QInternal::Image
-        ? static_cast<QImage*>(painter.device()) : nullptr;
-    if (rgb && target && target->isDetached()
-        && (target->format() == QImage::Format_RGB32 || target->format() == QImage::Format_ARGB32_Premultiplied)
-        && painter.compositionMode() == QPainter::CompositionMode_SourceOver) {
-        const QRect destination(origin, mask.size());
-        QRegion clip(target->rect());
-        if (painter.hasClipping())
-            clip &= transform.map(painter.clipRegion());
-        clip &= destination;
-        for (const QRect& rect : clip) {
-            for (int y = rect.top(); y <= rect.bottom(); ++y) {
-                auto* pixels = reinterpret_cast<QRgb*>(target->scanLine(y));
-                const auto* coverageRow = reinterpret_cast<const QRgb*>(mask.constScanLine(y - origin.y()));
-                for (int x = rect.left(); x <= rect.right(); ++x) {
-                    const QRgb sample = coverageRow[x - origin.x()];
-                    const qreal ar = qRed(sample) / 255.0 * opacity;
-                    const qreal ag = qGreen(sample) / 255.0 * opacity;
-                    const qreal ab = qBlue(sample) / 255.0 * opacity;
-                    const qreal alpha = qMax(ar, qMax(ag, ab));
-                    const QRgb old = pixels[x];
-                    pixels[x] = qRgba(qRound(ink.red() * ar + qRed(old) * (1 - ar)),
-                                      qRound(ink.green() * ag + qGreen(old) * (1 - ag)),
-                                      qRound(ink.blue() * ab + qBlue(old) * (1 - ab)),
-                                      qRound(255 * alpha + qAlpha(old) * (1 - alpha)));
-                }
-            }
-        }
-    } else {
-        // 透明控件不能取得目标背景，复用同一字形的灰阶覆盖并由 Qt 合成。
-        const QString key = font.key() + QChar('|') + QString::number(ink.rgba(), 16) + QChar('|') + text;
-        static thread_local QCache<QString, QImage> colored(8 * 1024);
-        QImage* image = colored.object(key);
-        std::unique_ptr<QImage> oversized;
-        if (!image) {
-            QImage pixels(mask.size(), QImage::Format_ARGB32_Premultiplied);
-            for (int y = 0; y < pixels.height(); ++y) {
-                auto* row = reinterpret_cast<QRgb*>(pixels.scanLine(y));
-                const auto* samples = reinterpret_cast<const QRgb*>(mask.constScanLine(y));
-                for (int x = 0; x < pixels.width(); ++x) {
-                    const int alpha = qRound(qGray(samples[x]) * ink.alphaF());
-                    row[x] = qRgba((ink.red() * alpha + 127) / 255, (ink.green() * alpha + 127) / 255,
-                                   (ink.blue() * alpha + 127) / 255, alpha);
-                }
-            }
-            image = new QImage(std::move(pixels));
-            const int cost = qMax(1, int(image->sizeInBytes() / 1024));
-            if (cost > colored.maxCost()) oversized.reset(image);
-            else colored.insert(key, image, cost);
-        }
-        painter.save();
-        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-        painter.drawImage(QRectF(transform.inverted().map(QPointF(origin)), QSizeF(image->size()) / transform.m11()), *image);
-        painter.restore();
+    const QString key = font.key() + QChar('|') + QString::number(ink.rgba(), 16) + QChar('|') + text;
+    static thread_local QCache<QString, QImage> colored(4 * 1024);
+    QImage* image = colored.object(key);
+    std::unique_ptr<QImage> oversized;
+    if (!image) {
+        image = new QImage(tinted(mask, ink));
+        const int cost = qMax(1, int((image->sizeInBytes() + key.size() * sizeof(QChar) + 1023) / 1024));
+        if (cost > colored.maxCost()) oversized.reset(image);
+        else colored.insert(key, image, cost);
     }
+    painter.save();
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+    painter.drawImage(QRectF(transform.inverted().map(QPointF(origin)), QSizeF(image->size()) / transform.m11()), *image);
+    painter.restore();
     ++s_rasterDraws;
     return true;
 }
@@ -117,40 +280,23 @@ bool enabled() { return s_enabled; }
 QImage coverage(const QFont& font, const QString& text, QPoint* offset)
 {
     struct Glyph { QImage mask; QPoint offset; };
-    static thread_local QCache<QString, Glyph> cache(16 * 1024);
-    const QString key = font.key() + QChar('|') + text;
+    static thread_local QCache<QString, Glyph> cache(8 * 1024);
+    QFont unified(font);
+    unified.setFamily(AppFonts::family());
+    unified.setHintingPreference(QFont::PreferNoHinting);
+    const QString key = unified.key() + QChar('|') + text;
     if (const auto* glyph = cache.object(key)) {
         if (offset) *offset = glyph->offset;
         return glyph->mask;
     }
-    const QRect bounds = QFontMetricsF(font).boundingRect(text).toAlignedRect().adjusted(-2,-2,2,2);
+    const QPainterPath outline = textOutline(unified, text);
+    const QRect bounds = outline.boundingRect().toAlignedRect().adjusted(-2,-2,2,2);
     if (offset)
         *offset = bounds.topLeft();
     if (bounds.isEmpty() || qint64(bounds.width()) * bounds.height() > 1024 * 1024)
         return {};
-    // RGB 模式保留系统三通道覆盖率；灰阶模式读取透明画布的原生 alpha。
-    const bool grayscale = font.styleStrategy() & (QFont::NoSubpixelAntialias | QFont::NoAntialias);
-    QImage result(bounds.size(), grayscale ? QImage::Format_ARGB32_Premultiplied : QImage::Format_RGB32);
-    result.fill(grayscale ? Qt::transparent : Qt::black);
-    QPainter painter(&result);
-    painter.setRenderHint(QPainter::TextAntialiasing);
-    painter.setFont(font);
-    painter.setPen(Qt::white);
-    painter.drawText(-QPointF(bounds.topLeft()), text);
-    painter.end();
-    if (grayscale) {
-        QImage mask(result.size(), QImage::Format_RGB32);
-        for (int y = 0; y < result.height(); ++y) {
-            const auto* source = reinterpret_cast<const QRgb*>(result.constScanLine(y));
-            auto* row = reinterpret_cast<QRgb*>(mask.scanLine(y));
-            for (int x = 0; x < result.width(); ++x) {
-                const int alpha = qAlpha(source[x]);
-                row[x] = qRgb(alpha, alpha, alpha);
-            }
-        }
-        result = std::move(mask);
-    }
-    const int cost = qMax(1, int(result.sizeInBytes() / 1024));
+    QImage result = rasterizeOutline(outline, bounds, unified.styleStrategy() & QFont::NoAntialias);
+    const int cost = qMax(1, int((result.sizeInBytes() + key.size() * sizeof(QChar) + 1023) / 1024));
     if (cost <= cache.maxCost())
         cache.insert(key, new Glyph{result, bounds.topLeft()}, cost);
     return result;
@@ -158,6 +304,9 @@ QImage coverage(const QFont& font, const QString& text, QPoint* offset)
 
 bool draw(QPainter& painter, const QPointF& baseline, const QString& text)
 {
+    if (text.isEmpty() || painter.pen().style() == Qt::NoPen) return true;
+    if (auto* device = AppText::PaintDevice::forPainter(painter))
+        return device->drawText(painter, baseline, text);
     if (enabled() && s_activeRenderer && s_activeRenderer->paint(painter, baseline, text))
         return true;
     return paintRaster(painter, baseline, text);
@@ -209,27 +358,27 @@ void Renderer::clear()
 bool Renderer::paint(QPainter& painter, const QPointF& baseline, const QString& text)
 {
     if (painter.device() != m_device || !QOpenGLContext::currentContext()
-        || painter.pen().brush().style() != Qt::SolidPattern)
+        || painter.pen().brush().style() != Qt::SolidPattern
+        || painter.compositionMode() != QPainter::CompositionMode_SourceOver
+        || (painter.hasClipping() && painter.clipPath().elementCount() > 5))
         return false;
     const auto transform = painter.deviceTransform();
     if (transform.type() > QTransform::TxScale || transform.m11() <= 0
         || !qFuzzyCompare(transform.m11(), transform.m22()))
         return false;
     const QFont font = painter.font();
-    if (font.styleStrategy() & (QFont::NoAntialias | QFont::NoSubpixelAntialias))
-        return false;
     const QFont rasterFont = nativeFont(painter);
     const QString key = rasterFont.key() + QChar('|') + text;
     Mask* mask = m_masks.object(key);
     auto* gl = QOpenGLContext::currentContext()->extraFunctions();
     if (!mask) {
         auto created = std::make_unique<Mask>();
-        created->pixels = coverage(rasterFont, text, &created->offset).convertToFormat(QImage::Format_RGBA8888);
+        created->pixels = coverage(rasterFont, text, &created->offset);
         if (created->pixels.isNull())
             return false;
         created->size = created->pixels.size();
         // 先保留 CPU 掩码，纹理在 QPainter 切回原生绘制之后上传。
-        const int cost = qMax(1, int(created->pixels.sizeInBytes() / 1024));
+        const int cost = qMax(1, int((created->pixels.sizeInBytes() + key.size() * sizeof(QChar) + 1023) / 1024));
         if (cost > m_masks.maxCost())
             return false;
         if (m_masks.totalCost() + cost > m_masks.maxCost()) {
@@ -272,11 +421,8 @@ bool Renderer::paint(QPainter& painter, const QPointF& baseline, const QString& 
             varying vec2 uv;
             uniform sampler2D maskTexture;
             uniform vec4 ink;
-            uniform int channel;
             void main() {
-                vec3 coverage = texture2D(maskTexture, uv).rgb;
-                float alpha = (channel == 3 ? max(max(coverage.r, coverage.g), coverage.b)
-                                           : coverage[channel]) * ink.a;
+                float alpha = texture2D(maskTexture, uv).r * ink.a;
                 gl_FragColor = vec4(ink.rgb * alpha, alpha);
             }
         )";
@@ -284,7 +430,7 @@ bool Renderer::paint(QPainter& painter, const QPointF& baseline, const QString& 
         if (!m_shader->addShaderFromSourceCode(QOpenGLShader::Vertex, vertex)
             || !m_shader->addShaderFromSourceCode(QOpenGLShader::Fragment, fragment)
             || !m_shader->link()) {
-            RenderDiagnostics::write("text.cleartype.failed", m_shader->log(), 10000);
+            RenderDiagnostics::write("text.grayscale.failed", m_shader->log(), 10000);
             m_shader.reset();
             painter.endNativePainting();
             return false;
@@ -294,7 +440,6 @@ bool Renderer::paint(QPainter& painter, const QPointF& baseline, const QString& 
         m_rectangleLocation = m_shader->uniformLocation("rectangle");
         m_maskTextureLocation = m_shader->uniformLocation("maskTexture");
         m_inkLocation = m_shader->uniformLocation("ink");
-        m_channelLocation = m_shader->uniformLocation("channel");
         gl->glGenBuffers(1, &m_vertexBuffer);
         gl->glBindBuffer(GL_ARRAY_BUFFER, m_vertexBuffer);
         const float vertices[] = {0,0, 1,0, 0,1, 1,1};
@@ -307,8 +452,8 @@ bool Renderer::paint(QPainter& painter, const QPointF& baseline, const QString& 
         gl->glGenTextures(1, &mask->texture);
         gl->glBindTexture(GL_TEXTURE_2D, mask->texture);
         PixelTransferScope transfer(gl, true);
-        gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, mask->pixels.width(), mask->pixels.height(),
-                         0, GL_RGBA, GL_UNSIGNED_BYTE, mask->pixels.constBits());
+        gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE8, mask->pixels.width(), mask->pixels.height(),
+                         0, GL_LUMINANCE, GL_UNSIGNED_BYTE, mask->pixels.constBits());
         gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -334,12 +479,9 @@ bool Renderer::paint(QPainter& painter, const QPointF& baseline, const QString& 
     gl->glEnable(GL_BLEND);
     gl->glBlendEquation(GL_FUNC_ADD);
     gl->glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-    // 分别混合 RGB 覆盖率，再用最大覆盖率更新 alpha，保持透明玻璃上的字形覆盖。
-    for (int channel = 0; channel < 4; ++channel) {
-        gl->glColorMask(channel == 0, channel == 1, channel == 2, channel == 3);
-        m_shader->setUniformValue(m_channelLocation, channel);
-        gl->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    }
+    // Grayscale coverage uses one premultiplied source-over pass.
+    gl->glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    gl->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     gl->glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     gl->glDisable(GL_SCISSOR_TEST);
     gl->glDisableVertexAttribArray(0);

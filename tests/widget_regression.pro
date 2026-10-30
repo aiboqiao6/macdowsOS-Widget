@@ -17,7 +17,9 @@ win32-msvc {
     LIBS += -lBthprops -lOle32 -lPropsys -lUser32 -lGdi32 -lPsapi
 }
 
-SOURCES += ../src/app/fontsettings.cpp \
+SOURCES += ../src/network/updatechecker.cpp \
+    ../src/ui/settingsdialog.cpp \
+    ../src/app/fontsettings.cpp \
     ../src/widgets/customwidget.cpp \
     ../src/widgets/desktopwidget_custom.cpp \
     ../src/ui/htmlwidgetview.cpp \
@@ -26,6 +28,7 @@ SOURCES += ../src/app/fontsettings.cpp \
     ../src/network/cardrequest.cpp \
     ../src/platform/powerdevices.cpp \
     ../src/rendering/cleartypetext.cpp \
+    ../src/rendering/textpaintdevice.cpp \
     ../src/rendering/desktopcapture.cpp \
     ../src/rendering/liquidglasswidget.cpp \
     ../src/rendering/nativewindows.cpp \
@@ -58,7 +61,9 @@ SOURCES += ../src/app/fontsettings.cpp \
     ../src/widgets/widgetgeometry.cpp \
     widget_regression.cpp
 
-HEADERS += ../src/app/fontsettings.h \
+HEADERS += ../src/network/updatechecker.h \
+    ../src/ui/settingsdialog.h \
+    ../src/app/fontsettings.h \
     ../src/widgets/customwidget.h \
     ../src/ui/htmlwidgetview.h \
     ../src/ui/widgeteditordialog.h \
@@ -67,6 +72,9 @@ HEADERS += ../src/app/fontsettings.h \
     ../src/network/cardrequest.h \
     ../src/platform/powerdevices.h \
     ../src/rendering/cleartypetext.h \
+    ../src/rendering/textpaintdevice.h \
+    ../src/ui/textcontrols.h \
+    ../src/rendering/graphicsquality.h \
     ../src/rendering/glpixeltransfer.h \
     ../src/rendering/liquidglassstyle.h \
     ../src/rendering/qtglassflowscene.h \

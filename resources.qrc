@@ -1,4 +1,13 @@
 <RCC>
+    <qresource prefix="/settings">
+        <file alias="theme.json">src/ui/assets/settings-theme.json</file>
+        <file alias="settings.qss">src/ui/assets/settings.qss</file>
+        <file alias="chevron-down.svg">src/ui/assets/chevron-down.svg</file>
+        <file alias="chevron-up.svg">src/ui/assets/chevron-up.svg</file>
+        <file alias="toggle-off.svg">src/ui/assets/toggle-off.svg</file>
+        <file alias="toggle-on.svg">src/ui/assets/toggle-on.svg</file>
+        <file alias="toggle-disabled.svg">src/ui/assets/toggle-disabled.svg</file>
+    </qresource>
     <qresource prefix="/fonts">
         <file alias="pingfang0.ttf">pingfang0.ttf</file>
     </qresource>

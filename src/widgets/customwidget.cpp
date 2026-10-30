@@ -1,4 +1,5 @@
 #include "widgets/customwidget.h"
+#include "app/fontsettings.h"
 #include "app/appsettings.h"
 #include <QColor>
 #include <QDir>
@@ -152,7 +153,7 @@ Definition makeTemplate(int index) {
         result.name = QStringLiteral("HTML 计数器");
         result.mode = "html";
         result.html = QStringLiteral("<main><small>保持专注</small><h1 id=\"count\">0</h1><button id=\"add\">完成一次 +1</button></main>");
-        result.css = QStringLiteral("body{margin:0;background:#18243b;color:#f4f7ff;font-family:system-ui}main{padding:24px}h1{font-size:48px;margin:8px 0}button{border:0;border-radius:12px;padding:10px 16px;background:#78aaff;color:#101a2c;cursor:pointer}");
+        result.css = QStringLiteral("body{margin:0;background:#18243b;color:#f4f7ff;font-family:'macdows PingFang'}main{padding:24px}h1{font-size:48px;margin:8px 0}button{border:0;border-radius:12px;padding:10px 16px;background:#78aaff;color:#101a2c;cursor:pointer}");
         result.javascript = QStringLiteral("let count=0;document.getElementById('add').onclick=()=>{document.getElementById('count').textContent=++count;};");
     } else {
         result.blocks = {block("text", QStringLiteral("今日提醒"), 18), block("text", QStringLiteral("写下你想在桌面看到的内容。"), 22)};
@@ -164,7 +165,7 @@ QString document(const Definition& definition) {
         QString script = definition.javascript;
         script.replace("</script", "<\\/script", Qt::CaseInsensitive);
         return QStringLiteral("<!doctype html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><style>html,body{min-height:100%;box-sizing:border-box}*{box-sizing:border-box}%1</style></head><body>%2<script>%3</script></body></html>")
-            .arg(definition.css, definition.html, script);
+            .arg(definition.css + AppFonts::webStyleSheet(), definition.html, script);
     }
     QString body;
     for (const auto& block : definition.blocks) {
@@ -182,16 +183,16 @@ QString document(const Definition& definition) {
         else body += QStringLiteral("<div style='%1;white-space:pre-wrap;overflow-wrap:anywhere'>%2</div>").arg(style, text);
     }
     return QStringLiteral("<!doctype html><html lang=zh-CN><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><style>"
-        "*{box-sizing:border-box}body{margin:0;padding:%1px;background:%2;color:%3;font-family:'Microsoft YaHei',system-ui;display:flex;flex-direction:column;gap:10px}"
+        "*{box-sizing:border-box}body{margin:0;padding:%1px;background:%2;color:%3;display:flex;flex-direction:column;gap:10px}"
         "hr{width:100%;border:0;border-top:1px solid %3;opacity:.2}progress{width:100%;height:9px;accent-color:%4}span{float:right;opacity:.7}"
-        "</style><body>%5<script>function tick(){document.querySelectorAll('[data-live]').forEach(e=>{const d=new Date();e.textContent=e.dataset.live==='clock'?d.toLocaleTimeString('zh-CN',{hour12:false}):d.toLocaleDateString('zh-CN',{year:'numeric',month:'long',day:'numeric',weekday:'long'})})}tick();setInterval(tick,1000)</script></body></html>")
-        .arg(definition.padding).arg(color(definition.background), color(definition.foreground), color(definition.accent), body);
+        "%6</style><body>%5<script>function tick(){document.querySelectorAll('[data-live]').forEach(e=>{const d=new Date();e.textContent=e.dataset.live==='clock'?d.toLocaleTimeString('zh-CN',{hour12:false}):d.toLocaleDateString('zh-CN',{year:'numeric',month:'long',day:'numeric',weekday:'long'})})}tick();setInterval(tick,1000)</script></body></html>")
+        .arg(definition.padding).arg(color(definition.background), color(definition.foreground), color(definition.accent), body, AppFonts::webStyleSheet());
 }
 QString sandboxedDocument(const Definition& definition) {
     const QString network = definition.allowNetwork ? QStringLiteral("https: http:") : QStringLiteral("'none'");
     const QString assets = definition.allowNetwork ? QStringLiteral("data: https: http:") : QStringLiteral("data:");
     const QString scripts = definition.allowNetwork ? QStringLiteral("'unsafe-inline' https: http:") : QStringLiteral("'unsafe-inline'");
-    const QString policy = QStringLiteral("default-src 'none'; script-src %3; style-src %3; img-src %1; font-src %1; media-src %1; connect-src %2; frame-src about:; object-src 'none'; base-uri 'none'; form-action 'none'").arg(assets, network, scripts);
+    const QString policy = QStringLiteral("default-src 'none'; script-src %3; style-src %3; img-src %1; font-src %1 https://macdows-fonts.invalid; media-src %1; connect-src %2; frame-src about:; object-src 'none'; base-uri 'none'; form-action 'none'").arg(assets, network, scripts);
     return QStringLiteral("<!doctype html><meta charset=utf-8><meta http-equiv='Content-Security-Policy' content=\"%1\"><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}iframe{width:100%;height:100%;border:0;border-radius:20px}</style><iframe title=\"%2\" sandbox=\"allow-scripts\" srcdoc=\"%3\"></iframe>")
         .arg(policy.toHtmlEscaped(), definition.name.toHtmlEscaped(), document(definition).toHtmlEscaped());
 }

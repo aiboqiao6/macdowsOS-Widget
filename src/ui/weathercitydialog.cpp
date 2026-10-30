@@ -1,3 +1,4 @@
+#include "ui/textcontrols.h"
 #include "ui/weathercitydialog.h"
 #include "network/cardrequest.h"
 #include <QDialog>
@@ -29,10 +30,10 @@ WeatherCityDialog::Selection WeatherCityDialog::choose(QWidget* parent, QNetwork
     auto* layout = new QVBoxLayout(&dialog);
     layout->setContentsMargins(20, 18, 20, 18);
     layout->setSpacing(10);
-    auto* title = new QLabel(QStringLiteral("搜索城市、区或县"), &dialog);
+    auto* title = new AppText::Label(QStringLiteral("搜索城市、区或县"), &dialog);
     title->setStyleSheet(QStringLiteral("font-size:18px;font-weight:600;"));
     layout->addWidget(title);
-    auto* hint = new QLabel(QStringLiteral("输入简体中文名称，可精确选择区县；例如“海淀”“天心”“浦东新区”。"),
+    auto* hint = new AppText::Label(QStringLiteral("输入简体中文名称，可精确选择区县；例如“海淀”“天心”“浦东新区”。"),
                             &dialog);
     hint->setWordWrap(true);
     hint->setStyleSheet(QStringLiteral("color:#9da8bd;"));
@@ -41,14 +42,14 @@ WeatherCityDialog::Selection WeatherCityDialog::choose(QWidget* parent, QNetwork
     auto* searchLayout = new QHBoxLayout(searchRow);
     searchLayout->setContentsMargins(0, 0, 0, 0);
     searchLayout->setSpacing(8);
-    auto* edit = new QLineEdit(currentLocation, searchRow);
+    auto* edit = new AppText::LineEdit(currentLocation, searchRow);
     edit->setPlaceholderText(QStringLiteral("输入城市、区或县"));
     edit->selectAll();
     auto* searchButton = new QPushButton(QStringLiteral("搜索"), searchRow);
     searchLayout->addWidget(edit, 1);
     searchLayout->addWidget(searchButton);
     layout->addWidget(searchRow);
-    auto* resultLabel = new QLabel(QStringLiteral("输入名称后点击搜索"), &dialog);
+    auto* resultLabel = new AppText::Label(QStringLiteral("输入名称后点击搜索"), &dialog);
     resultLabel->setStyleSheet(QStringLiteral("color:#aeb9cb;"));
     layout->addWidget(resultLabel);
     auto* results = new QListWidget(&dialog);

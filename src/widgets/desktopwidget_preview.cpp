@@ -1,6 +1,7 @@
 #include "widgets/desktopwidget.h"
 #include "widgets/widgetgeometry.h"
 #include "widgets/cardmetrics.h"
+#include "rendering/graphicsquality.h"
 #include <QPainter>
 #include <QtMath>
 
@@ -58,11 +59,18 @@ QImage DesktopWidget::renderPreview(CardKind kind, int variant, const QSize& siz
     image.setDevicePixelRatio(dpr);
     image.fill(Qt::transparent);
     QPainter painter(&image);
-    painter.setRenderHint(QPainter::Antialiasing);
+    GraphicsQuality::Scope imageQuality(preview.imageAntialiasingEnabled());
+    painter.setRenderHint(QPainter::Antialiasing, GraphicsQuality::enabled());
     // 缩略图按外观模式绘制独立展示画布，避免文字直接浮在图库背景上。
     const QRectF card{QPointF(), QSizeF(renderSize)};
     const qreal radius = LiquidGlassStyle::kCardCornerRadius * preview.m_widgetScale;
-    painter.setPen(QPen(QColor(255, 255, 255, 28), 1.0 / dpr));
+    QLinearGradient rim(card.topLeft(), card.bottomRight());
+    rim.setColorAt(0, preview.darkModeEnabled() ? QColor(143, 194, 204, 92)
+                                             : QColor(209, 240, 250, 122));
+    rim.setColorAt(.48, QColor(143, 194, 204, 22));
+    rim.setColorAt(1, preview.darkModeEnabled() ? QColor(143, 194, 204, 48)
+                                             : QColor(209, 240, 250, 66));
+    painter.setPen(QPen(QBrush(rim), 1.0));
     painter.setBrush(preview.darkModeEnabled() ? QColor(3, 16, 19, 250)
                                              : QColor(18, 35, 40, 245));
     painter.drawRoundedRect(card.adjusted(.5 / dpr, .5 / dpr, -.5 / dpr, -.5 / dpr),

@@ -2,42 +2,45 @@
 #include "app/appsettings.h"
 #include "rendering/cleartypetext.h"
 #include "rendering/responsivelayout.h"
+#include "rendering/textpaintdevice.h"
+#include "ui/textcontrols.h"
 #include <QApplication>
 #include <QDir>
 #include <QFile>
 #include <QFontDatabase>
 #include <QWidget>
 #include <QProxyStyle>
+#include <QPointer>
 #include <QTextLayout>
+#include <QtEndian>
+#include <algorithm>
 
 namespace AppFonts {
 namespace {
 int s_fontSmoothingLevel = 4;
 
+bool usesInterfaceText(const QWidget* widget)
+{
+    // Walk parents as combo popups and tool windows also belong to the interface.
+    for (auto* current = widget; current; current = current->parentWidget())
+        if (current->property("independentInterfaceText").toBool()) return true;
+    return false;
+}
+
+void configureInterfaceText(QFont& font)
+{
+    font.setStyleStrategy(static_cast<QFont::StyleStrategy>(
+        QFont::PreferAntialias | QFont::PreferQuality | QFont::NoSubpixelAntialias));
+    font.setHintingPreference(QFont::PreferNoHinting);
+}
+
 void configureFontSmoothing(QFont& font, int level)
 {
-    switch (qBound(0, level, 4)) {
-    case 0:
+    // macOS-style grayscale coverage: no RGB fringing or Windows grid fitting.
+    if (level == 0) {
         font.setStyleStrategy(QFont::NoAntialias);
-        font.setHintingPreference(QFont::PreferFullHinting);
-        break;
-    case 1:
-        font.setStyleStrategy(static_cast<QFont::StyleStrategy>(
-            QFont::PreferAntialias | QFont::NoSubpixelAntialias));
-        font.setHintingPreference(QFont::PreferVerticalHinting);
-        break;
-    case 3:
-        font.setStyleStrategy(static_cast<QFont::StyleStrategy>(
-            QFont::PreferAntialias | QFont::PreferQuality | QFont::NoSubpixelAntialias));
-        font.setHintingPreference(QFont::PreferFullHinting);
-        break;
-    case 2:
-    default:
-        font.setStyleStrategy(static_cast<QFont::StyleStrategy>(
-            QFont::PreferAntialias | QFont::PreferQuality));
-        font.setHintingPreference(QFont::PreferFullHinting);
-        break;
-    }
+    } else configureInterfaceText(font);
+    font.setHintingPreference(QFont::PreferNoHinting);
 }
 
 QString pingFangFamily()
@@ -70,6 +73,26 @@ class UnifiedTextStyle final : public QProxyStyle
 public:
     explicit UnifiedTextStyle(QStyle* base) : QProxyStyle(base) {}
 
+    void polish(QWidget* widget) override
+    {
+        QProxyStyle::polish(widget);
+        if (auto* area = qobject_cast<QAbstractScrollArea*>(widget))
+            AppText::installViewport(area);
+    }
+
+    void drawControl(ControlElement element, const QStyleOption* option,
+                     QPainter* painter, const QWidget* widget = nullptr) const override
+    {
+        if (!painter || AppText::PaintDevice::forPainter(*painter)) {
+            QProxyStyle::drawControl(element, option, painter, widget);
+            return;
+        }
+        AppText::PaintDevice device(*painter);
+        QPainter custom(&device);
+        custom.setFont(painter->font());
+        QProxyStyle::drawControl(element, option, &custom, widget);
+    }
+
     void drawItemText(QPainter* painter, const QRect& rect, int flags,
                       const QPalette& palette, bool enabled, const QString& source,
                       QPalette::ColorRole role = QPalette::NoRole) const override
@@ -91,7 +114,11 @@ public:
         painter->save();
         QFont font = painter->font();
         font.setFamily(pingFangFamily());
-        configureFontSmoothing(font, s_fontSmoothingLevel);
+        // Keep settings chrome legible independently of widget quality modes.
+        const bool interface = usesInterfaceText(dynamic_cast<QWidget*>(painter->device()));
+        if (interface) configureInterfaceText(font);
+        else if (!(font.styleStrategy() & QFont::NoSubpixelAntialias))
+            configureFontSmoothing(font, s_fontSmoothingLevel);
         painter->setFont(font);
         if (role != QPalette::NoRole)
             painter->setPen(palette.color(enabled ? palette.currentColorGroup() : QPalette::Disabled, role));
@@ -124,8 +151,7 @@ public:
             const QPointF baseline(left, top + line.y() + line.ascent());
             QString part = text.mid(line.textStart(), line.textLength());
             part.remove(QChar::LineSeparator);
-            if (!ResponsiveLayout::drawHighQualityText(*painter, baseline, part))
-                painter->drawText(baseline, part);
+            ResponsiveLayout::drawHighQualityText(*painter, baseline, part);
             if (mnemonic >= line.textStart() && mnemonic < line.textStart() + line.textLength()
                 && (flags & Qt::TextShowMnemonic) && !(flags & Qt::TextHideMnemonic)) {
                 const QFontMetricsF metrics(font);
@@ -165,19 +191,25 @@ bool setSmoothing(int level)
     const int next = qBound(0, level, 4);
     const bool changed = s_fontSmoothingLevel != next;
     s_fontSmoothingLevel = next;
-    ClearTypeText::setEnabled(next == 4);
+    ClearTypeText::setEnabled(true);
     AppSettings().setValue(QStringLiteral("appearance/fontSmoothing"), next);
     if (auto* app = qobject_cast<QApplication*>(QCoreApplication::instance())) {
         QFont font = app->font();
         font.setFamily(pingFangFamily());
         configureFontSmoothing(font, next);
         app->setFont(font);
-        for (QWidget* widget : app->allWidgets()) {
+        QList<QPointer<QWidget>> widgets;
+        for (QWidget* widget : app->allWidgets()) widgets.append(widget);
+        for (const auto& guarded : widgets) {
+            QWidget* widget = guarded.data();
+            if (!widget) continue;
             // 应用字体更新后，显式刷新现有控件解析后的策略，避免 QSS 保留旧字体配置。
             QFont widgetFont = widget->font();
-            configureFontSmoothing(widgetFont, next);
-            widget->setFont(widgetFont);
-            widget->update();
+            widgetFont.setFamily(pingFangFamily());
+            if (usesInterfaceText(widget)) configureInterfaceText(widgetFont);
+            else configureFontSmoothing(widgetFont, next);
+            if (widgetFont != widget->font()) widget->setFont(widgetFont);
+            if (!usesInterfaceText(widget)) widget->update();
         }
     }
     return changed;
@@ -190,7 +222,29 @@ int smoothing()
 
 void applySmoothing(QFont& font)
 {
+    font.setFamily(pingFangFamily());
     configureFontSmoothing(font, s_fontSmoothingLevel);
+}
+
+void useInterfaceText(QWidget* window)
+{
+    window->setProperty("independentInterfaceText", true);
+    QFont font = window->font();
+    font.setFamily(family());
+    configureInterfaceText(font);
+    if (font != window->font()) window->setFont(font);
+    QList<QPointer<QWidget>> children;
+    for (auto* child : window->findChildren<QWidget*>()) children.append(child);
+    for (const auto& guarded : children) {
+        auto* child = guarded.data();
+        if (!child) continue;
+        child->ensurePolished();
+        if (!guarded) continue;
+        QFont childFont = child->font();
+        childFont.setFamily(pingFangFamily());
+        configureInterfaceText(childFont);
+        if (childFont != child->font()) child->setFont(childFont);
+    }
 }
 
 QFont displayFont(int pointSize, QFont::Weight weight)
@@ -201,5 +255,72 @@ QFont displayFont(int pointSize, QFont::Weight weight)
     font.setWeight(weight);
     applySmoothing(font);
     return font;
+}
+
+QString webFontUrl()
+{
+    return QStringLiteral("https://macdows-fonts.invalid/pingfang.ttf");
+}
+
+QByteArray webFontData()
+{
+    QFile file(QStringLiteral(":/fonts/pingfang0.ttf"));
+    if (!file.open(QIODevice::ReadOnly)) return {};
+    QByteArray bytes = file.readAll();
+    if (bytes.size() < 12) return {};
+    const auto read16 = [&](qsizetype at) { return qFromBigEndian<quint16>(bytes.constData() + at); };
+    const auto read32 = [&](qsizetype at) { return qFromBigEndian<quint32>(bytes.constData() + at); };
+    const auto write16 = [&](qsizetype at, quint16 value) { qToBigEndian(value, bytes.data() + at); };
+    const auto write32 = [&](qsizetype at, quint32 value) { qToBigEndian(value, bytes.data() + at); };
+    const int tables = read16(4);
+    if (read32(0) != 0x00010000 || 12 + tables * 16 > bytes.size()) return {};
+    const auto checksum = [&](qsizetype offset, qsizetype length) {
+        quint32 sum = 0;
+        for (qsizetype i = 0; i < length; i += 4) {
+            quint32 word = 0;
+            for (int byte = 0; byte < 4; ++byte)
+                word = (word << 8) | (i + byte < length ? quint8(bytes[offset + i + byte]) : 0);
+            sum += word;
+        }
+        return sum;
+    };
+    int retained = 0;
+    qsizetype head = -1;
+    for (int i = 0; i < tables; ++i) {
+        const qsizetype entry = 12 + i * 16;
+        const QByteArray tag = bytes.mid(entry, 4);
+        const quint32 offset = read32(entry + 8), length = read32(entry + 12);
+        if (quint64(offset) + length > quint64(bytes.size())) return {};
+        // This bundled conversion has truncated vertical metrics and maxZones=0.
+        // Browser OTS rejects those metadata tables although horizontal glyphs
+        // are valid. Preserve outlines/advances; let the browser synthesize vertical metrics.
+        if (tag == "vhea" || tag == "vmtx") continue;
+        if (tag == "maxp" && length >= 32 && read16(offset + 14) == 0)
+            write16(offset + 14, 2);
+        if (tag == "head" && length >= 12) { head = offset; write32(head + 8, 0); }
+        const qsizetype destination = 12 + retained++ * 16;
+        const QByteArray record = bytes.mid(entry, 16);
+        std::copy(record.begin(), record.end(), bytes.begin() + destination);
+        write32(destination + 4, checksum(offset, length));
+    }
+    if (head < 0 || !retained) return {};
+    std::fill(bytes.begin() + 12 + retained * 16, bytes.begin() + 12 + tables * 16, char(0));
+    int power = 1, selector = 0;
+    while (power * 2 <= retained) { power *= 2; ++selector; }
+    write16(4, quint16(retained));
+    write16(6, quint16(power * 16));
+    write16(8, quint16(selector));
+    write16(10, quint16(retained * 16 - power * 16));
+    write32(head + 8, quint32(0xb1b0afbaU - checksum(0, bytes.size())));
+    return bytes;
+}
+
+QString webStyleSheet()
+{
+    // WebView2 is a separate process and cannot see QFontDatabase's private font.
+    // Serve the bundled face locally rather than relying on an installed font.
+    return QStringLiteral("@font-face{font-family:'macdows PingFang';src:url('%1') format('truetype');font-display:block;}"
+        "html,body,body *,input,textarea,select,button{font-family:'macdows PingFang',sans-serif!important;"
+        "-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;}").arg(webFontUrl());
 }
 }

@@ -85,6 +85,8 @@ int main(int argc, char* argv[])
         }
     }
     {
+        // Font smoothing is now always enabled; retire the saved off/profile choice.
+        DesktopWidget::setGlobalFontSmoothing(4);
         const AppSettings saved;
         RenderDiagnostics::write("render.settings", QString("renderScale=%1 liveBackdrop=%2 lowPower=%3 mouseThrough=%4 material=liquidGlass fontSmoothing=%5")
             .arg(saved.value("performance/renderScale").toDouble())
@@ -92,8 +94,6 @@ int main(int argc, char* argv[])
             .arg(saved.value("interaction/lowPowerRefresh").toBool())
             .arg(saved.value("interaction/mouseThrough").toBool())
             .arg(saved.value("appearance/fontSmoothing").toInt()));
-        DesktopWidget::setGlobalFontSmoothing(qBound(0,
-            saved.value(QStringLiteral("appearance/fontSmoothing"), 4).toInt(), 4));
     }
 
     // 恢复独立组件；没有配置时创建四种默认卡片，每个窗口独立保存位置。

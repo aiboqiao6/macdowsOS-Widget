@@ -17,8 +17,17 @@
 #include "widgets/customwidget.h"
 #include "ui/htmlwidgetview.h"
 #include "ui/widgeteditordialog.h"
+#include "ui/settingsdialog.h"
+#include "ui/settingscontrolpaint.h"
+#include "ui/settingsbackdrop.h"
+#include "ui/textcontrols.h"
+#include "app/fontsettings.h"
+#include "network/updatechecker.h"
+#include "config.h"
 #include <QListWidget>
 #include <QPlainTextEdit>
+#include <QTextBrowser>
+#include <QStackedWidget>
 
 #include <QApplication>
 #include <QAbstractItemView>
@@ -43,6 +52,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkProxy>
 #include <QPainter>
+#include <QRawFont>
 #include <QOpenGLExtraFunctions>
 #include <QPushButton>
 #include <QPointer>
@@ -99,7 +109,8 @@ public:
     QColor centerStripe;
     int paintedFrames = 0;
     ColorWindow() {
-        setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+        // 捕获源使用普通窗口；未带 APPWINDOW 的工具窗口不受 WGC 支持。
+        setWindowFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
     }
     void paintEvent(QPaintEvent*) override {
         ++paintedFrames;
@@ -136,7 +147,7 @@ public:
     int frame = 0;
     std::function<void()> didPaint;
     DisplayCadenceSource() {
-        setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+        setWindowFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
         QSurfaceFormat surface = format();
         surface.setSwapInterval(0);
         setFormat(surface);
@@ -205,6 +216,12 @@ public:
         ResponsiveLayout::drawSingleLine(painter, QRectF(12, 110, 530, 45),
             Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("11时  14时  17时  32°"));
     }
+};
+
+class ImageQualityGlass : public TestGlass {
+public:
+    std::function<void(QPainter&)> content;
+    void paintOverlay(QPainter& painter) override { content(painter); }
 };
 
 class ClearTypeGlass : public TestGlass {
@@ -312,10 +329,1226 @@ private:
     qint64 offset = 0;
 };
 
+class UpdateTestReply final : public QNetworkReply {
+public:
+    UpdateTestReply(const QNetworkRequest& request, const QByteArray& data, int status, QObject* parent)
+        : QNetworkReply(parent), m_data(data) {
+        setRequest(request); setUrl(request.url());
+        setAttribute(QNetworkRequest::HttpStatusCodeAttribute, status);
+        if (status != 200) setError(QNetworkReply::ContentAccessDenied, QStringLiteral("测试请求失败"));
+        open(QIODevice::ReadOnly | QIODevice::Unbuffered);
+        QTimer::singleShot(0, this, [this] { setFinished(true); emit readyRead(); emit finished(); });
+    }
+    void abort() override {}
+    qint64 bytesAvailable() const override { return m_data.size() - m_offset + QNetworkReply::bytesAvailable(); }
+protected:
+    qint64 readData(char* data, qint64 maximum) override {
+        const qint64 count = qMin(maximum, qint64(m_data.size()) - m_offset);
+        if (count <= 0) return -1;
+        memcpy(data, m_data.constData() + m_offset, size_t(count));
+        m_offset += count;
+        return count;
+    }
+private:
+    QByteArray m_data;
+    qint64 m_offset = 0;
+};
+
+class UpdateTestNetwork final : public QNetworkAccessManager {
+public:
+    QByteArray payload = "[]";
+    int status = 200, requests = 0;
+    QNetworkRequest lastRequest;
+protected:
+    QNetworkReply* createRequest(Operation, const QNetworkRequest& request, QIODevice*) override {
+        ++requests; lastRequest = request;
+        return new UpdateTestReply(request, payload, status, this);
+    }
+};
+
 class WidgetRegression : public QObject {
     Q_OBJECT
     QTemporaryDir settings;
 private slots:
+    void imageAntialiasingSmoothsBatteryAndPreservesText() {
+        const int originalFont = DesktopWidget::globalFontSmoothing();
+        auto restore = qScopeGuard([&] { DesktopWidget::setGlobalFontSmoothing(originalFont); });
+        DesktopWidget::setGlobalFontSmoothing(4);
+        DesktopWidget battery(nullptr, DesktopWidget::CardKind::Battery, false,
+                              QStringLiteral("aa-ring-source"), 0, true);
+        ImageQualityGlass surface;
+        surface.setFixedSize(380, 130);
+        surface.setDesktopCaptureEnabled(false);
+        surface.setGlassRenderingEnabled(false);
+        surface.content = [&](QPainter& painter) {
+            painter.fillRect(QRectF(0, 0, 380, 130), QColor(28, 48, 58));
+            battery.drawDeviceRing(painter, QPointF(61.35, 60.65), 42.4, 95, 0, true, false);
+            QFont font(DesktopWidget::pingFangFontFamily());
+            font.setPixelSize(23);
+            DesktopWidget::applyFontSmoothing(font);
+            painter.setFont(font);
+            painter.setPen(Qt::white);
+            ResponsiveLayout::drawSingleLine(painter, QRectF(125, 20, 245, 50),
+                Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("电量 95% Aa"));
+            battery.drawWeatherIcon(painter, QRectF(145, 80, 26, 26), false, 0);
+            // 文字原生混合之后继续绘制另一组圆环，检查 GL 抗锯齿状态恢复。
+            battery.drawDeviceRing(painter, QPointF(322.35, 97.65), 20.4, 45, 1, true, false);
+        };
+        surface.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&surface));
+        const auto grab = [&](bool enabled) {
+            surface.setImageAntialiasingEnabled(enabled);
+            return surface.grabFramebuffer().convertToFormat(QImage::Format_ARGB32_Premultiplied);
+        };
+        const QImage off = grab(false);
+        const QImage on = grab(true);
+        QVERIFY(surface.m_antialiasingFbo);
+        QVERIFY(surface.m_antialiasingFbo->format().samples() >= 2);
+        QCOMPARE(surface.m_antialiasingFbo->size(), on.size());
+        const qreal dpr = surface.devicePixelRatioF();
+        QImage reference(on.size(), on.format());
+        reference.setDevicePixelRatio(dpr);
+        reference.fill(Qt::transparent);
+        {
+            GraphicsQuality::Scope quality(true);
+            QPainter painter(&reference);
+            painter.setRenderHint(QPainter::Antialiasing);
+            surface.content(painter);
+        }
+        const auto error = [&](const QImage& actual, QRectF logical) {
+            const QRect area = QRectF(logical.topLeft() * dpr, logical.size() * dpr)
+                                   .toAlignedRect().intersected(actual.rect());
+            double sum = 0;
+            for (int y = area.top(); y <= area.bottom(); ++y)
+                for (int x = area.left(); x <= area.right(); ++x) {
+                    const QColor a = actual.pixelColor(x, y), b = reference.pixelColor(x, y);
+                    sum += qAbs(a.red() - b.red()) + qAbs(a.green() - b.green()) + qAbs(a.blue() - b.blue());
+                }
+            return sum / (area.width() * area.height() * 3.0);
+        };
+        const double offError = error(off, QRectF(12, 10, 100, 102));
+        const double onError = error(on, QRectF(12, 10, 100, 102));
+        qInfo() << "图像抗锯齿样本数:" << surface.m_antialiasingFbo->format().samples()
+                << "圆环及笔记本边缘误差:" << offError << onError;
+        QVERIFY2(onError < offError * .6, "Battery ring and laptop edges did not improve");
+        QVERIFY2(error(on, QRectF(295, 70, 55, 55)) < error(off, QRectF(295, 70, 55, 55)) * .6,
+                 "Native text blending did not restore antialiasing for subsequent rings");
+        const QRect textArea = QRectF(QPointF(125, 20) * dpr, QSizeF(245, 50) * dpr).toAlignedRect();
+        QCOMPARE(on.copy(textArea), off.copy(textArea));
+        const QString folder = QStringLiteral("artifacts/image-aa");
+        QDir().mkpath(folder);
+        QVERIFY(off.save(folder + QStringLiteral("/battery-off.png")));
+        QVERIFY(on.save(folder + QStringLiteral("/battery-on.png")));
+        QVERIFY(reference.save(folder + QStringLiteral("/battery-reference.png")));
+        QCOMPARE(grab(false), off);
+        const quint64 revision = surface.frameRevision();
+        QVERIFY(!surface.surfaceSnapshot().isNull());
+        QCOMPARE(surface.frameRevision(), revision);
+        surface.setImageAntialiasingEnabled(true);
+        surface.setFixedSize(410, 150);
+        surface.grabFramebuffer();
+        QCOMPARE(surface.m_antialiasingFbo->size(), QSize(qRound(410 * dpr), qRound(150 * dpr)));
+    }
+
+    void imageAntialiasingPrefiltersSmallImages() {
+        QImage stripes(256, 256, QImage::Format_ARGB32_Premultiplied);
+        for (int y = 0; y < stripes.height(); ++y)
+            for (int x = 0; x < stripes.width(); ++x)
+                stripes.setPixelColor(x, y, x % 2 ? Qt::white : Qt::black);
+        const auto render = [&](bool enabled, qreal dpr) {
+            QImage result(QSize(qRound(25 * dpr), qRound(25 * dpr)), stripes.format());
+            result.setDevicePixelRatio(dpr);
+            result.fill(Qt::transparent);
+            GraphicsQuality::Scope quality(enabled);
+            QPainter painter(&result);
+            GraphicsQuality::drawImage(painter, QRectF(0, 0, 25, 25), stripes);
+            return result;
+        };
+        for (qreal dpr : {1.0, 1.25, 1.5, 2.0}) {
+            const QImage on = render(true, dpr), off = render(false, dpr);
+            double onError = 0, offError = 0;
+            // 排除分数 DPR 下目标矩形末端的覆盖像素，检查图像内部的面积平均。
+            for (int y = 1; y < on.height() - 1; ++y)
+                for (int x = 1; x < on.width() - 1; ++x) {
+                    onError += qAbs(qRed(on.pixel(x, y)) - 128);
+                    offError += qAbs(qRed(off.pixel(x, y)) - 128);
+                }
+            QVERIFY(onError < offError * .1);
+        }
+    }
+
+    void imageAntialiasingSettingsApplyImmediatelyAndRefreshGallery() {
+        QVERIFY(AppSettings().value("appearance/imageAntialiasing").toBool());
+        DesktopWidget widget(nullptr, DesktopWidget::CardKind::Battery, false,
+                             QStringLiteral("aa-settings"), 0, true);
+        WidgetLibraryDialog library;
+        const QImage enabled = DesktopWidget::renderPreview(DesktopWidget::CardKind::Battery, 0, {164, 164});
+        const int font = DesktopWidget::globalFontSmoothing();
+        const auto edit = [&](bool accept) {
+            bool found = false;
+            QTimer::singleShot(0, &widget, [&] {
+                auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                if (!dialog) return;
+                auto close = qScopeGuard([dialog] { if (dialog->isVisible()) dialog->reject(); });
+                auto* box = dialog->findChild<QCheckBox*>("imageAntialiasing");
+                if (box) {
+                    box->setChecked(!box->isChecked());
+                    QCOMPARE(widget.imageAntialiasingEnabled(), box->isChecked());
+                    QCOMPARE(library.imageAntialiasingEnabled(), box->isChecked());
+                    QCOMPARE(AppSettings().value("appearance/imageAntialiasing").toBool(), box->isChecked());
+                    found = true;
+                }
+                accept && found ? dialog->accept() : dialog->reject();
+            });
+            widget.showSettingsDialog();
+            return found;
+        };
+        QVERIFY(edit(false));
+        QVERIFY(!widget.imageAntialiasingEnabled());
+        QVERIFY(!library.imageAntialiasingEnabled());
+        QVERIFY(!AppSettings().value("appearance/imageAntialiasing").toBool());
+        QtGlassFlowScene restored;
+        QVERIFY(!restored.imageAntialiasingEnabled());
+        const QImage disabled = DesktopWidget::renderPreview(DesktopWidget::CardKind::Battery, 0, {164, 164});
+        QVERIFY(enabled != disabled);
+        QCOMPARE(DesktopWidget::globalFontSmoothing(), font);
+        QVERIFY(edit(true));
+        QVERIFY(widget.imageAntialiasingEnabled());
+        QVERIFY(library.imageAntialiasingEnabled());
+        QVERIFY(restored.imageAntialiasingEnabled());
+        QCOMPARE(DesktopWidget::renderPreview(DesktopWidget::CardKind::Battery, 0, {164, 164}), enabled);
+    }
+
+    void updatesCompareOnlyFirstEightDigits_data() {
+        QTest::addColumn<QString>("tag");
+        QTest::addColumn<bool>("available");
+        QTest::newRow("newer-date-beta") << QStringLiteral("20261022110B2") << true;
+        QTest::newRow("same-date-other-version") << QStringLiteral("20261011999B9") << false;
+        QTest::newRow("same-date-no-suffix") << QStringLiteral("20261011") << false;
+        QTest::newRow("older-date-high-version") << QStringLiteral("20261009999") << false;
+        QTest::newRow("identical") << QString::fromLatin1(AppConfig::BuildId) << false;
+    }
+
+    void updatesCompareOnlyFirstEightDigits() {
+        QFETCH(QString, tag); QFETCH(bool, available);
+        UpdateChecker checker;
+        const QJsonObject release{{"tag_name", tag}, {"name", QStringLiteral("新版本标题")},
+            {"body", QStringLiteral("修复天气刷新\n新增玻璃效果")}, {"prerelease", true}};
+        checker.readReleases(QJsonDocument(QJsonArray{release}).toJson());
+        QCOMPARE(checker.state(), available ? UpdateChecker::State::Available : UpdateChecker::State::Current);
+        QCOMPARE(checker.releaseName(), QStringLiteral("新版本标题"));
+        QCOMPARE(checker.releaseNotes(), QStringLiteral("修复天气刷新\n新增玻璃效果"));
+        QCOMPARE(checker.releaseUrl().host(), QStringLiteral("github.com"));
+    }
+
+    void updatesHandleUnsortedDraftAndInvalidResponses() {
+        UpdateChecker checker;
+        QJsonArray releases{
+            QJsonObject{{"tag_name", "20261101"}, {"name", "草稿"}, {"draft", true}},
+            QJsonObject{{"tag_name", "20261022beta"}, {"name", "新版本"}},
+            QJsonObject{{"tag_name", "20261011110B1"}, {"name", "旧版本"}},
+            QJsonObject{{"tag_name", "20269999"}, {"name", "无效日期"}},
+            QJsonObject{{"tag_name", "latest"}, {"name", "无日期"}}};
+        checker.readReleases(QJsonDocument(releases).toJson());
+        QCOMPARE(checker.state(), UpdateChecker::State::Available);
+        QCOMPARE(checker.releaseName(), QStringLiteral("新版本"));
+        for (const QByteArray& response : {QByteArray("[]"), QByteArray("{}"), QByteArray("bad json")}) {
+            checker.readReleases(response);
+            QCOMPARE(checker.state(), UpdateChecker::State::Error);
+            QVERIFY(!checker.message().isEmpty());
+        }
+    }
+
+    void updatesRecoverFromNetworkFailureAndPreventDuplicateRequests() {
+        UpdateTestNetwork network;
+        UpdateChecker checker(nullptr, &network);
+        QSignalSpy changes(&checker, &UpdateChecker::changed);
+        network.status = 403;
+        checker.check(); checker.check();
+        QCOMPARE(network.requests, 1);
+        QCOMPARE(checker.state(), UpdateChecker::State::Checking);
+        QTRY_COMPARE(checker.state(), UpdateChecker::State::Error);
+        QVERIFY(checker.message().contains(QStringLiteral("上限")));
+        network.status = 200;
+        network.payload = R"([{"tag_name":"20261022110B2","name":"Update title","body":"Release notes","prerelease":true}])";
+        checker.check();
+        QTRY_COMPARE(checker.state(), UpdateChecker::State::Available);
+        QCOMPARE(network.requests, 2);
+        QCOMPARE(network.lastRequest.url().scheme(), QStringLiteral("https"));
+        QCOMPARE(network.lastRequest.url().path(), QStringLiteral("/repos/aiboqiao6/macdowsOS-Widget/releases"));
+        QVERIFY(network.lastRequest.transferTimeout() > 0);
+        QCOMPARE(changes.count(), 4);
+    }
+
+    void settingsNavigationAndUpdatePopupShowTitleAndNotes() {
+        SettingsDialog dialog(true);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        auto* pages = dialog.findChild<QStackedWidget*>("settingsPages");
+        auto* search = dialog.findChild<QLineEdit*>("settingsSearch");
+        QVERIFY(pages && search);
+        auto* back = dialog.findChild<QPushButton*>("settingsBack");
+        auto* forward = dialog.findChild<QPushButton*>("settingsForward");
+        QVERIFY(back && forward);
+        QVERIFY(!back->isEnabled() && !forward->isEnabled());
+        QCOMPARE(pages->count(), int(SettingsDialog::About) + 1);
+        QVERIFY(!dialog.findChild<QWidget*>("settingsAvatar"));
+        QVERIFY(!dialog.findChild<QWidget*>("settingsIdentity"));
+        QVERIFY(!dialog.findChild<QWidget*>("settingsHistory"));
+        QVERIFY(!dialog.findChild<QWidget*>("historyButton"));
+        auto* version = dialog.findChild<QLabel*>("aboutVersion");
+        auto* build = dialog.findChild<QLabel*>("aboutBuild");
+        QVERIFY(version && build);
+        QVERIFY(pages->widget(SettingsDialog::About)->isAncestorOf(version));
+        QVERIFY(pages->widget(SettingsDialog::About)->isAncestorOf(build));
+        QVERIFY(pages->widget(SettingsDialog::About)->isAncestorOf(
+            dialog.findChild<QPushButton*>("checkForUpdates")));
+        for (auto* label : dialog.findChild<QWidget*>("settingsSidebar")->findChildren<QLabel*>())
+            QVERIFY(!label->text().contains(QString::fromLatin1(AppConfig::Version)));
+        dialog.findChild<QPushButton*>("settingsNav5")->click();
+        QCOMPARE(pages->currentIndex(), int(SettingsDialog::About));
+        QVERIFY(back->isEnabled() && !forward->isEnabled());
+        back->click();
+        QCOMPARE(pages->currentIndex(), int(SettingsDialog::General));
+        QVERIFY(!back->isEnabled() && forward->isEnabled());
+        forward->click();
+        QCOMPARE(pages->currentIndex(), int(SettingsDialog::About));
+        back->click();
+        dialog.findChild<QPushButton*>("settingsNav1")->click();
+        QVERIFY(!forward->isEnabled());
+        dialog.selectPage(SettingsDialog::About);
+        dialog.selectPage(SettingsDialog::About);
+        back->click();
+        QCOMPARE(pages->currentIndex(), int(SettingsDialog::Appearance));
+        forward->click();
+        QCOMPARE(pages->currentIndex(), int(SettingsDialog::About));
+        QVERIFY(!dialog.findChild<QPushButton*>("settingsNav6"));
+        search->setText(QStringLiteral("软件更新"));
+        QCOMPARE(pages->currentIndex(), int(SettingsDialog::About));
+        search->setText(QStringLiteral("天气"));
+        QCOMPARE(pages->currentIndex(), int(SettingsDialog::Weather));
+        QVERIFY(dialog.findChild<QPushButton*>("settingsNav5")->isHidden());
+        back->click();
+        QVERIFY(search->text().isEmpty());
+        QVERIFY(!dialog.findChild<QPushButton*>("settingsNav5")->isHidden());
+        QCOMPARE(pages->currentIndex(), int(SettingsDialog::About));
+        auto* checker = dialog.findChild<UpdateChecker*>();
+        QVERIFY(checker);
+        checker->readReleases(R"([{"tag_name":"20261022110B2","name":"macdowsOS Widget 新版","body":"更新日志第一行\n修复玻璃渲染"}])");
+        auto* popup = dialog.findChild<QDialog*>("updateAvailableDialog");
+        QVERIFY(popup);
+        QTRY_VERIFY(popup->isVisible());
+        QCOMPARE(popup->windowModality(), Qt::WindowModal);
+        QCOMPARE(popup->findChild<QLabel*>("updateReleaseTitle")->text(), QStringLiteral("macdowsOS Widget 新版"));
+        QCOMPARE(popup->findChild<QTextBrowser*>("updateReleaseNotes")->toPlainText(), QStringLiteral("更新日志第一行\n修复玻璃渲染"));
+        QVERIFY(QTest::qWaitForWindowExposed(popup));
+        popup->grab().save("artifacts/settings-update-popup.png");
+        popup->reject();
+        QTest::qWait(100);
+        dialog.selectPage(SettingsDialog::General);
+        dialog.grab().save("artifacts/settings-dark.png");
+        dialog.setDarkAppearance(false);
+        QTest::qWait(100);
+        dialog.grab().save("artifacts/settings-light.png");
+        dialog.reject();
+    }
+
+    void settingsPagesRemainUsableWithoutFooterAtCompactSize() {
+        DesktopWidget widget(nullptr, DesktopWidget::CardKind::Clock, false);
+        bool inspected = false;
+        QTimer::singleShot(100, &widget, [&] {
+            auto* dialog = dynamic_cast<SettingsDialog*>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            auto close = qScopeGuard([dialog] { dialog->reject(); });
+            for (bool dark : {true, false}) {
+                dialog->setDarkAppearance(dark);
+                for (int i = SettingsDialog::General; i <= SettingsDialog::About; ++i) {
+                    dialog->selectPage(i);
+                    QTest::qWait(80);
+                    dialog->grab().save((dark ? QStringLiteral("artifacts/settings-page-%1.png")
+                        : QStringLiteral("artifacts/settings-light-page-%1.png")).arg(i));
+                }
+            }
+            dialog->setDarkAppearance(true);
+            dialog->resize(720, 520);
+            dialog->selectPage(SettingsDialog::Appearance);
+            QTest::qWait(80);
+            QVERIFY(!dialog->findChild<QPushButton*>("settingsDone"));
+            QVERIFY(!dialog->findChild<QPushButton*>("settingsCancel"));
+            QVERIFY(!dialog->findChild<QWidget*>("settingsFooter"));
+            auto* pages = dialog->findChild<QStackedWidget*>("settingsPages");
+            auto* scroll = qobject_cast<QScrollArea*>(pages->currentWidget());
+            QVERIFY(scroll && scroll->verticalScrollBar()->maximum() > 0);
+            dialog->grab().save("artifacts/settings-compact.png");
+            dialog->setDarkAppearance(false);
+            dialog->resize(960, 720);
+            QTest::qWait(80);
+            dialog->grab().save("artifacts/settings-appearance-light.png");
+            inspected = true;
+            dialog->reject();
+        });
+        widget.showSettingsDialog();
+        QVERIFY(inspected);
+    }
+
+    void settingsScaleFollowsSliderAndFitsScreen_data() {
+        QTest::addColumn<int>("percent");
+        for (int percent : {40, 75, 125, 200})
+            QTest::newRow(qPrintable(QString::number(percent))) << percent;
+    }
+
+    void settingsScaleFollowsSliderAndFitsScreen() {
+        QFETCH(int, percent);
+        AppSettings().setValue("appearance/scale", .8);
+        DesktopWidget widget(nullptr, DesktopWidget::CardKind::Clock, false);
+        bool inspected = false;
+        QTimer::singleShot(80, &widget, [&] {
+            auto* dialog = dynamic_cast<SettingsDialog*>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            auto close = qScopeGuard([dialog] { dialog->reject(); });
+            QCOMPARE(dialog->property("settingsInterfaceScale").toDouble(), .8);
+            const qreal basePoints = dialog->font().pointSizeF()
+                / dialog->property("settingsEffectiveScale").toDouble();
+            QWidget reference;
+            AppFonts::useInterfaceText(&reference);
+            const qreal referencePoints = reference.font().pointSizeF() > 0 ? reference.font().pointSizeF()
+                : QFontInfo(reference.font()).pixelSize() * 72. / reference.logicalDpiY();
+            QVERIFY(qAbs(basePoints - referencePoints * SettingsAppearance::number(dialog, "fontScale") * 1.3) < .00001);
+            const QSize original = dialog->size();
+            auto* slider = dialog->findChild<QSlider*>("scaleSlider");
+            QVERIFY(slider);
+            dialog->selectPage(SettingsDialog::Appearance);
+            slider->setValue(percent);
+            QCoreApplication::processEvents();
+            QCOMPARE(dialog->property("settingsInterfaceScale").toDouble(), percent / 100.);
+            const qreal effective = dialog->property("settingsEffectiveScale").toDouble();
+            QVERIFY(effective <= percent / 100.);
+            QCOMPARE(dialog->font().pointSizeF(), basePoints * effective);
+            QCOMPARE(dialog->findChild<QPushButton*>("settingsNav0")->height(),
+                SettingsAppearance::px(dialog, "navigationHeight"));
+            auto* toggle = dialog->findChild<QCheckBox*>("mouseThrough");
+            QCOMPARE(toggle->width(), SettingsAppearance::px(dialog, "toggleWidth"));
+            QVERIFY(dialog->screen()->availableGeometry().contains(dialog->geometry()));
+            QVERIFY(dialog->size() != original);
+            dialog->selectPage(SettingsDialog::Material);
+            QCoreApplication::processEvents();
+            auto* number = dialog->findChild<QDoubleSpinBox*>("materialOpacity");
+            auto* indicator = number->findChild<QWidget*>("settingsStepperIndicator");
+            QVERIFY(number->rect().contains(indicator->geometry()));
+            QVERIFY2(!number->findChild<QLineEdit*>()->geometry().intersects(indicator->geometry()),
+                qPrintable(QStringLiteral("editor %1,%2 %3x%4, stepper %5,%6 %7x%8")
+                    .arg(number->findChild<QLineEdit*>()->x()).arg(number->findChild<QLineEdit*>()->y())
+                    .arg(number->findChild<QLineEdit*>()->width()).arg(number->findChild<QLineEdit*>()->height())
+                    .arg(indicator->x()).arg(indicator->y()).arg(indicator->width()).arg(indicator->height())));
+            const QFont scaledFont = dialog->font();
+            const QSize scaledSize = dialog->size();
+            dialog->setDarkAppearance(!dialog->property("settingsDark").toBool());
+            QCOMPARE(dialog->font(), scaledFont);
+            QCOMPARE(dialog->size(), scaledSize);
+            dialog->grab().save(QStringLiteral("artifacts/settings-interface-scale-%1.png").arg(percent));
+            slider->setValue(80);
+            QCoreApplication::processEvents();
+            QCOMPARE(dialog->size(), original);
+            slider->setValue(percent);
+            inspected = true;
+        });
+        widget.showSettingsDialog();
+        QVERIFY(inspected);
+        QCOMPARE(widget.m_widgetScale, percent / 100.);
+        QCOMPARE(AppSettings().value("appearance/scale").toDouble(), percent / 100.);
+    }
+
+    void settingsBottomRightCornerStaysRounded_data() {
+        QTest::addColumn<int>("percent");
+        for (int percent : {40, 100, 200})
+            QTest::newRow(qPrintable(QString::number(percent))) << percent;
+    }
+
+    void settingsBottomRightCornerStaysRounded() {
+        QFETCH(int, percent);
+        AppSettings().setValue("appearance/scale", percent / 100.);
+        DesktopWidget widget(nullptr, DesktopWidget::CardKind::Clock, false);
+        bool inspected = false;
+        QTimer::singleShot(80, &widget, [&] {
+            auto* dialog = dynamic_cast<SettingsDialog*>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            auto close = qScopeGuard([dialog] { dialog->reject(); });
+            auto* pages = dialog->findChild<QStackedWidget*>("settingsPages");
+            for (bool dark : {false, true}) {
+                dialog->setDarkAppearance(dark);
+                for (int page = SettingsDialog::General; page <= SettingsDialog::About; ++page) {
+                    dialog->selectPage(page);
+                    QCoreApplication::processEvents();
+                    auto* scroll = qobject_cast<QScrollArea*>(pages->currentWidget());
+                    QVERIFY(scroll);
+                    for (bool bottom : {false, true}) {
+                        scroll->verticalScrollBar()->setValue(bottom ? scroll->verticalScrollBar()->maximum() : 0);
+                        QCoreApplication::processEvents();
+                        const QImage frame = dialog->grab().toImage();
+                        const int radius = qRound(SettingsAppearance::px(dialog, "windowRadius") * frame.devicePixelRatio());
+                        const auto pixel = [&](qreal x, qreal y) {
+                            return frame.pixelColor(frame.width() - 1 - qRound(radius * x),
+                                frame.height() - 1 - qRound(radius * y));
+                        };
+                        const QString context = QStringLiteral("scale %1, dark %2, page %3, bottom %4")
+                            .arg(percent).arg(dark).arg(page).arg(bottom);
+                        // Test alpha, not just background color: the desktop must
+                        // remain visible outside the curve, even at scroll end.
+                        QVERIFY2(pixel(0, 0).alpha() == 0, qPrintable(context));
+                        QVERIFY2(pixel(.1, .1).alpha() == 0, qPrintable(context));
+                        QVERIFY2(pixel(.7, .7).alpha() == 255, qPrintable(context));
+                        QVERIFY2(pixel(1.5, .1).alpha() == 255, qPrintable(context));
+                        QVERIFY2(pixel(.1, 1.5).alpha() == 255, qPrintable(context));
+                        int partial = 0;
+                        for (int y = 0; y < radius; ++y)
+                            for (int x = 0; x < radius; ++x) {
+                                const int alpha = frame.pixelColor(frame.width() - 1 - x, frame.height() - 1 - y).alpha();
+                                partial += alpha > 0 && alpha < 255;
+                            }
+                        QVERIFY2(partial > 0, qPrintable(context));
+                        if (page == SettingsDialog::Appearance && bottom)
+                            QVERIFY(frame.save(QStringLiteral("artifacts/settings-rounded-%1-%2.png")
+                                .arg(percent).arg(dark ? "dark" : "light")));
+                    }
+                }
+            }
+            inspected = true;
+        });
+        widget.showSettingsDialog();
+        QVERIFY(inspected);
+    }
+
+    void settingsTrafficIsFlatAndRespondsToPress() {
+        SettingsDialog dialog(true);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        auto close = qScopeGuard([&] { dialog.reject(); });
+        auto* search = dialog.findChild<QLineEdit*>("settingsSearch");
+        const QStringList names{"settingsClose", "settingsMinimize", "settingsZoom"};
+        const char* roles[]{"trafficClose", "trafficMinimize", "trafficZoom"};
+        for (bool dark : {true, false}) {
+            dialog.setDarkAppearance(dark);
+            search->setFocus();
+            QTest::mouseMove(&dialog, dialog.rect().bottomRight() - QPoint(30, 30));
+            for (int i = 0; i < names.size(); ++i) {
+                auto* button = dialog.findChild<QPushButton*>(names[i]);
+                QVERIFY(button);
+                const QImage frame = button->grab().toImage();
+                const QColor fill = SettingsAppearance::color(&dialog, roles[i]);
+                for (qreal y : {.25, .5, .75})
+                    QCOMPARE(frame.pixelColor(frame.width() / 2, qRound(frame.height() * y)), fill);
+            }
+        }
+        auto* zoom = dialog.findChild<QPushButton*>("settingsZoom");
+        QSignalSpy zoomed(zoom, &QPushButton::clicked);
+        const QImage normal = zoom->grab().toImage();
+        QTest::mousePress(zoom, Qt::LeftButton);
+        QVERIFY(zoom->isDown());
+        const QImage pressed = zoom->grab().toImage();
+        QVERIFY(pressed != normal);
+        QVERIFY(pressed.pixelColor(pressed.width() / 2, pressed.height() / 4).lightness()
+            < normal.pixelColor(normal.width() / 2, normal.height() / 4).lightness());
+        QCOMPARE(zoomed.count(), 0);
+        QTest::mouseRelease(zoom, Qt::LeftButton);
+        QCOMPARE(zoomed.count(), 1);
+        QTRY_VERIFY(dialog.isMaximized());
+        zoom->setFocus();
+        QTest::keyPress(zoom, Qt::Key_Space);
+        QVERIFY(zoom->isDown());
+        QTest::keyRelease(zoom, Qt::Key_Space);
+        QTRY_VERIFY(!dialog.isMaximized());
+        auto* minimize = dialog.findChild<QPushButton*>("settingsMinimize");
+        QTest::mousePress(minimize, Qt::LeftButton);
+        QVERIFY(minimize->isDown());
+        QTest::mouseRelease(minimize, Qt::LeftButton);
+        QTRY_VERIFY(dialog.isMinimized());
+        dialog.showNormal();
+        auto* red = dialog.findChild<QPushButton*>("settingsClose");
+        QSignalSpy closed(&dialog, &QDialog::rejected);
+        QTest::mouseClick(red, Qt::LeftButton, Qt::NoModifier, QPoint(1, 1));
+        QCOMPARE(closed.count(), 0);
+        QTest::mousePress(red, Qt::LeftButton);
+        QVERIFY(red->isDown());
+        QVERIFY(dialog.isVisible());
+        QTest::mouseRelease(red, Qt::LeftButton);
+        QCOMPARE(closed.count(), 1);
+        QVERIFY(!dialog.isVisible());
+    }
+
+    void settingsFocusOutlinesFollowActualControls() {
+        SettingsDialog dialog(true);
+        auto* group = dialog.addGroup(SettingsDialog::General);
+        auto* combo = new QComboBox(&dialog);
+        combo->addItems({QStringLiteral("短选项"), QStringLiteral("用于展开列表宽度的一条较长选项")});
+        auto* toggle = new QCheckBox(&dialog);
+        auto* number = new AppText::DoubleSpinBox(&dialog);
+        number->setRange(0, 100);
+        number->setValue(65);
+        auto* scale = new ScaleSelector(100, &dialog);
+        scale->setPreviewEnabled(false);
+        dialog.addRow(group, QStringLiteral("下拉框"), combo);
+        dialog.addRow(group, QStringLiteral("开关"), toggle);
+        dialog.addRow(group, QStringLiteral("数值"), number);
+        group->addWidget(scale);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        auto close = qScopeGuard([&] { dialog.reject(); });
+        for (qreal factor : {.75, 1., 1.5}) {
+            dialog.setInterfaceScale(factor);
+            QCoreApplication::processEvents();
+            const QRectF track = SettingsAppearance::toggleRect(&dialog, toggle);
+            const auto switchOutline = SettingsAppearance::focusOutline(&dialog, toggle);
+            QVERIFY(track.contains(switchOutline.boundingRect()));
+            QVERIFY(switchOutline.boundingRect().height() < toggle->height());
+            QVERIFY(!switchOutline.contains(switchOutline.boundingRect().topLeft()));
+            const QRectF comboOutline = SettingsAppearance::focusOutline(&dialog, combo).boundingRect();
+            QVERIFY(comboOutline.left() > combo->width() / 4.);
+            QVERIFY(QRectF(combo->rect()).contains(comboOutline));
+            const QRectF numberOutline = SettingsAppearance::focusOutline(&dialog, number).boundingRect();
+            QVERIFY(numberOutline.left() > 0);
+            QVERIFY(QRectF(number->rect()).contains(numberOutline));
+            auto* overlay = number->findChild<QWidget*>("settingsFocusIndicator");
+            QVERIFY(overlay && overlay->testAttribute(Qt::WA_TransparentForMouseEvents));
+            QCOMPARE(overlay->geometry(), number->rect());
+            auto* slider = scale->slider();
+            slider->setValue(60);
+            const QRectF first = SettingsAppearance::focusOutline(&dialog, slider).boundingRect();
+            slider->setValue(180);
+            const QRectF last = SettingsAppearance::focusOutline(&dialog, slider).boundingRect();
+            QVERIFY(last.left() > first.right());
+            QCOMPARE(first.size(), last.size());
+            QVERIFY(last.width() < slider->width() / 3.);
+            int index = 0;
+            for (QWidget* control : QList<QWidget*>{combo, toggle, number, slider}) {
+                control->setFocus(Qt::TabFocusReason);
+                QCoreApplication::processEvents();
+                if (auto* focus = control->findChild<QWidget*>("settingsFocusIndicator"))
+                    QVERIFY(focus->isVisible());
+                if (control == slider) {
+                    const QImage frame = slider->grab().toImage();
+                    QRect whiteHandle;
+                    for (int y = 0; y < frame.height(); ++y)
+                        for (int x = 0; x < frame.width(); ++x) {
+                            const QColor pixel = frame.pixelColor(x, y);
+                            if (pixel.red() > 230 && pixel.green() > 230 && pixel.blue() > 230)
+                                whiteHandle |= QRect(x, y, 1, 1);
+                        }
+                    QVERIFY(!whiteHandle.isEmpty());
+                    const QPointF outlineCenter = SettingsAppearance::focusOutline(&dialog, slider).boundingRect().center()
+                        * slider->devicePixelRatioF();
+                    QVERIFY(qAbs(outlineCenter.x() - whiteHandle.center().x()) <= slider->devicePixelRatioF() * 1.5);
+                    QVERIFY(qAbs(outlineCenter.y() - whiteHandle.center().y()) <= slider->devicePixelRatioF() * 1.5);
+                }
+                dialog.grab().save(QStringLiteral("artifacts/settings-shaped-focus-%1-%2.png").arg(factor).arg(index++));
+            }
+        }
+    }
+
+    void settingsControlsMatchPaintedHitAreasAndApplyLive() {
+        DesktopWidget widget(nullptr, DesktopWidget::CardKind::Clock, false);
+        const bool originalStartup = widget.isStartupEnabled();
+        bool inspected = false;
+        QTimer::singleShot(100, &widget, [&] {
+            auto* dialog = dynamic_cast<SettingsDialog*>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            auto close = qScopeGuard([dialog] { dialog->reject(); });
+            auto* through = dialog->findChild<QCheckBox*>("mouseThrough");
+            auto* power = dialog->findChild<QCheckBox*>("lowPowerRefresh");
+            auto* backdrop = dialog->findChild<QCheckBox*>("liveBackdrop");
+            auto* quality = dialog->findChild<QComboBox*>("renderQuality");
+            auto* opacity = dialog->findChild<QDoubleSpinBox*>("materialOpacity");
+            QVERIFY(through && power && backdrop && quality && opacity);
+            QVERIFY(!dialog->findChild<QComboBox*>("fontSmoothing"));
+            for (auto* label : dialog->findChildren<QLabel*>()) {
+                QVERIFY(label->text() != QStringLiteral("字体抗锯齿"));
+                QVERIFY(label->text() != QStringLiteral("文字显示"));
+                QVERIFY(!label->text().contains(QStringLiteral("统一使用内置苹方与自研灰阶栅格器")));
+            }
+            const QFont initialFont = dialog->font();
+            const int initialNavigationHeight = dialog->findChild<QPushButton*>("settingsNav0")->height();
+            for (bool dark : {true, false}) {
+                dialog->setDarkAppearance(dark);
+                dialog->selectPage(SettingsDialog::General);
+                QTest::qWait(30);
+                QCOMPARE(through->width(), SettingsAppearance::px(dialog, "toggleWidth"));
+                QVERIFY(!power->isEnabled());
+                // Both ends of the visible switch must operate the native control.
+                QTest::mouseClick(through, Qt::LeftButton, Qt::NoModifier,
+                    QPoint(through->width() - 4, through->height() / 2));
+                QVERIFY(widget.mouseThroughEnabled());
+                QVERIFY(power->isEnabled());
+                QTest::keyClick(power, Qt::Key_Space);
+                QVERIFY(widget.lowPowerRefreshEnabled());
+                QVERIFY(AppSettings().value("interaction/lowPowerRefresh").toBool());
+                QTest::mouseClick(through, Qt::LeftButton, Qt::NoModifier,
+                    QPoint(4, through->height() / 2));
+                QVERIFY(!widget.mouseThroughEnabled());
+                QVERIFY(!power->isChecked() && !power->isEnabled());
+                QVERIFY(!widget.lowPowerRefreshEnabled());
+                QVERIFY(!AppSettings().value("interaction/mouseThrough").toBool());
+                QVERIFY(!AppSettings().value("interaction/lowPowerRefresh").toBool());
+
+                dialog->selectPage(SettingsDialog::Appearance);
+                auto* pages = dialog->findChild<QStackedWidget*>("settingsPages");
+                auto* scroll = qobject_cast<QScrollArea*>(pages->currentWidget());
+                scroll->ensureWidgetVisible(quality);
+                const bool before = backdrop->isChecked();
+                QTest::mouseClick(backdrop, Qt::LeftButton);
+                QCOMPARE(widget.liveBackdropEnabled(), !before);
+                QCOMPARE(AppSettings().value("appearance/liveBackdrop").toBool(), !before);
+                quality->showPopup();
+                QTRY_VERIFY(quality->view()->isVisible());
+                QTest::keyClick(quality->view(), Qt::Key_Down);
+                QTest::keyClick(quality->view(), Qt::Key_Return);
+                QVERIFY(!quality->view()->isVisible());
+                QCOMPARE(widget.renderScale(), quality->currentData().toFloat());
+                QCOMPARE(AppSettings().value("performance/renderScale").toFloat(), widget.renderScale());
+                QCoreApplication::processEvents();
+                QCOMPARE(dialog->font(), initialFont);
+                QCOMPARE(dialog->findChild<QPushButton*>("settingsNav0")->height(), initialNavigationHeight);
+                QCOMPARE(DesktopWidget::globalFontSmoothing(), 4);
+                QCOMPARE(AppSettings().value("appearance/fontSmoothing").toInt(), 4);
+
+                dialog->selectPage(SettingsDialog::Material);
+                QTest::qWait(30);
+                auto* indicator = opacity->findChild<QWidget*>("settingsStepperIndicator");
+                auto* editor = opacity->findChild<QLineEdit*>();
+                QVERIFY(indicator && editor);
+                QCOMPARE(indicator->geometry().right(), opacity->rect().right());
+                QVERIFY(!editor->geometry().intersects(indicator->geometry()));
+                const double value = opacity->value();
+                const QPoint upper = indicator->geometry().center() - QPoint(0, indicator->height() / 4);
+                const QPoint lower = indicator->geometry().center() + QPoint(0, indicator->height() / 4);
+                if (value == opacity->maximum()) {
+                    QTest::mouseClick(opacity, Qt::LeftButton, Qt::NoModifier, lower);
+                    QCOMPARE(opacity->value(), value - 1);
+                    QTest::mouseClick(opacity, Qt::LeftButton, Qt::NoModifier, upper);
+                } else {
+                    QTest::mouseClick(opacity, Qt::LeftButton, Qt::NoModifier, upper);
+                    QCOMPARE(opacity->value(), value + 1);
+                    QTest::mouseClick(opacity, Qt::LeftButton, Qt::NoModifier, lower);
+                }
+                QCOMPARE(opacity->value(), value);
+                editor->setFocus();
+                editor->selectAll();
+                QTest::keyClicks(editor, "65");
+                QCOMPARE(widget.glassOpacity(), 0.65f);
+                QCOMPARE(AppSettings().value("material/opacity").toFloat(), 0.65f);
+                dialog->grab().save(dark ? "artifacts/settings-live-material-dark.png"
+                    : "artifacts/settings-live-material-light.png");
+            }
+            inspected = true;
+            // Close while the numeric editor still has focus.
+            dialog->close();
+        });
+        widget.showSettingsDialog();
+        QVERIFY(inspected);
+        QCOMPARE(widget.glassOpacity(), 0.65f);
+        QCOMPARE(AppSettings().value("material/opacity").toFloat(), 0.65f);
+        QCOMPARE(widget.isStartupEnabled(), originalStartup);
+    }
+
+    void settingsScaleDragFlushesOnClose() {
+        DesktopWidget widget(nullptr, DesktopWidget::CardKind::Clock, false);
+        bool inspected = false;
+        QTimer::singleShot(0, &widget, [&] {
+            auto* dialog = dynamic_cast<SettingsDialog*>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            auto close = qScopeGuard([dialog] { dialog->reject(); });
+            auto* slider = dialog->findChild<QSlider*>("scaleSlider");
+            QVERIFY(slider);
+            dialog->selectPage(SettingsDialog::Appearance);
+            slider->setSliderDown(true);
+            slider->setValue(140);
+            QTRY_COMPARE_WITH_TIMEOUT(widget.m_widgetScale, 1.4, 500);
+            slider->setValue(155);
+            inspected = true;
+            dialog->close();
+        });
+        widget.showSettingsDialog();
+        QVERIFY(inspected);
+        QCOMPARE(widget.m_widgetScale, 1.55);
+        QCOMPARE(AppSettings().value("appearance/scale").toDouble(), 1.55);
+    }
+
+    void rightClickMenusOmitAbout() {
+        if (!QSystemTrayIcon::isSystemTrayAvailable()) QSKIP("No Windows tray available");
+        DesktopWidget widget(nullptr, DesktopWidget::CardKind::Clock, false);
+        widget.setupTrayIcon();
+        QVERIFY(widget.m_trayIcon && widget.m_trayIcon->contextMenu());
+        bool settings = false;
+        for (QAction* action : widget.m_trayIcon->contextMenu()->actions()) {
+            QVERIFY(!action->text().contains(QStringLiteral("关于")));
+            settings |= action->text() == QStringLiteral("设置…");
+        }
+        QVERIFY(settings);
+    }
+
+    void settingsTextIsIndependentOfWidgetPreferences() {
+        SettingsDialog dialog(true);
+        auto* combo = new QComboBox(&dialog);
+        combo->addItem(QStringLiteral("文字 Aa 123"));
+        dialog.addRow(dialog.addGroup(SettingsDialog::General), QStringLiteral("渲染检查"), combo);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        auto close = qScopeGuard([&] { dialog.reject(); DesktopWidget::setGlobalFontSmoothing(4); });
+        auto* title = dialog.findChild<QLabel*>("settingsTitle");
+        auto* navigation = dialog.findChild<QPushButton*>("settingsNav1");
+        QVERIFY(title && navigation);
+        const auto snapshot = [](QWidget* widget) {
+            QImage image(widget->size() * widget->devicePixelRatioF(), QImage::Format_ARGB32_Premultiplied);
+            image.setDevicePixelRatio(widget->devicePixelRatioF());
+            image.fill(Qt::transparent);
+            widget->render(&image, QPoint(), QRegion(), QWidget::DrawChildren);
+            return image;
+        };
+        const QImage originalTitle = snapshot(title), originalCombo = snapshot(combo), originalNavigation = snapshot(navigation);
+        const QSize originalSize = dialog.size();
+        const QFont originalFont = title->font();
+        const QColor originalInk = navigation->property("settingsNavigationInk").value<QColor>();
+        QVERIFY(originalFont.styleStrategy() & QFont::NoSubpixelAntialias);
+        int glyphs = 0;
+        for (int y = 0; y < originalTitle.height(); ++y)
+            for (int x = 0; x < originalTitle.width(); ++x) {
+                const QColor pixel = originalTitle.pixelColor(x, y);
+                if (!pixel.alpha()) continue;
+                ++glyphs;
+                QCOMPARE(pixel.red(), pixel.green());
+                QCOMPARE(pixel.green(), pixel.blue());
+            }
+        QVERIFY(glyphs > 20);
+        const bool originalImages = AppSettings().value("appearance/imageAntialiasing", true).toBool();
+        auto restoreImages = qScopeGuard([&] { DesktopWidget::setGlobalImageAntialiasing(originalImages); });
+        for (int level : {0, 1, 2, 3, 4, 0, 4}) {
+            DesktopWidget::setGlobalFontSmoothing(level);
+            DesktopWidget::setGlobalImageAntialiasing(level % 2);
+            AppSettings().setValue("performance/renderScale", level % 2 ? .6 : 1.5);
+            QCoreApplication::processEvents();
+            QCOMPARE(dialog.size(), originalSize);
+            QCOMPARE(title->font(), originalFont);
+            QCOMPARE(snapshot(title), originalTitle);
+            QCOMPARE(snapshot(combo), originalCombo);
+            QCOMPARE(snapshot(navigation), originalNavigation);
+            QCOMPARE(navigation->property("settingsNavigationInk").value<QColor>(), originalInk);
+            // A settings window opened after changing the preference must match too.
+            SettingsDialog next(true);
+            QCOMPARE(next.font().styleStrategy(), dialog.font().styleStrategy());
+            QCOMPARE(next.font().hintingPreference(), dialog.font().hintingPreference());
+        }
+        dialog.grab().save("artifacts/settings-stable-text.png");
+    }
+
+    void settingsLayoutCacheTracksFontAndNewControls() {
+        SettingsDialog dialog(false);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        auto close = qScopeGuard([&] { dialog.reject(); });
+        auto* navigation = dialog.findChild<QPushButton*>("settingsNav0");
+        QVERIFY(navigation);
+        const int originalHeight = navigation->height();
+        QFont font = dialog.font();
+        font.setPointSizeF(font.pointSizeF() * 1.2);
+        dialog.setFont(font);
+        QTRY_COMPARE(navigation->height(), SettingsAppearance::px(&dialog, "navigationHeight"));
+        QVERIFY(navigation->height() > originalHeight);
+        auto* combo = new QComboBox(&dialog);
+        combo->addItems({QStringLiteral("较短"), QStringLiteral("更长的动态设置选项")});
+        dialog.addRow(dialog.addGroup(SettingsDialog::General), QStringLiteral("新增设置"), combo);
+        dialog.resize(dialog.size() + QSize(10, 0));
+        QVERIFY(combo->property("settingsBodyFont").toBool());
+        QVERIFY(combo->font().styleStrategy() & QFont::NoSubpixelAntialias);
+        QVERIFY(combo->minimumWidth() <= combo->maximumWidth());
+        dialog.setDarkAppearance(true);
+        QCOMPARE(navigation->property("settingsNavigationInk").value<QColor>(), SettingsAppearance::color(&dialog, "navigationLight"));
+        delete combo;
+        dialog.resize(dialog.size() + QSize(10, 0));
+    }
+
+    void settingsClockStopsWhileMinimizedAndRestarts() {
+        SettingsDialog dialog(false);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        auto close = qScopeGuard([&] { dialog.reject(); });
+        const auto clocks = dialog.findChildren<QThread*>(QString(), Qt::FindDirectChildrenOnly);
+        QCOMPARE(clocks.size(), 1);
+        QVERIFY(clocks.first()->isRunning());
+        dialog.showMinimized();
+        QTRY_VERIFY(dialog.isMinimized());
+        QTRY_VERIFY(!clocks.first()->isRunning());
+        const quint64 ticks = dialog.property("settingsVSyncTicks").toULongLong();
+        QTest::qWait(120);
+        QCOMPARE(dialog.property("settingsVSyncTicks").toULongLong(), ticks);
+        dialog.showNormal();
+        QTRY_VERIFY(clocks.first()->isRunning());
+        QTRY_VERIFY_WITH_TIMEOUT(dialog.property("settingsVSyncTicks").toULongLong() > ticks, 2000);
+    }
+
+    void settingsWindowPerformance() {
+        ColorWindow background;
+        background.setGeometry(QGuiApplication::primaryScreen()->availableGeometry());
+        background.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&background));
+        DesktopWidget widget(nullptr, DesktopWidget::CardKind::Clock, false);
+        bool inspected = false;
+        QTimer::singleShot(100, &widget, [&] {
+            auto* dialog = dynamic_cast<SettingsDialog*>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            auto close = qScopeGuard([&] { dialog->reject(); });
+            dialog->setWindowFlag(Qt::WindowStaysOnTopHint);
+            dialog->show(); dialog->raise();
+            auto* blur = static_cast<SettingsBackdrop*>(dialog->findChild<QWidget*>("settingsSidebarBlur"));
+            QVERIFY(blur);
+            QTRY_VERIFY_WITH_TIMEOUT(!blur->backdropPixelSize().isEmpty(), 4000);
+            QList<double> resizeMs, responseMs, blurMs;
+            const QSize original = dialog->size();
+            for (int i = 0; i < 50; ++i) {
+                QElapsedTimer elapsed; elapsed.start();
+                dialog->resize(original + QSize((i % 2 ? 1 : -1) * (12 + i), 0));
+                QCoreApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
+                if (i >= 5) resizeMs.append(elapsed.nsecsElapsed() / 1e6);
+                QCoreApplication::processEvents();
+            }
+            dialog->resize(original);
+            QTest::qWait(150);
+            for (int i = 0; i < 10; ++i) {
+                background.color = i % 2 ? QColor(30, 60, 230) : QColor(230, 40, 30);
+                QElapsedTimer elapsed; elapsed.start();
+                background.update();
+                const auto matches = [&] {
+                    const auto image = blur->grab().toImage();
+                    const QColor pixel = image.pixelColor(image.width() / 2, image.height() * 3 / 4);
+                    return qAbs(pixel.red() - background.color.red()) < 15
+                        && qAbs(pixel.blue() - background.color.blue()) < 15;
+                };
+                while (!matches() && elapsed.elapsed() < 1500) QTest::qWait(2);
+                QVERIFY(matches());
+                responseMs.append(elapsed.nsecsElapsed() / 1e6);
+            }
+            QImage source(240, 600, QImage::Format_RGB32);
+            for (int y = 0; y < source.height(); ++y)
+                for (int x = 0; x < source.width(); ++x)
+                    source.setPixel(x, y, qRgb(x % 256, y % 256, (x + y) % 256));
+            for (int i = 0; i < 25; ++i) {
+                QElapsedTimer elapsed; elapsed.start();
+                const auto result = SettingsBackdrop::blurred(source, 4);
+                QVERIFY(!result.isNull());
+                if (i >= 5) blurMs.append(elapsed.nsecsElapsed() / 1e6);
+            }
+            const auto report = [](const char* label, QList<double> samples) {
+                std::sort(samples.begin(), samples.end());
+                qInfo() << label << "median_ms" << samples[samples.size() / 2]
+                    << "p95_ms" << samples[qMin(samples.size() - 1, qsizetype(samples.size() * .95))];
+            };
+            report("settings_resize", resizeMs);
+            report("settings_background_response", responseMs);
+            report("settings_blur_240x600", blurMs);
+#ifdef Q_OS_WIN
+            const auto cpuTime = [] {
+                FILETIME created{}, exited{}, kernel{}, user{};
+                GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user);
+                const auto ticks = [](FILETIME time) {
+                    return (quint64(time.dwHighDateTime) << 32) | time.dwLowDateTime;
+                };
+                return (ticks(kernel) + ticks(user)) / 10000.;
+            };
+            const auto footprint = [&](const char* state) {
+                const double before = cpuTime();
+                const auto ticks = dialog->property("settingsVSyncTicks").toULongLong();
+                const auto frames = dialog->property("settingsBackdropFrames").toULongLong();
+                QElapsedTimer wall; wall.start();
+                QTest::qWait(2000);
+                PROCESS_MEMORY_COUNTERS_EX memory{}; memory.cb = sizeof(memory);
+                QVERIFY(GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory), sizeof(memory)));
+                qInfo() << state << "cpu_ms_per_second" << (cpuTime() - before) * 1000 / wall.elapsed()
+                    << "private_bytes" << quint64(memory.PrivateUsage)
+                    << "working_set_bytes" << quint64(memory.WorkingSetSize)
+                    << "ticks" << dialog->property("settingsVSyncTicks").toULongLong() - ticks
+                    << "backgrounds" << dialog->property("settingsBackdropFrames").toULongLong() - frames;
+            };
+            footprint("settings_stationary");
+            dialog->showMinimized();
+            QTest::qWait(100);
+            footprint("settings_minimized");
+            dialog->showNormal();
+#endif
+            inspected = true;
+        });
+        widget.showSettingsDialog();
+        QVERIFY(inspected);
+    }
+
+    void settingsBlurPreservesPixelsAndBoundsWork() {
+        const auto oldBlur = [](const QImage& source, int radius) {
+            QImage input = source.convertToFormat(QImage::Format_RGB32);
+            for (int pass = 0; pass < 6; ++pass) {
+                const bool horizontal = pass % 2 == 0;
+                QImage output(input.size(), QImage::Format_RGB32);
+                const int length = horizontal ? input.width() : input.height();
+                const int lines = horizontal ? input.height() : input.width();
+                const int count = 2 * radius + 1;
+                for (int line = 0; line < lines; ++line) {
+                    const auto pixel = [&](int offset) {
+                        offset = qBound(0, offset, length - 1);
+                        return reinterpret_cast<const QRgb*>(input.constScanLine(horizontal ? line : offset))[horizontal ? offset : line];
+                    };
+                    int red = 0, green = 0, blue = 0;
+                    for (int offset = -radius; offset <= radius; ++offset) {
+                        const QRgb c = pixel(offset);
+                        red += qRed(c); green += qGreen(c); blue += qBlue(c);
+                    }
+                    for (int offset = 0; offset < length; ++offset) {
+                        reinterpret_cast<QRgb*>(output.scanLine(horizontal ? line : offset))[horizontal ? offset : line]
+                            = qRgb(red / count, green / count, blue / count);
+                        const QRgb before = pixel(offset - radius), after = pixel(offset + radius + 1);
+                        red += qRed(after) - qRed(before); green += qGreen(after) - qGreen(before); blue += qBlue(after) - qBlue(before);
+                    }
+                }
+                input = std::move(output);
+            }
+            return input;
+        };
+        for (const QSize size : {QSize(1, 1), QSize(1, 17), QSize(17, 1), QSize(59, 37), QSize(240, 600)}) {
+            QImage source(size, QImage::Format_RGB32);
+            for (int y = 0; y < size.height(); ++y)
+                for (int x = 0; x < size.width(); ++x)
+                    source.setPixel(x, y, qRgb((x * 13 + y * 7) % 256, (x * 29 + y * 3) % 256, (x + y * 31) % 256));
+            for (int radius : {1, 4, 30, 129}) {
+                QElapsedTimer timer; timer.start();
+                const QImage expected = oldBlur(source, radius);
+                const qint64 before = timer.nsecsElapsed(); timer.restart();
+                const QImage actual = SettingsBackdrop::blurred(source, radius);
+                const qint64 after = timer.nsecsElapsed();
+                QCOMPARE(actual, expected);
+                if (size == QSize(240, 600) && radius == 4)
+                    qInfo() << "Sidebar blur CPU ms before:" << before / 1e6 << "after:" << after / 1e6;
+            }
+        }
+        SettingsBackdrop backdrop(nullptr);
+        backdrop.resize(240, 600);
+        int delivered = 0;
+        backdrop.presented = [&] { ++delivered; };
+        QImage source(240, 600, QImage::Format_RGB32);
+        source.fill(Qt::red);
+        for (int i = 0; i < 100; ++i) backdrop.setBackdrop(source, 4);
+        source.fill(Qt::blue);
+        backdrop.setBackdrop(source, 4);
+        QTRY_VERIFY_WITH_TIMEOUT(delivered == 2, 2000);
+        QCOMPARE(backdrop.grab().toImage().pixelColor(120, 300), QColor(Qt::blue));
+        backdrop.setBackdrop(source, 4);
+        backdrop.clearPending();
+        QTest::qWait(80);
+        QCOMPARE(delivered, 2);
+        QVERIFY(backdrop.backdropPixelSize().isEmpty());
+        auto* destroyed = new SettingsBackdrop(nullptr);
+        destroyed->setBackdrop(source, 4);
+        delete destroyed;
+        QTest::qWait(30); // A running worker must never deliver to a destroyed widget.
+    }
+
+    void settingsSidebarFollowsWindowBehindIt() {
+        ColorWindow background;
+        background.color = QColor(230, 40, 30);
+        background.setGeometry(QGuiApplication::primaryScreen()->availableGeometry());
+        background.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&background));
+        SettingsDialog dialog(true);
+        dialog.setWindowFlag(Qt::WindowStaysOnTopHint);
+        dialog.show(); dialog.raise();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        auto* blur = dialog.findChild<QWidget*>("settingsSidebarBlur");
+        auto* sidebar = dialog.findChild<QWidget*>("settingsSidebar");
+        QVERIFY(blur && sidebar);
+        QCOMPARE(blur->geometry(), sidebar->geometry());
+        const auto rightPixel = [&dialog] {
+            const QImage frame = dialog.grab().toImage();
+            return frame.pixelColor(frame.width() * 4 / 5, frame.height() * 3 / 4);
+        };
+        const auto sample = [blur] {
+            const QImage frame = blur->grab().toImage();
+            return frame.pixelColor(frame.width() / 2, frame.height() * 3 / 4);
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(sample().red() > sample().blue() + 30, 5000);
+        const QColor opaqueRight = rightPixel();
+        background.color = QColor(30, 60, 230);
+        background.centerStripe = QColor(90, 200, 230);
+        background.update();
+        QTRY_VERIFY_WITH_TIMEOUT(sample().blue() > sample().red() + 30, 5000);
+        QCOMPARE(rightPixel(), opaqueRight);
+        const auto renderedSidebar = [&dialog] {
+            const QImage frame = dialog.grab().toImage();
+            return frame.pixelColor(frame.width() / 6, frame.height() * 3 / 4);
+        };
+        const auto sidebarMatches = [&](const QColor& source) {
+            const QColor overlay = SettingsAppearance::color(&dialog, "sidebar");
+            const qreal alpha = overlay.alphaF();
+            const QColor actual = renderedSidebar();
+            return qAbs(actual.red() - qRound(source.red() * (1 - alpha) + overlay.red() * alpha)) <= 4
+                && qAbs(actual.green() - qRound(source.green() * (1 - alpha) + overlay.green() * alpha)) <= 4
+                && qAbs(actual.blue() - qRound(source.blue() * (1 - alpha) + overlay.blue() * alpha)) <= 4;
+        };
+        background.centerStripe = QColor();
+        background.update();
+        for (bool dark : {true, false}) {
+            dialog.setDarkAppearance(dark);
+            QTRY_VERIFY2_WITH_TIMEOUT(sidebarMatches(background.color),
+                qPrintable(QStringLiteral("dark=%1 rendered=%2 raw=%3").arg(dark)
+                    .arg(renderedSidebar().name()).arg(sample().name())), 2000);
+        }
+        auto* navigation = dialog.findChild<QPushButton*>("settingsNav1");
+        QVERIFY(navigation);
+        for (bool dark : {true, false}) {
+            dialog.setDarkAppearance(dark);
+            const QColor stableInk = navigation->property("settingsNavigationInk").value<QColor>();
+            for (bool bright : {true, false}) {
+                background.color = bright ? Qt::white : Qt::black;
+                background.update();
+                QTRY_VERIFY_WITH_TIMEOUT(bright ? sample().lightness() > 235 : sample().lightness() < 20, 3000);
+                QTRY_VERIFY_WITH_TIMEOUT(dark
+                    ? navigation->property("settingsNavigationInk").value<QColor>().lightness() > 200
+                    : navigation->property("settingsNavigationInk").value<QColor>().lightness() < 60, 3000);
+                QCOMPARE(navigation->property("settingsNavigationInk").value<QColor>(), stableInk);
+            }
+        }
+        // In-process widgets are deliberately excluded from WGC and must still
+        // animate through the sidebar after its current backdrop is rebuilt.
+        ImageQualityGlass lower;
+        lower.setDesktopCaptureEnabled(false);
+        lower.setGlassRenderingEnabled(false);
+        lower.setFixedSize(background.size());
+        lower.move(background.pos());
+        QColor lowerColor(230, 40, 30);
+        lower.content = [&](QPainter& painter) { painter.fillRect(lower.rect(), lowerColor); };
+        lower.show(); lower.raise(); dialog.raise();
+        QVERIFY(QTest::qWaitForWindowExposed(&lower));
+        for (bool warm : {true, false, true, false}) {
+            lowerColor = warm ? QColor(230, 40, 30) : QColor(30, 60, 230);
+            lower.update();
+            QTRY_VERIFY_WITH_TIMEOUT(sidebarMatches(lowerColor), 3000);
+        }
+        dialog.grab().save("artifacts/settings-live-blur.png");
+        dialog.reject();
+    }
+
+    void settingsSidebarStaysLiveWhileDraggingAtIndependentResolution() {
+        AppSettings().setValue("performance/renderScale", 1.5);
+        ColorWindow background;
+        background.setGeometry(QGuiApplication::primaryScreen()->availableGeometry());
+        background.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&background));
+        SettingsDialog dialog(false);
+        dialog.setWindowFlag(Qt::WindowStaysOnTopHint);
+        dialog.show(); dialog.raise();
+        auto close = qScopeGuard([&] { dialog.reject(); });
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        auto* blur = static_cast<SettingsBackdrop*>(dialog.findChild<QWidget*>("settingsSidebarBlur"));
+        auto* region = dialog.findChild<QWidget*>("settingsToolbar");
+        QVERIFY(blur && region);
+        const qreal scale = dialog.devicePixelRatioF() * .6;
+        QTRY_VERIFY_WITH_TIMEOUT(qAbs(blur->backdropPixelSize().width() - qRound(blur->width() * scale)) <= 1, 3000);
+        QVERIFY(qAbs(blur->backdropPixelSize().height() - qRound(blur->height() * scale)) <= 1);
+        const QSize pixels = blur->backdropPixelSize();
+        QCOMPARE(dialog.property("settingsCaptureArea").toRect().size(), blur->size());
+        AppSettings().setValue("performance/renderScale", .6);
+        for (auto* label : dialog.findChild<QWidget*>("settingsSidebar")->findChildren<QLabel*>())
+            QVERIFY(label->text() != QStringLiteral("设置"));
+        QTimer animation;
+        int phase = 0;
+        connect(&animation, &QTimer::timeout, &background, [&] {
+            background.color = QColor::fromHsv((++phase * 19) % 360, 230, 210);
+            background.update();
+        });
+        animation.start(30);
+        const QPoint start = dialog.pos(), local(100, region->height() / 2);
+        const QPoint anchor = region->mapToGlobal(local);
+        mouse(*region, QEvent::MouseButtonPress, local, anchor, Qt::LeftButton, Qt::LeftButton);
+        QVERIFY(QWidget::mouseGrabber() == region);
+        QSet<QRgb> colors;
+        QElapsedTimer elapsed;
+        elapsed.start();
+        qint64 lastUpdate = 0, largestGap = 0;
+        QRgb previous = 0;
+        QPoint global = anchor;
+        for (int i = 0; i < 70; ++i) {
+            global = anchor + QPoint(qRound(std::sin(i * .19) * 110), qRound(std::cos(i * .23) * 35) - 35);
+            mouse(*region, QEvent::MouseMove, region->mapFromGlobal(global), global, Qt::NoButton, Qt::LeftButton);
+            QTest::qWait(16);
+            const QImage frame = blur->grab().toImage();
+            const QRgb pixel = frame.pixel(frame.width() / 2, frame.height() * 3 / 4);
+            colors.insert(pixel);
+            if (pixel != previous) {
+                largestGap = qMax(largestGap, elapsed.elapsed() - lastUpdate);
+                lastUpdate = elapsed.elapsed();
+                previous = pixel;
+            }
+        }
+        mouse(*region, QEvent::MouseButtonRelease, region->mapFromGlobal(global), global, Qt::LeftButton, Qt::NoButton);
+        animation.stop();
+        QVERIFY(dialog.pos() != start);
+        QVERIFY(QWidget::mouseGrabber() != region);
+        qInfo() << "Sidebar updates while dragging:" << colors.size() << "longest gap ms:" << largestGap;
+        QVERIFY2(colors.size() >= 12, "Sidebar stopped updating while the mouse was held and moving");
+        QVERIFY2(largestGap < 250, "Sidebar froze for more than 250 ms while dragging");
+        QCOMPARE(blur->backdropPixelSize(), pixels);
+        dialog.grab().save("artifacts/settings-live-drag.png");
+    }
+
+    void settingsVSyncKeepsFramesDuringContinuousMovement() {
+        ColorWindow background;
+        background.setGeometry(QGuiApplication::primaryScreen()->availableGeometry());
+        background.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&background));
+        SettingsDialog dialog(false);
+        dialog.setWindowFlag(Qt::WindowStaysOnTopHint);
+        dialog.show(); dialog.raise();
+        auto close = qScopeGuard([&] { dialog.reject(); });
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        QTRY_VERIFY_WITH_TIMEOUT(dialog.property("settingsBackdropFrames").toULongLong() > 0, 4000);
+#ifdef Q_OS_WIN
+        QTRY_VERIFY_WITH_TIMEOUT(dialog.property("settingsVSyncActive").toBool(), 2000);
+#endif
+        auto* region = dialog.findChild<QWidget*>("settingsToolbar");
+        QVERIFY(region);
+        const QPoint local(100, region->height() / 2), anchor = region->mapToGlobal(local);
+        mouse(*region, QEvent::MouseButtonPress, local, anchor, Qt::LeftButton, Qt::LeftButton);
+        QVERIFY(QWidget::mouseGrabber() == region);
+        const quint64 before = dialog.property("settingsBackdropFrames").toULongLong();
+        QElapsedTimer clock;
+        clock.start();
+        QTimer motion, animation;
+        int moves = 0, phase = 0;
+        QPoint global = anchor;
+        // Input runs much faster than capture completion. The old geometry checks
+        // rejected every in-flight frame here, unlike a 16 ms step-and-wait test.
+        connect(&motion, &QTimer::timeout, &dialog, [&] {
+            const qreal t = clock.elapsed();
+            global = anchor + QPoint(qRound(std::sin(t * .012) * 110), qRound(std::cos(t * .009) * 35));
+            mouse(*region, QEvent::MouseMove, region->mapFromGlobal(global), global, Qt::NoButton, Qt::LeftButton);
+            ++moves;
+        });
+        connect(&animation, &QTimer::timeout, &background, [&] {
+            background.color = QColor::fromHsv((++phase * 23) % 360, 230, 210);
+            background.update();
+        });
+        motion.setTimerType(Qt::PreciseTimer);
+        motion.start(1);
+        animation.start(20);
+        QTest::qWait(2000);
+        const quint64 submitted = dialog.property("settingsBackdropFrames").toULongLong() - before;
+        motion.stop(); animation.stop();
+        mouse(*region, QEvent::MouseButtonRelease, region->mapFromGlobal(global), global, Qt::LeftButton, Qt::NoButton);
+        qInfo() << "Continuous drag moves:" << moves << "presented backgrounds:" << submitted
+                << "DWM synced:" << dialog.property("settingsVSyncActive").toBool();
+        QVERIFY(moves > 100);
+        QVERIFY2(submitted >= 10, "Continuous mouse movement starved background presentation");
+        dialog.grab().save("artifacts/settings-vsync-continuous-drag.png");
+        dialog.hide();
+        const quint64 ticks = dialog.property("settingsVSyncTicks").toULongLong();
+        QTest::qWait(80);
+        QCOMPARE(dialog.property("settingsVSyncTicks").toULongLong(), ticks);
+        dialog.show();
+        QTRY_VERIFY_WITH_TIMEOUT(dialog.property("settingsVSyncTicks").toULongLong() > ticks, 2000);
+    }
+
     void customWidgetValidationAndImportExport() {
         QTemporaryDir directory;
         auto definition = CustomWidgets::makeTemplate(2);
@@ -426,13 +1659,13 @@ private slots:
         QVERIFY(dialog.collect().id != saved.first().id);
     }
 
-    void customSettingsOpensUsableEditorAndRetainsPendingSettings_data() {
+    void customSettingsOpensUsableEditorAndRetainsLiveSettings_data() {
         QTest::addColumn<bool>("reuseEditor");
         QTest::newRow("new-editor") << false;
         QTest::newRow("reuse-desktop-editor") << true;
     }
 
-    void customSettingsOpensUsableEditorAndRetainsPendingSettings() {
+    void customSettingsOpensUsableEditorAndRetainsLiveSettings() {
         QFETCH(bool, reuseEditor);
         auto cleanup = qScopeGuard([] { DesktopWidget::shutdown(); });
         auto* owner = new DesktopWidget(nullptr, DesktopWidget::CardKind::Clock, false);
@@ -482,7 +1715,7 @@ private slots:
         QVERIFY(foundEntry); QVERIFY(independentSettings); QVERIFY(usableEditor); QVERIFY(ownedWindowModal);
         QVERIFY(nativeEnabled); QVERIFY(nativeOwnerMatches); QVERIFY(saved); QVERIFY(returnedToSettings);
         QCOMPARE(CustomWidgets::load().first().name, QStringLiteral("从设置创建"));
-        QCOMPARE(AppSettings().value("appearance/darkMode", false).toBool(), originalDarkMode);
+        QCOMPARE(AppSettings().value("appearance/darkMode", false).toBool(), !originalDarkMode);
     }
 
     void customGallerySeparatesSearchesAndRefreshesCatalog() {
@@ -668,6 +1901,52 @@ private slots:
         for (int i = 0; i < 6; ++i) view.setDocument(CustomWidgets::sandboxedDocument(definition));
         QTRY_VERIFY_WITH_TIMEOUT(view.hasLoaded(), 10000);
         QVERIFY(view.errorText().isEmpty());
+    }
+
+    void customHtmlLoadsBundledPingFangOffline() {
+        QFile originalFont(QStringLiteral(":/fonts/pingfang0.ttf"));
+        QVERIFY(originalFont.open(QIODevice::ReadOnly));
+        QRawFont original, web;
+        original.loadFromData(originalFont.readAll(), 28, QFont::PreferNoHinting);
+        web.loadFromData(AppFonts::webFontData(), 28, QFont::PreferNoHinting);
+        QVERIFY(original.isValid() && web.isValid());
+        QCOMPARE(original.familyName(), web.familyName());
+        const auto glyphs = original.glyphIndexesForString(QStringLiteral("苹方 Aa 123 office"));
+        QCOMPARE(web.glyphIndexesForString(QStringLiteral("苹方 Aa 123 office")), glyphs);
+        QCOMPARE(original.advancesForGlyphIndexes(glyphs), web.advancesForGlyphIndexes(glyphs));
+        for (quint32 glyph : glyphs) QCOMPARE(original.pathForGlyph(glyph), web.pathForGlyph(glyph));
+        auto definition = CustomWidgets::makeTemplate(3);
+        definition.allowNetwork = false;
+        definition.javascript = QStringLiteral(
+            "document.fonts.ready.then(()=>setInterval(()=>parent.postMessage({"
+            "ready:document.fonts.check('18px \"macdows PingFang\"'),"
+            "family:getComputedStyle(document.body).fontFamily},'*'),50));");
+        HtmlWidgetView view;
+        view.resize(400, 240);
+        view.setDocument(CustomWidgets::sandboxedDocument(definition));
+        view.show();
+        QTRY_VERIFY_WITH_TIMEOUT(view.hasLoaded() || !view.errorText().isEmpty(), 20000);
+        QVERIFY2(view.hasLoaded(), qPrintable(view.errorText()));
+        bool listening = false;
+        view.evaluateScript("window.addEventListener('message',e=>window.fontProbe=e.data);true",
+            [&listening](QString) { listening = true; });
+        QTRY_VERIFY(listening);
+        bool waiting = false, loaded = false;
+        QString probe;
+        QTimer timer;
+        connect(&timer, &QTimer::timeout, &view, [&] {
+            if (waiting) return;
+            waiting = true;
+            view.evaluateScript("JSON.stringify(window.fontProbe)", [&](QString result) {
+                probe = result;
+                loaded = probe.contains("ready\\\":true") && probe.contains("macdows PingFang");
+                waiting = false;
+            });
+        });
+        timer.start(100);
+        QTRY_VERIFY2_WITH_TIMEOUT(loaded, qPrintable(probe), 10000);
+        timer.stop();
+        QVERIFY(view.grab().save("artifacts/custom-html-pingfang.png"));
     }
 
     void customEditorButtonsDoNotTreatReturnAsAnAction() {
@@ -1132,7 +2411,7 @@ private slots:
         QFile::remove(AppSettings::filePath());
     }
 
-    void clearTypeUsesRgbCoverageAndRestoresGlPainter() {
+    void macTextUsesGrayscaleCoverageAndRestoresGlPainter() {
         DesktopWidget::setGlobalFontSmoothing(4);
         for (qreal scale : {1.0, 1.25, 1.5, 1.75, 2.0}) {
             QFont font(DesktopWidget::pingFangFontFamily());
@@ -1140,14 +2419,17 @@ private slots:
             DesktopWidget::applyFontSmoothing(font);
             const QImage mask = ClearTypeText::coverage(font, QStringLiteral("清晰 Aa 123"));
             QVERIFY(!mask.isNull());
-            int coloredPixels = 0;
+            int coloredPixels = 0, partial = 0;
             for (int y = 0; y < mask.height(); ++y)
                 for (int x = 0; x < mask.width(); ++x) {
                     const QColor pixel = mask.pixelColor(x, y);
                     if (pixel.red() != pixel.green() || pixel.green() != pixel.blue())
                         ++coloredPixels;
+                    partial += pixel.red() > 0 && pixel.red() < 255;
                 }
-            QVERIFY2(coloredPixels > 20, "ClearType mask unexpectedly contains only grayscale coverage");
+            QCOMPARE(coloredPixels, 0);
+            QVERIFY(partial > 20);
+            QCOMPARE(mask.format(), QImage::Format_Grayscale8);
         }
         ClearTypeGlass glass;
         glass.setGlassRenderingEnabled(false);
@@ -1164,11 +2446,11 @@ private slots:
                 if (pixel.red() != pixel.green() || pixel.green() != pixel.blue())
                     ++coloredPixels;
             }
-        QVERIFY(coloredPixels > 20);
+        QCOMPARE(coloredPixels, 0);
         DesktopWidget::setGlobalFontSmoothing(3);
         const QImage gray = glass.grabFramebuffer();
-        QVERIFY(clear != gray);
-        QVERIFY(clear.save("artifacts/cleartype-native.png"));
+        QCOMPARE(clear, gray); // Legacy nonzero profiles now share macOS grayscale.
+        QVERIFY(clear.save("artifacts/macos-native.png"));
         QVERIFY(gray.save("artifacts/grayscale-native.png"));
     }
 
@@ -1289,6 +2571,121 @@ private slots:
         QVERIFY(ClearTypeText::rasterDrawCount() > before);
     }
 
+    void customTextCoversEditorsSelectionsAndRichDocuments() {
+        DesktopWidget::setGlobalFontSmoothing(4);
+        AppText::LineEdit line(QStringLiteral("中文 Aa office 123"));
+        QPlainTextEdit plain(QStringLiteral("编辑器 中文 Aa\n第二行 office"));
+        QTextBrowser rich;
+        rich.setHtml(QStringLiteral("<b>更新日志</b><p>中文 <a href='https://example.com'>链接</a> Aa</p>"));
+        QListWidget list;
+        list.addItem(QStringLiteral("列表项目 中文 Aa"));
+        AppText::Label label(QStringLiteral("<b>富文本 中文</b><br>office Aa"));
+        AppText::SpinBox number;
+        number.setValue(42);
+        for (QWidget* widget : QList<QWidget*>{&line, &plain, &rich, &list, &label, &number}) {
+            widget->resize(380, 110);
+            widget->ensurePolished();
+            const quint64 before = ClearTypeText::rasterDrawCount();
+            const QImage image = widget->grab().toImage();
+            QVERIFY2(ClearTypeText::rasterDrawCount() > before, widget->metaObject()->className());
+            QVERIFY(!image.isNull());
+            QCOMPARE(widget->font().family(), AppFonts::family());
+        }
+        line.show();
+        line.setFocus();
+        line.selectAll();
+        QTest::keyClicks(&line, "replacement");
+        QCOMPARE(line.text(), QStringLiteral("replacement"));
+        QTest::keyClick(&line, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(line.text(), QStringLiteral("中文 Aa office 123"));
+        QInputMethodEvent composing(QStringLiteral("拼音"), {});
+        QApplication::sendEvent(&line, &composing);
+        const quint64 before = ClearTypeText::rasterDrawCount();
+        QVERIFY(!line.grab().isNull());
+        QVERIFY(ClearTypeText::rasterDrawCount() > before);
+        QInputMethodEvent committed;
+        committed.setCommitString(QStringLiteral("输入"));
+        QApplication::sendEvent(&line, &committed);
+        QVERIFY(line.text().contains(QStringLiteral("输入")));
+        plain.selectAll();
+        const auto selection = plain.grab();
+        QVERIFY(!selection.isNull());
+        QVERIFY(selection.save("artifacts/custom-text-editor-selection.png"));
+    }
+
+    void customTextEnforcesPingFangAndHandlesTransforms() {
+        DesktopWidget::setGlobalFontSmoothing(4);
+        QFont requested(QStringLiteral("Arial"));
+        requested.setPixelSize(27);
+        QFont expected(requested);
+        expected.setFamily(AppFonts::family());
+        QCOMPARE(ClearTypeText::coverage(requested, QStringLiteral("苹方 office 123")),
+                 ClearTypeText::coverage(expected, QStringLiteral("苹方 office 123")));
+        QImage image(400, 200, QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::transparent);
+        QPainter painter(&image);
+        painter.setFont(requested);
+        painter.setClipRect(QRect(30, 20, 300, 140));
+        painter.translate(70, 70);
+        painter.rotate(12);
+        painter.scale(1.3, .85);
+        QLinearGradient gradient(0, 0, 240, 0);
+        gradient.setColorAt(0, Qt::white); gradient.setColorAt(1, Qt::blue);
+        painter.setPen(QPen(QBrush(gradient), 1));
+        QVERIFY(ClearTypeText::draw(painter, QPointF(), QStringLiteral("自研文字 office 123")));
+        painter.end();
+        int painted = 0, partial = 0;
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 0; x < image.width(); ++x) {
+                const int alpha = qAlpha(image.pixel(x, y));
+                if (!QRect(30, 20, 300, 140).contains(x, y)) QCOMPARE(alpha, 0);
+                painted += alpha > 0;
+                partial += alpha > 0 && alpha < 255;
+            }
+        QVERIFY(painted > 200 && partial > 100);
+        QVERIFY(image.save("artifacts/custom-text-transformed.png"));
+    }
+
+    void textAdapterScansAtFinalDeviceResolution() {
+        const QFont font = AppFonts::displayFont(14);
+        for (qreal dpr : {1., 1.25, 1.5, 2.}) {
+            QImage expected(640, 160, QImage::Format_ARGB32_Premultiplied);
+            expected.setDevicePixelRatio(dpr);
+            expected.fill(Qt::transparent);
+            const auto prepare = [](QPainter& painter) {
+                painter.translate(7.25, 11.5);
+                painter.scale(.9, .9);
+            };
+            QPainter direct(&expected);
+            prepare(direct);
+            direct.setFont(font); direct.setPen(Qt::white);
+            direct.translate(3.5, 4.25); direct.scale(1.1, 1.1);
+            ClearTypeText::draw(direct, QPointF(8.25, 40.25), QStringLiteral("苹方设备像素"));
+            direct.end();
+            for (bool nativeOperation : {false, true}) {
+                QImage actual(expected.size(), expected.format());
+                actual.setDevicePixelRatio(dpr); actual.fill(Qt::transparent);
+                QPainter destination(&actual);
+                prepare(destination);
+                {
+                    AppText::PaintDevice device(destination);
+                    QPainter adapted(&device);
+                    adapted.setFont(font); adapted.setPen(Qt::white);
+                    adapted.translate(3.5, 4.25); adapted.scale(1.1, 1.1);
+                    if (nativeOperation) adapted.drawText(QPointF(8.25, 40.25), QStringLiteral("苹方设备像素"));
+                    else ClearTypeText::draw(adapted, QPointF(8.25, 40.25), QStringLiteral("苹方设备像素"));
+                }
+                destination.end();
+                if (actual != expected) {
+                    actual.save("artifacts/text-adapter-actual.png");
+                    expected.save("artifacts/text-adapter-expected.png");
+                    qInfo() << "Adapter mismatch DPR/native operation:" << dpr << nativeOperation;
+                }
+                QCOMPARE(actual, expected);
+            }
+        }
+    }
+
     void musicLeavesLiquidGlassBackgroundVisible() {
         DesktopWidget music(nullptr, DesktopWidget::CardKind::Music, false, "glass-music", 1, true);
         music.setAnimationEnabled(false);
@@ -1395,7 +2792,7 @@ private slots:
         QVERIFY(!AppSettings().contains("appearance/opacity"));
     }
 
-    void materialSettingsPreviewAndCancelRestoreEachSurface() {
+    void materialSettingsApplyImmediatelyAndSurviveEscape() {
         DesktopWidget widget(nullptr, DesktopWidget::CardKind::Clock, false);
         QtGlassFlowScene other;
         other.setNoiseAmount(0.04f);
@@ -1403,6 +2800,7 @@ private slots:
         QTimer::singleShot(0, &widget, [&] {
             auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
             if (!dialog) return;
+            auto close = qScopeGuard([dialog] { if (dialog->isVisible()) dialog->reject(); });
             auto* opacity = dialog->findChild<QDoubleSpinBox*>("materialOpacity");
             auto* refraction = dialog->findChild<QDoubleSpinBox*>("materialRefraction");
             auto* blur = dialog->findChild<QDoubleSpinBox*>("materialBlurRadius");
@@ -1418,18 +2816,21 @@ private slots:
                 previewed = material.opacity == 0.6f && material.refraction == 2.0f
                     && material.blurRadius == 4.0f && material.blurIterations == 4
                     && material.noise == 0.025f && other.glassOpacity() == 0.6f;
+                QCOMPARE(AppSettings().value("material/opacity").toFloat(), 0.6f);
+                QtGlassFlowScene openedWhileEditing;
+                QCOMPARE(openedWhileEditing.materialParameters().noise, 0.025f);
             }
-            dialog->reject();
+            QTest::keyClick(dialog, Qt::Key_Escape);
         });
         widget.showSettingsDialog();
         QVERIFY(previewed);
-        QCOMPARE(widget.materialParameters().opacity, 1.0f);
-        QCOMPARE(widget.materialParameters().refraction, LiquidGlassStyle::kRefractionPower);
-        QCOMPARE(widget.materialParameters().blurRadius, LiquidGlassStyle::kBlurRadius);
-        QCOMPARE(widget.materialParameters().blurIterations, LiquidGlassStyle::kBlurIterations);
-        QCOMPARE(widget.materialParameters().noise, LiquidGlassStyle::kNoiseAmount);
-        QCOMPARE(other.materialParameters().noise, 0.04f);
-        QVERIFY(!AppSettings().contains("material/opacity"));
+        QCOMPARE(widget.materialParameters().opacity, 0.6f);
+        QCOMPARE(widget.materialParameters().refraction, 2.0f);
+        QCOMPARE(widget.materialParameters().blurRadius, 4.0f);
+        QCOMPARE(widget.materialParameters().blurIterations, 4);
+        QCOMPARE(widget.materialParameters().noise, 0.025f);
+        QCOMPARE(other.materialParameters().noise, 0.025f);
+        QCOMPARE(AppSettings().value("material/opacity").toFloat(), 0.6f);
     }
 
     void materialSettingsPersistAndResetToOriginalDefaults() {
@@ -1888,7 +3289,7 @@ private slots:
         QCOMPARE(DesktopWidget::renderPreview(DesktopWidget::CardKind::Battery, 0, QSize(192, 192)), light);
     }
 
-    void settingsColorModeAcceptsAndCancels() {
+    void settingsColorModeAppliesImmediatelyAndSurvivesClose() {
         DesktopWidget card(nullptr, DesktopWidget::CardKind::Clock, false, "theme-settings", 0, true);
         for (int step = 0; step < 3; ++step) {
             bool foundControl = false;
@@ -1896,10 +3297,13 @@ private slots:
                 auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
                 if (!dialog)
                     return;
+                auto close = qScopeGuard([dialog] { if (dialog->isVisible()) dialog->reject(); });
                 auto* mode = dialog->findChild<QComboBox*>("colorMode");
                 foundControl = mode && mode->count() == 2;
                 if (foundControl)
                     mode->setCurrentIndex(mode->findData(step == 0));
+                QCOMPARE(card.darkModeEnabled(), step == 0);
+                QCOMPARE(AppSettings().value("appearance/darkMode").toBool(), step == 0);
                 if (foundControl && step != 1)
                     dialog->accept();
                 else
@@ -1907,8 +3311,8 @@ private slots:
             });
             card.showSettingsDialog();
             QVERIFY(foundControl);
-            QCOMPARE(card.darkModeEnabled(), step != 2);
-            QCOMPARE(AppSettings().value("appearance/darkMode").toBool(), step != 2);
+            QCOMPARE(card.darkModeEnabled(), step == 0);
+            QCOMPARE(AppSettings().value("appearance/darkMode").toBool(), step == 0);
         }
     }
 
@@ -3059,6 +4463,94 @@ private slots:
 #endif
     }
 
+    void captureSkipsUnsupportedToolWindows() {
+#ifdef Q_OS_WIN
+        ColorWindow background;
+        const QPoint center = QGuiApplication::primaryScreen()->availableGeometry().center();
+        background.setGeometry(QRect(center - QPoint(320, 230), QSize(640, 460)));
+        background.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&background));
+        QVERIFY(NativeWindows::isCaptureCandidate(background.winId()));
+        ColorWindow tool;
+        tool.setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+        tool.color = QColor(20, 40, 220);
+        tool.setGeometry(background.geometry());
+        tool.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&tool));
+        const HWND toolWindow = reinterpret_cast<HWND>(tool.winId());
+        const LONG_PTR toolStyle = GetWindowLongPtrW(toolWindow, GWL_EXSTYLE);
+        QVERIFY(toolStyle & WS_EX_TOOLWINDOW);
+        QVERIFY(!(toolStyle & WS_EX_APPWINDOW));
+        QVERIFY(!NativeWindows::isCaptureCandidate(tool.winId()));
+        const auto stack = NativeWindows::snapshot();
+        const int position = NativeWindows::indexOf(stack, tool.winId());
+        QVERIFY(position >= 0 && !stack[position].excluded && stack[position].opaque);
+        for (const auto& window : stack)
+            if (window.desktop) QVERIFY(!window.excluded);
+        TestGlass glass;
+        glass.setDesktopCaptureEnabled(false);
+        glass.move(center - QPoint(100, 70));
+        glass.show();
+        glass.raise();
+        QVERIFY(QTest::qWaitForWindowExposed(&glass));
+        QTest::qWait(100);
+
+        tool.hide();
+        QTest::qWait(50);
+        DesktopCapture::grab(glass.geometry(), 1, glass.winId());
+        HMODULE captureModule = GetModuleHandleW(L"GraphicsCapture.dll");
+        MODULEINFO module{};
+        QVERIFY(captureModule && GetModuleInformation(GetCurrentProcess(), captureModule, &module, sizeof(module)));
+        captureModuleStart = reinterpret_cast<quintptr>(module.lpBaseOfDll);
+        captureModuleEnd = captureModuleStart + module.SizeOfImage;
+        captureFirstChanceExceptions = 0;
+        void* handler = AddVectoredExceptionHandler(1, recordCaptureExceptions);
+        QVERIFY(handler);
+        const auto removeHandler = qScopeGuard([&]() { RemoveVectoredExceptionHandler(handler); });
+        // 工具窗口区域交由壁纸补齐，不把不受支持的像素标记为有效。
+        tool.show();
+        glass.raise();
+        QTest::qWait(50);
+        const auto excludedFrame = DesktopCapture::grab(glass.geometry(), 1, glass.winId());
+        QVERIFY(!excludedFrame.image.isNull());
+        QVERIFY(!excludedFrame.valid.contains(excludedFrame.image.rect().center()));
+        tool.hide();
+        QTest::qWait(50);
+        // 隐藏工具窗口后，普通窗口仍应提供实时有效像素。
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            const auto frame = DesktopCapture::grab(glass.geometry(), 1, glass.winId());
+            QVERIFY(!frame.image.isNull());
+            const QPoint sample = frame.image.rect().center();
+            QVERIFY(frame.valid.contains(sample));
+            QVERIFY(frame.image.pixelColor(sample).red() > 170);
+            QTest::qWait(30);
+        }
+        bool completed = false;
+        DesktopCapture::request(glass.geometry(), 1, glass.winId(), &glass,
+            [&](DesktopCapture::Frame frame) {
+                const QPoint sample = frame.image.rect().center();
+                completed = !frame.image.isNull() && frame.valid.contains(sample)
+                    && frame.image.pixelColor(sample).red() > 170;
+            });
+        QTRY_VERIFY_WITH_TIMEOUT(completed, 3000);
+        // APPWINDOW 会使工具窗口成为有效捕获源，不能一概排除。
+        SetWindowLongPtrW(toolWindow, GWL_EXSTYLE, toolStyle | WS_EX_APPWINDOW);
+        const auto restoreStyle = qScopeGuard([&]() { SetWindowLongPtrW(toolWindow, GWL_EXSTYLE, toolStyle); });
+        tool.show();
+        glass.raise();
+        QTest::qWait(50);
+        QVERIFY(NativeWindows::isCaptureCandidate(tool.winId()));
+        const auto frame = DesktopCapture::grab(glass.geometry(), 1, glass.winId());
+        QVERIFY(!frame.image.isNull());
+        const QPoint sample = frame.image.rect().center();
+        QVERIFY(frame.valid.contains(sample));
+        QVERIFY(frame.image.pixelColor(sample).blue() > 170);
+        QCOMPARE(captureFirstChanceExceptions.load(), 0);
+#else
+        QSKIP("Requires Windows Graphics Capture");
+#endif
+    }
+
     void liveBackdropAndStableCapture() {
 #ifndef Q_OS_WIN
         QSKIP("Requires Windows compositor");
@@ -3341,6 +4833,36 @@ private slots:
                                 .arg(*maximum - *minimum)));
     }
 
+    void defaultMacTextMigratesRetiredSmoothingChoice_data() {
+        QTest::addColumn<int>("previous");
+        QTest::newRow("default") << -1;
+        QTest::newRow("legacy-settings-off") << -2;
+        for (int level = 0; level <= 4; ++level)
+            QTest::newRow(qPrintable(QString::number(level))) << level;
+    }
+
+    void defaultMacTextMigratesRetiredSmoothingChoice() {
+        QFETCH(int, previous);
+        if (previous >= 0)
+            DesktopWidget::setGlobalFontSmoothing(previous);
+        else if (previous == -2) {
+            QSettings().setValue("appearance/fontSmoothing", 0);
+            QDir().mkpath(QFileInfo(AppSettings::filePath()).absolutePath());
+            QFile file(AppSettings::filePath());
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write(R"({"version":4,"widgets":[]})");
+        } else
+            QCOMPARE(AppSettings().value("appearance/fontSmoothing").toInt(), 4);
+        DesktopWidget widget(nullptr, DesktopWidget::CardKind::Clock, false);
+        QCOMPARE(DesktopWidget::globalFontSmoothing(), 4);
+        QCOMPARE(AppSettings().value("appearance/fontSmoothing").toInt(), 4);
+        const QFont font = AppFonts::displayFont(16);
+        QCOMPARE(font.family(), DesktopWidget::pingFangFontFamily());
+        QVERIFY(font.styleStrategy() & QFont::PreferAntialias);
+        QVERIFY(font.styleStrategy() & QFont::NoSubpixelAntialias);
+        QVERIFY(!(font.styleStrategy() & QFont::NoAntialias));
+    }
+
     void globalFontSmoothingProfiles() {
         for (int level = 0; level <= 3; ++level) {
             DesktopWidget::setGlobalFontSmoothing(level);
@@ -3367,7 +4889,7 @@ private slots:
             DesktopWidget::applyFontSmoothing(font);
             painter.setFont(font);
             painter.setPen(Qt::white);
-            painter.drawText(image.rect(), Qt::AlignCenter, QStringLiteral("Aa 26"));
+            ResponsiveLayout::drawSingleLine(painter, image.rect(), Qt::AlignCenter, QStringLiteral("Aa 26"));
             painter.end();
             return image;
         };
@@ -3411,8 +4933,8 @@ private slots:
         DesktopWidget::setGlobalFontSmoothing(2);
     }
 
-    void clearTextMatchesNativeRasterAtFractionalScale() {
-        // 半透明像素计数不能区分清晰与模糊，直接对照原生字号栅格化结果。
+    void customTextRetainsNativeCoverageAtFractionalScale() {
+        // 变换后的文字应与原生字号直接绘制一致，不能先栅格化再缩放。
         const QString text = QStringLiteral("添加小组件 时钟 28.4 Aa");
         for (int level : {2, 3}) {
             DesktopWidget::setGlobalFontSmoothing(level);
@@ -3435,15 +4957,16 @@ private slots:
 
                         QImage expected(actual.size(), actual.format());
                         expected.fill(Qt::transparent);
-                        font.setPixelSize(qRound(size * dpr * uiScale));
+                        font.setPointSizeF(size * dpr * uiScale * 72 / 96);
                         font.setStyleStrategy(static_cast<QFont::StyleStrategy>(
                             font.styleStrategy() | QFont::NoSubpixelAntialias));
                         QPainter reference(&expected);
                         reference.setFont(font);
                         reference.setPen(Qt::white);
                         reference.setRenderHint(QPainter::TextAntialiasing);
-                        reference.drawText(QPointF(qRound(baseline.x() * dpr * uiScale),
-                                                  qRound(baseline.y() * dpr * uiScale)), text);
+                        QVERIFY(ClearTypeText::draw(reference,
+                            QPointF(qRound(baseline.x() * dpr * uiScale),
+                                    qRound(baseline.y() * dpr * uiScale)), text));
                         reference.end();
                         expected.setDevicePixelRatio(dpr);
                         QCOMPARE(actual, expected);
@@ -3452,6 +4975,125 @@ private slots:
             }
         }
         DesktopWidget::setGlobalFontSmoothing(2);
+    }
+
+    void customRasterizerPreservesCountersAndMixedScripts() {
+        QFont font(DesktopWidget::pingFangFontFamily());
+        font.setPixelSize(96);
+        font.setStyleStrategy(QFont::NoSubpixelAntialias);
+        QPoint offset;
+        const QImage mask = ClearTypeText::coverage(font, QStringLiteral("O"), &offset);
+        QVERIFY(!mask.isNull());
+        // O 的中央必须保留空洞，检测轮廓绕向填充而非简单叠加包围框。
+        const QPoint center(mask.width() / 2, mask.height() / 2);
+        QCOMPARE(qRed(mask.pixel(center)), 0);
+        int solid = 0, partial = 0;
+        for (int y = 0; y < mask.height(); ++y)
+            for (int x = 0; x < mask.width(); ++x) {
+                const QRgb pixel = mask.pixel(x, y);
+                QCOMPARE(qRed(pixel), qGreen(pixel));
+                QCOMPARE(qGreen(pixel), qBlue(pixel));
+                solid += qRed(pixel) == 255;
+                partial += qRed(pixel) > 0 && qRed(pixel) < 255;
+            }
+        QVERIFY(solid > 100 && partial > 100);
+        font.setWeight(QFont::DemiBold);
+        const QImage bold = ClearTypeText::coverage(font, QStringLiteral("O"));
+        qint64 normalInk = 0, boldInk = 0;
+        for (int y = 0; y < mask.height(); ++y)
+            for (int x = 0; x < mask.width(); ++x) normalInk += qRed(mask.pixel(x, y));
+        for (int y = 0; y < bold.height(); ++y)
+            for (int x = 0; x < bold.width(); ++x) boldInk += qRed(bold.pixel(x, y));
+        QVERIFY2(boldInk > normalInk * 1.08, "Semibold lost its stroke weight when extracting outlines");
+        font.setWeight(QFont::Normal);
+        font.setStyleStrategy(QFont::NoAntialias);
+        const QImage binary = ClearTypeText::coverage(font, QStringLiteral("O"));
+        QVERIFY(binary != mask);
+        for (int y = 0; y < binary.height(); ++y)
+            for (int x = 0; x < binary.width(); ++x)
+                QVERIFY(qRed(binary.pixel(x, y)) == 0 || qRed(binary.pixel(x, y)) == 255);
+        font.setPixelSize(24);
+        font.setStyleStrategy(QFont::PreferAntialias);
+        for (const QString& text : {QStringLiteral("天气 16° 06:33"),
+             QStringLiteral("office e\u0301 Å"), QStringLiteral("العربية")}) {
+            const QImage shaped = ClearTypeText::coverage(font, text);
+            QVERIFY(!shaped.isNull());
+            int ink = 0;
+            for (int y = 0; y < shaped.height(); ++y)
+                for (int x = 0; x < shaped.width(); ++x)
+                    ink += qGray(shaped.pixel(x, y)) > 0;
+            QVERIFY(ink > 60);
+        }
+    }
+
+    void glassRimHighlightsStayVisibleInBothThemes() {
+        PipelineProbe scene;
+        scene.resize(460, 220);
+        scene.setNoiseAmount(0);
+        scene.addGlassObject({}, QSizeF(460, 220));
+        scene.setGlassObjectCornerRadius(0, 35);
+        QImage background(690, 330, QImage::Format_RGB32);
+        background.fill(QColor(24, 55, 65));
+        scene.setBackgroundImage(background);
+        scene.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&scene));
+        const qreal dpr = scene.devicePixelRatioF();
+        for (bool dark : {false, true}) {
+            scene.setDarkModeEnabled(dark);
+            for (float quality : {.6f, 1.f, 1.5f}) {
+                scene.setRenderScale(quality);
+                const QImage image = scene.grabFramebuffer();
+                const int cx = image.width() / 2, cy = image.height() / 2;
+                const int center = qGray(image.pixel(cx, cy));
+                int top = 0, bottom = 0;
+                for (int depth = 0; depth < qCeil(3 * dpr); ++depth) {
+                    if (qAlpha(image.pixel(cx, depth)) > 220)
+                        top = qMax(top, qGray(image.pixel(cx, depth)));
+                    if (qAlpha(image.pixel(cx, image.height() - depth - 1)) > 220)
+                        bottom = qMax(bottom, qGray(image.pixel(cx, image.height() - depth - 1)));
+                }
+                QVERIFY2(top > center + 12, "Upper rim reflection disappeared");
+                QVERIFY2(bottom > center + 5, "Lower rim reflection disappeared");
+                QVERIFY(qAbs(qGray(image.pixel(cx, qRound(12 * dpr))) - center) <= 1);
+                QCOMPARE(qAlpha(image.pixel(0, 0)), 0);
+                QVERIFY(image.save(QString("artifacts/rim-%1-%2.png").arg(dark ? "dark" : "light").arg(quality)));
+            }
+        }
+    }
+
+    void weatherReferenceWithCustomTextAndRim() {
+        DesktopWidget weather(nullptr, DesktopWidget::CardKind::Weather, false,
+                              "weather-custom-text-reference", 1, true);
+        weather.setDesktopLayerEnabled(false);
+        weather.setDesktopCaptureEnabled(false);
+        weather.setAnimationEnabled(false);
+        const qreal dpr = weather.devicePixelRatioF();
+        weather.m_widgetScale = 328.0 / (CardMetrics::kGridBaseCell * dpr);
+        weather.setFixedSize(qRound(688 / dpr), qRound(328 / dpr));
+        weather.setGlassRadius(LiquidGlassStyle::kCardCornerRadius * weather.m_widgetScale);
+        weather.m_weatherLocation = QStringLiteral("天心区");
+        weather.m_weatherTemperature = "16";
+        weather.m_weatherDescription = QStringLiteral("多云");
+        weather.m_weatherHigh = "20";
+        weather.m_weatherLow = "16";
+        weather.m_weatherCode = 1;
+        const QString times[] = {QStringLiteral("6时"), "06:33", QStringLiteral("7时"),
+                                 QStringLiteral("8时"), QStringLiteral("9时"), QStringLiteral("10时")};
+        for (int i = 0; i < 6; ++i)
+            weather.m_weatherHours.append({times[i], QString::number(i < 4 ? 16 : 17 + i - 4), 1});
+        QImage background(688, 328, QImage::Format_RGB32);
+        background.fill(QColor(24, 55, 65));
+        weather.setBackgroundImage(background);
+        weather.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&weather));
+        for (int level : {3, 4}) {
+            DesktopWidget::setGlobalFontSmoothing(level);
+            for (bool dark : {false, true}) {
+                weather.setDarkModeEnabled(dark);
+                QVERIFY(weather.grabFramebuffer().save(QString("artifacts/weather-custom-%1-%2.png")
+                    .arg(dark ? "dark" : "light").arg(level)));
+            }
+        }
     }
 
     void galleryPreviewsUseNativePixels() {
@@ -3526,8 +5168,7 @@ private slots:
                     QVERIFY(int(strategy) & int(QFont::NoAntialias));
                 else
                     QVERIFY(int(strategy) & int(QFont::PreferAntialias));
-                QCOMPARE(bool(strategy & QFont::NoSubpixelAntialias),
-                         level == 1 || level == 3);
+                QCOMPARE(bool(strategy & QFont::NoSubpixelAntialias), level != 0);
             }
         }
         WidgetLibraryDialog newlyOpened;
@@ -4138,14 +5779,21 @@ private slots:
         auto frame = DesktopCapture::grab(glass.geometry(), glass.devicePixelRatioF(), glass.winId());
         QVERIFY(!frame.image.isNull());
         bool delivered = false;
+        bool movingDelivered = false;
         DesktopCapture::request(glass.geometry(), glass.devicePixelRatioF(), glass.winId(), &glass,
             [&delivered](DesktopCapture::Frame result) {
                 QVERIFY2(result.image.isNull(), "Queued frame from a former lower window was accepted");
                 delivered = true;
             });
+        DesktopCapture::request(glass.geometry(), glass.devicePixelRatioF(), glass.winId(), &glass,
+            [&movingDelivered](DesktopCapture::Frame result) {
+                QVERIFY2(result.image.isNull(), "Moving target mode accepted a former lower window");
+                movingDelivered = true;
+            }, 0, false, true);
         background.raise();
         QVERIFY(!DesktopCapture::validate(frame));
         QTRY_VERIFY_WITH_TIMEOUT(delivered, 1500);
+        QTRY_VERIFY_WITH_TIMEOUT(movingDelivered, 1500);
     }
 
     void libraryOwnsNoDesktopWindowAndCancelsDrags() {

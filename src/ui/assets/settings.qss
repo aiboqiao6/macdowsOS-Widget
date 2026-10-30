@@ -1,0 +1,55 @@
+QWidget { color: @foreground; }
+QWidget[settingsBodyFont=true] { font-size: $bodyFont; }
+QDialog#settingsDialog, QScrollArea, QWidget#settingsPageViewport, QScrollArea > QWidget > QWidget { background: transparent; border: 0; }
+QStackedWidget#settingsPages { background: transparent; border: 0; }
+QWidget#settingsSidebar { background: @sidebar; border-top-left-radius: $windowRadius; border-bottom-left-radius: $windowRadius; }
+QWidget#settingsContent { background: @canvas; border-left: $stroke solid @separator; border-top-right-radius: $windowRadius; border-bottom-right-radius: $windowRadius; }
+QWidget#settingsToolbar { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 @toolbarTop,stop:1 @toolbarBottom); border-bottom: $stroke solid @separator; border-top-right-radius: $windowRadius; }
+QFrame#settingsHistoryControl { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 @historyTop,stop:1 @historyBottom); border: $stroke solid @historyRim; border-radius: $historyRadius; }
+QFrame#settingsHistorySeparator { background: @historySeparator; border: 0; }
+QPushButton[settingsPaint="history"] { background: transparent; border: 0; padding: 0; min-height: 0; }
+QLabel { background: transparent; }
+QLabel[secondary=true] { color: @secondary; font-size: $secondaryFont; }
+QLabel[groupTitle=true], QLabel[heading=true] { color: @foreground; font-weight: 600; }
+QLabel[groupTitle=true] { font-size: $sectionFont; }
+QLabel[settingsRowTitle=true] { font-weight: 400; }
+QLabel[settingsOverviewTitle=true] { font-weight: 500; }
+QLabel#settingsTitle { font-size: $titleFont; font-weight: 600; }
+QFrame#settingsGroup { background: @group; border: 0; border-radius: $groupRadius; }
+QFrame#settingsSeparator { background: @separator; border: 0; }
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox { background: @input; border: $stroke solid @separator; border-radius: $controlRadius; padding: $controlVertical $controlInset; min-height: $controlHeight; selection-background-color: @accent; }
+QComboBox { background: transparent; border: 0; padding: 0; padding-right: $selectorSpace; }
+QComboBox::drop-down { border: 0; width: $selectorDiameter; }
+QSpinBox, QDoubleSpinBox { background: transparent; border: 0; padding: 0; padding-right: $controlGap; min-height: $selectorDiameter; }
+QSpinBox QLineEdit, QDoubleSpinBox QLineEdit { background: transparent; border: 0; padding: 0; min-height: 0; }
+QSpinBox::up-button, QDoubleSpinBox::up-button { subcontrol-origin: border; subcontrol-position: top right; width: $selectorDiameter; height: $selectorHalf; border: 0; background: transparent; }
+QSpinBox::down-button, QDoubleSpinBox::down-button { subcontrol-origin: border; subcontrol-position: bottom right; width: $selectorDiameter; height: $selectorHalf; border: 0; background: transparent; }
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow, QSpinBox::down-arrow, QDoubleSpinBox::down-arrow { image: none; width: 0; height: 0; }
+QComboBox QAbstractItemView { background: @group; color: @foreground; selection-background-color: @accent; selection-color: @onAccent; border: $stroke solid @rim; padding: $controlInset; outline: 0; }
+QComboBox QAbstractItemView::item { min-height: $controlHeight; padding: $controlVertical $controlInset; border: 0; border-radius: $controlRadius; }
+QComboBox QAbstractItemView::item:selected { background: @accent; color: @onAccent; }
+QFrame#settingsSearchField { background: @search; border: $stroke solid @searchRim; border-radius: $searchRadius; }
+QFrame#settingsSearchField[focused=true] { border-color: @accent; }
+QLineEdit#settingsSearch { color: @searchForeground; placeholder-text-color: @searchForeground; font-size: $navigationFont; background: transparent; border: 0; padding: 0; min-height: 0; }
+QPushButton { background: @input; border: $stroke solid @separator; border-radius: $controlRadius; padding: $controlVertical $controlGap; min-height: 0; }
+QPushButton:hover { background: @hover; }
+QPushButton:pressed { background: @selector; }
+QPushButton:focus { border-color: @accent; }
+QPushButton:disabled { color: @secondary; }
+QPushButton[navigation=true] { background: transparent; border: 0; border-radius: $navigationRadius; text-align: left; padding: 0 $navigationInset; min-height: 0; font-size: $navigationFont; }
+QPushButton[traffic=true] { background: transparent; border: 0; padding: 0; min-width: 0; min-height: 0; }
+QPushButton#downloadUpdate { background: @accent; color: @onAccent; border-color: @accent; }
+QPushButton#downloadUpdate:hover { background: @accentHover; }
+QCheckBox { background: transparent; spacing: 0; }
+QCheckBox::indicator { width: $toggleWidth; height: $toggleHeight; }
+QLineEdit:focus { border-color: @accent; }
+QSlider:focus { outline: 0; }
+QScrollBar:vertical { background: transparent; width: $scrollWidth; margin: $scrollWidth 0; }
+QStackedWidget#settingsPages QScrollBar:vertical { margin-bottom: $windowRadius; }
+QScrollBar::handle:vertical { background: @scroll; border-radius: $scrollRadius; min-height: $scrollMinimum; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+QSlider::groove:horizontal { height: $sliderTrack; background: @separator; border-radius: $sliderTrackRadius; }
+QSlider::sub-page:horizontal { background: @accent; border-radius: $sliderTrackRadius; }
+QSlider::handle:horizontal { width: $sliderKnob; margin: -$sliderKnobMargin 0; border: $stroke solid @rim; border-radius: $sliderKnobRadius; background: @toggleKnob; }
+QFrame#updateCard { background: @group; border: $stroke solid @rim; border-radius: $windowRadius; }

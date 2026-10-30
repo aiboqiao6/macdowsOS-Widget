@@ -20,11 +20,14 @@ struct Frame {
     QRect targetBounds; // 捕获时的物理坐标。
     bool validated = false; // 交付前已在界面线程验证。
     quint64 topology = 0; // WGC 捕获源身份与次序，不包含位置。
+    bool targetMayMove = false; // 完整重建 area 后允许目标平移，仍验证尺寸、层级及遮挡。
 };
 // 接口几何使用 Qt 桌面逻辑坐标；捕获在单线程池执行，仅向仍存活的界面对象回调。
 // latestOnly 仅合并同一接收对象与目标尚未执行的请求；被合并的请求仍以空帧完成以释放背压计数。
+// targetMayMove 完整重建 area，并允许目标在捕获期间平移；调用者按最新窗口位置裁剪。
 void request(const QRect& area, qreal pixelScale, WId target, QObject* context,
-             std::function<void(Frame)> completed, int priority = 0, bool latestOnly = false);
+             std::function<void(Frame)> completed, int priority = 0, bool latestOnly = false,
+             bool targetMayMove = false);
 Frame grab(const QRect& area, qreal pixelScale, WId target = 0);
 bool validate(Frame& frame);
 // 最后一个玻璃窗口销毁后释放持续捕获会话，也供独立测试清理使用。

@@ -19,6 +19,7 @@ uniform float u_fPower;
 uniform float u_noise;        // 按画质限制在一个颜色量化单位内，最高档关闭。
 uniform float u_edgeAaScale;  // 随画质变化的解析边缘覆盖率。
 uniform bool u_darkMode;
+uniform float u_devicePixelRatio;
 
 // === 平滑并集桥接 ===
 uniform int u_numConnections;
@@ -143,11 +144,17 @@ void main() {
 
     // 方向性反光只占原生像素轮廓，不在整个玻璃表面叠加明暗遮罩。
     float fw = max(edgeWidth, 0.0003);
-    float borderLine = 1.0 - smoothstep(0.35, 2.3, depthPx);
-    float directionalLight = dot(normal, normalize(vec2(-0.6, 0.8)));
-    color.rgb *= 1.0 - borderLine * max(-directionalLight, 0.0) * (u_darkMode ? 0.20 : 0.12);
-    color.rgb += vec3(borderLine * ((u_darkMode ? 0.012 : 0.025)
-                                  + max(directionalLight, 0.0) * (u_darkMode ? 0.09 : 0.18)));
+    float rimDepth = depthPx / max(u_devicePixelRatio, 1.0);
+    float outerRim = exp(-pow((rimDepth - 0.70) / 0.80, 2.0));
+    float innerRim = exp(-pow((rimDepth - 2.0) / 0.65, 2.0));
+    float directionalLight = dot(normal, normalize(vec2(-0.55, 0.84)));
+    float keyLight = pow(max(directionalLight, 0.0), 1.6);
+    float returnLight = pow(max(-directionalLight, 0.0), 2.0);
+    // 外沿反射天空色，内沿细暗边表现厚度；反光沿圆角连续转向。
+    float reflection = outerRim * (0.22 + 0.65 * keyLight + 0.25 * returnLight);
+    vec3 rimColor = u_darkMode ? vec3(0.56, 0.76, 0.80) : vec3(0.82, 0.94, 0.98);
+    color.rgb *= 1.0 - innerRim * (u_darkMode ? 0.28 : 0.19);
+    color.rgb = mix(color.rgb, rimColor, reflection * (u_darkMode ? 0.38 : 0.44));
 
     // 解析覆盖率保持圆角透明边缘平滑。
     float alpha = smoothstep(-fw, fw, dist);

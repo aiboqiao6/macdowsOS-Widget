@@ -1,3 +1,4 @@
+#include "ui/textcontrols.h"
 #include "widgets/desktopwidget.h"
 #include <QCalendarWidget>
 #include <QCheckBox>
@@ -38,16 +39,16 @@ void DesktopWidget::editCountdown()
     auto* layout = new QVBoxLayout(&dialog);
     layout->setContentsMargins(24, 24, 24, 20);
     layout->setSpacing(18);
-    auto* heading = new QLabel(QStringLiteral("记住一个重要的日子"), &dialog);
+    auto* heading = new AppText::Label(QStringLiteral("记住一个重要的日子"), &dialog);
     heading->setStyleSheet(QStringLiteral("font-size:20px; font-weight:600;"));
     layout->addWidget(heading);
     auto* form = new QFormLayout;
     form->setSpacing(12);
-    auto* title = new QLineEdit(m_countdown.title, &dialog);
+    auto* title = new AppText::LineEdit(m_countdown.title, &dialog);
     title->setObjectName(QStringLiteral("countdownTitle"));
     title->setMaxLength(80);
     title->setPlaceholderText(QStringLiteral("例如：生日、旅行、毕业"));
-    auto* date = new QDateEdit(&dialog);
+    auto* date = new AppText::DateEdit(&dialog);
     date->setObjectName(QStringLiteral("countdownDate"));
     date->setDateRange(QDate(1900, 1, 1), QDate(9999, 12, 31));
     date->setDate(m_countdown.date);
@@ -61,11 +62,11 @@ void DesktopWidget::editCountdown()
     form->addRow(QStringLiteral("日期"), date);
     form->addRow(QString(), annual);
     layout->addLayout(form);
-    auto* preview = new QLabel(&dialog);
+    auto* preview = new AppText::Label(&dialog);
     preview->setObjectName(QStringLiteral("countdownSummary"));
     preview->setStyleSheet(QStringLiteral("font-size:16px; color:#fa586a;"));
     layout->addWidget(preview);
-    auto* help = new QLabel(QStringLiteral("每年自动计算下一次纪念日。2 月 29 日在平年按 2 月 28 日计算。"), &dialog);
+    auto* help = new AppText::Label(QStringLiteral("每年自动计算下一次纪念日。2 月 29 日在平年按 2 月 28 日计算。"), &dialog);
     help->setWordWrap(true);
     help->setStyleSheet(QStringLiteral("font-size:12px; color:%1;").arg(dark ? QStringLiteral("#a4a5b0") : QStringLiteral("#72737d")));
     help->setVisible(annual->isChecked());

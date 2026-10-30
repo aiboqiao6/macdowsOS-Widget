@@ -83,7 +83,7 @@ void drawDeviceIcon(QPainter& painter, const QPointF& center, qreal radius,
 void DesktopWidget::drawBatteryIcon(QPainter& painter, const QRectF& rect, int level, bool charging) const
 {
     painter.save();
-    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::Antialiasing, GraphicsQuality::enabled());
     const ResponsiveLayout::Metrics metrics(rect);
 
     const qreal radius = rect.height() * 0.21;
@@ -153,7 +153,7 @@ void DesktopWidget::drawDeviceRing(QPainter& painter, const QPointF& center, qre
                                    bool showCaption) const
 {
     painter.save();
-    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::Antialiasing, GraphicsQuality::enabled());
     const QRectF ring(center.x() - radius, center.y() - radius,
                       radius * 2.0, radius * 2.0);
     const ResponsiveLayout::Metrics metrics(ring);

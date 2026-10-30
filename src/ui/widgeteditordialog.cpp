@@ -1,3 +1,5 @@
+#include "app/fontsettings.h"
+#include "ui/textcontrols.h"
 #include "ui/widgeteditordialog.h"
 #include "ui/widgetlibrarydialog.h"
 #include "ui/htmlwidgetview.h"
@@ -82,7 +84,7 @@ WidgetEditorDialog::WidgetEditorDialog(QWidget* parent) : QDialog(parent) {
     root->setSpacing(10);
 
     auto* library = new QHBoxLayout;
-    library->addWidget(new QLabel(QStringLiteral("我的组件")));
+    library->addWidget(new AppText::Label(QStringLiteral("我的组件")));
     m_catalog = new QComboBox;
     m_catalog->setObjectName("customCatalog");
     m_catalog->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
@@ -132,11 +134,11 @@ WidgetEditorDialog::WidgetEditorDialog(QWidget* parent) : QDialog(parent) {
     auto basicField = [basics](const QString& label, QWidget* field, int stretch) {
         auto* column = new QVBoxLayout;
         column->setSpacing(4);
-        column->addWidget(new QLabel(label));
+        column->addWidget(new AppText::Label(label));
         column->addWidget(field);
         basics->addLayout(column, stretch);
     };
-    m_name = new QLineEdit;
+    m_name = new AppText::LineEdit;
     m_name->setMaxLength(80);
     m_name->setObjectName("customName");
     m_name->setPlaceholderText(QStringLiteral("组件名称"));
@@ -156,7 +158,7 @@ WidgetEditorDialog::WidgetEditorDialog(QWidget* parent) : QDialog(parent) {
     auto* visualLayout = new QVBoxLayout(visual);
     visualLayout->setContentsMargins(0, 0, 0, 0);
     visualLayout->setSpacing(8);
-    visualLayout->addWidget(new QLabel(QStringLiteral("内容块")));
+    visualLayout->addWidget(new AppText::Label(QStringLiteral("内容块")));
     m_blocks = new QListWidget;
     m_blocks->setObjectName("customBlocks");
     m_blocks->setMinimumHeight(110);
@@ -180,7 +182,7 @@ WidgetEditorDialog::WidgetEditorDialog(QWidget* parent) : QDialog(parent) {
     m_duplicateBlockButton = button(QStringLiteral("复制"), order);
     m_deleteBlockButton = button(QStringLiteral("删除"), order);
     visualLayout->addLayout(order);
-    m_blockHint = new QLabel;
+    m_blockHint = new AppText::Label;
     m_blockHint->setWordWrap(true);
     m_blockHint->setStyleSheet("color:#91a5c4");
     visualLayout->addWidget(m_blockHint);
@@ -190,13 +192,13 @@ WidgetEditorDialog::WidgetEditorDialog(QWidget* parent) : QDialog(parent) {
     m_blockText->setMaximumHeight(80);
     m_blockText->setPlaceholderText(QStringLiteral("输入文字或数字，支持换行"));
     m_blockText->setObjectName("customBlockText");
-    m_fontSize = new QSpinBox;
+    m_fontSize = new AppText::SpinBox;
     m_fontSize->setRange(10, 96);
     m_fontSize->setSuffix(" px");
     m_align = new QComboBox;
     m_align->addItems({QStringLiteral("左对齐"), QStringLiteral("居中"), QStringLiteral("右对齐")});
     m_bold = new QCheckBox(QStringLiteral("加粗"));
-    m_progress = new QSpinBox;
+    m_progress = new AppText::SpinBox;
     m_progress->setRange(0, 100);
     m_progress->setSuffix(" %");
     m_blockForm->addRow(QStringLiteral("内容"), m_blockText);
@@ -220,7 +222,7 @@ WidgetEditorDialog::WidgetEditorDialog(QWidget* parent) : QDialog(parent) {
         auto* row = new QWidget;
         auto* layout = new QHBoxLayout(row);
         layout->setContentsMargins(0, 0, 0, 0);
-        auto* field = new QLineEdit;
+        auto* field = new AppText::LineEdit;
         field->setMaximumWidth(160);
         layout->addWidget(field, 1);
         auto* choose = button(QStringLiteral("选色"), layout);
@@ -235,7 +237,7 @@ WidgetEditorDialog::WidgetEditorDialog(QWidget* parent) : QDialog(parent) {
     m_background = addColor(QStringLiteral("背景颜色"));
     m_foreground = addColor(QStringLiteral("文字颜色"));
     m_accent = addColor(QStringLiteral("强调颜色"));
-    m_padding = new QSpinBox;
+    m_padding = new AppText::SpinBox;
     m_padding->setRange(0, 64);
     m_padding->setSuffix(" px");
     style->addRow(QStringLiteral("内容边距"), m_padding);
@@ -252,7 +254,7 @@ WidgetEditorDialog::WidgetEditorDialog(QWidget* parent) : QDialog(parent) {
     auto* codeLayout = new QVBoxLayout(code);
     codeLayout->setContentsMargins(0, 0, 0, 0);
     codeLayout->setSpacing(8);
-    auto* help = new QLabel(QStringLiteral("粘贴 HTML 内容，可在 CSS 和 JavaScript 标签中补充样式与交互。"));
+    auto* help = new AppText::Label(QStringLiteral("粘贴 HTML 内容，可在 CSS 和 JavaScript 标签中补充样式与交互。"));
     help->setWordWrap(true);
     help->setStyleSheet("color:#91a5c4");
     codeLayout->addWidget(help);
@@ -260,7 +262,7 @@ WidgetEditorDialog::WidgetEditorDialog(QWidget* parent) : QDialog(parent) {
     codeLayout->addWidget(tabs, 1);
     auto editor = [tabs](const QString& label) {
         auto* field = new QPlainTextEdit;
-        QFont font("Consolas");
+        QFont font(AppFonts::family());
         font.setPointSize(10);
         field->setFont(font);
         field->setLineWrapMode(QPlainTextEdit::NoWrap);
@@ -287,12 +289,12 @@ WidgetEditorDialog::WidgetEditorDialog(QWidget* parent) : QDialog(parent) {
     previewLayout->setContentsMargins(6, 0, 0, 0);
     previewLayout->setSpacing(8);
     auto* previewHeader = new QHBoxLayout;
-    previewHeader->addWidget(new QLabel(QStringLiteral("实时预览")));
+    previewHeader->addWidget(new AppText::Label(QStringLiteral("实时预览")));
     previewHeader->addStretch();
     auto* refresh = button(QStringLiteral("重载"), previewHeader);
     refresh->setToolTip(QStringLiteral("重新运行 HTML 和脚本，或重试启动预览"));
     previewLayout->addLayout(previewHeader);
-    m_previewSize = new QLabel;
+    m_previewSize = new AppText::Label;
     m_previewSize->setWordWrap(true);
     m_previewSize->setStyleSheet("color:#91a5c4");
     previewLayout->addWidget(m_previewSize);
@@ -316,7 +318,7 @@ WidgetEditorDialog::WidgetEditorDialog(QWidget* parent) : QDialog(parent) {
     m_splitter->setStretchFactor(0, 1);
     m_splitter->setStretchFactor(1, 1);
 
-    m_status = new QLabel;
+    m_status = new AppText::Label;
     m_status->setWordWrap(true);
     m_status->setObjectName("customStatus");
     m_status->setStyleSheet("color:#a8b9d3");
