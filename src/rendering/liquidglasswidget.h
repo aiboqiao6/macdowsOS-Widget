@@ -37,6 +37,8 @@ public:
 
     void setGlassMargins(int horizontal, int vertical = -1);
     void setGlassRadius(qreal radius);
+    // 玻璃圆角：右键菜单的压暗层要按卡片真实的圆角挖洞，不能用估算值。
+    qreal glassRadius() const { return m_glassRadius; }
     // 启用鼠标穿透；独立的托盘与设置窗口继续接收输入。
     void setMouseThroughEnabled(bool enabled);
     bool mouseThroughEnabled() const { return m_mouseThrough; }
@@ -55,6 +57,11 @@ public:
     void setDesktopCaptureEnabled(bool enabled);
     bool desktopCaptureEnabled() const { return m_desktopCaptureEnabled; }
     void setDesktopLayerEnabled(bool enabled) { m_desktopLayerEnabled = enabled; }
+
+    // 右键菜单的压暗层铺满全屏，不再挖洞；打开期间把这张卡片的窗口临时抬到蒙版之上，
+    // 关闭动画结束后再放回桌面层。序号用来区分先后两次打开，后开的那次不会被旧的收回压回去。
+    quint64 elevateForMenu(WId aboveWindow);
+    void dropMenuElevation(quint64 serial);
 
 protected:
     void setPanelWindow() { m_panelWindow = true; }
@@ -89,6 +96,8 @@ private:
     void updateGlassObjectGeometry();
     void updateWindowMask();
     bool rebuildWallpaperCanvas(QScreen* screen);
+    // 壁纸换代后丢弃所有基于旧壁纸的缓存，并让暂停的卡片立即重绘。
+    void invalidateWallpaperBackdrop();
     QImage wallpaperBackdrop(const QRect& area, qreal scale);
     void updateRefreshRate();
     bool hasOverlappingDesktopWidget() const;
@@ -118,6 +127,9 @@ private:
     bool m_dragging = false;
     // 仅在目标层级变化时调整原生窗口次序。
     bool m_windowLayerInitialized = false;
+    // 菜单打开期间压在 updateWindowLayer 之上，避免它把卡片又沉回蒙版下面。
+    bool m_menuElevated = false;
+    quint64 m_menuElevationSerial = 0;
     bool m_panelWindow = false;
     bool m_captureExcluded = false;
     WId m_registeredGlassWindow = 0;
@@ -145,4 +157,6 @@ private:
     QString m_wallpaperScreenName;
     QSize m_wallpaperPixelSize;
     QElapsedTimer m_wallpaperRefreshClock;
+    // 已应用到本窗口的壁纸代际；与进程共享代际不同即表示壁纸换过。
+    quint64 m_wallpaperEpoch = 0;
 };

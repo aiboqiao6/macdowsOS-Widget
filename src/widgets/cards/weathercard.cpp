@@ -1,4 +1,5 @@
 #include "widgets/desktopwidget.h"
+#include "widgets/cardink.h"
 #include "widgets/cardmetrics.h"
 #include "app/fontsettings.h"
 #include "rendering/responsivelayout.h"
@@ -35,7 +36,9 @@ QRectF DesktopWidget::drawWeatherIcon(QPainter& painter, const QRectF& rect, boo
         iconName += QLatin1Char('n');
 
     static QHash<QString, QImage> iconCache;
-    auto it = iconCache.constFind(iconName);
+    // 素材是白色图标；亮色模式下按墨色重着色，否则会白底白图。
+    const QString cacheKey = CardInk::dark() ? iconName : iconName + QStringLiteral("|ink");
+    auto it = iconCache.constFind(cacheKey);
     if (it == iconCache.cend()) {
         QImage source(QStringLiteral(":/weather/%1.png").arg(iconName));
         if (source.isNull())
@@ -60,7 +63,18 @@ QRectF DesktopWidget::drawWeatherIcon(QPainter& painter, const QRectF& rect, boo
         }
         if (right >= left && bottom >= top)
             source = source.copy(QRect(left, top, right - left + 1, bottom - top + 1));
-        it = iconCache.constFind(iconCache.insert(iconName, source).key());
+        if (!CardInk::dark()) {
+            // 只替换 RGB，保留原始 alpha 覆盖，抗锯齿边缘不变。
+            const QColor ink = CardInk::chrome(QColor(255, 255, 255, 255));
+            for (int y = 0; y < source.height(); ++y) {
+                QRgb* scan = reinterpret_cast<QRgb*>(source.scanLine(y));
+                for (int x = 0; x < source.width(); ++x) {
+                    const int alpha = qAlpha(scan[x]);
+                    scan[x] = qRgba(ink.red(), ink.green(), ink.blue(), alpha);
+                }
+            }
+        }
+        it = iconCache.constFind(iconCache.insert(cacheKey, source).key());
     }
 
     const QRectF paintedBounds = ResponsiveLayout::drawImageFitted(painter, rect, it.value());
@@ -109,7 +123,7 @@ void DesktopWidget::paintWeatherCard(QPainter& painter, const QRectF& card) cons
         marker.closeSubpath();
         painter.save();
         painter.setPen(Qt::NoPen);
-        painter.setBrush(QColor(224, 231, 241, 210));
+        painter.setBrush(CardInk::chrome(QColor(224, 231, 241, 210)));
         painter.drawPath(marker);
         painter.restore();
     };
@@ -124,7 +138,7 @@ void DesktopWidget::paintWeatherCard(QPainter& painter, const QRectF& card) cons
                                                     const QString& value) {
             const qreal labelWidth = box.width() * .25;
             painter.setFont(weatherFont(.040, QFont::DemiBold));
-            painter.setPen(QColor(205, 213, 226, 205));
+            painter.setPen(CardInk::chrome(QColor(205, 213, 226, 205)));
             const qreal half = box.height() * .50;
             ResponsiveLayout::drawSingleLine(painter, QRectF(box.left(), box.top(), labelWidth, half),
                             Qt::AlignCenter, label.left(1));
@@ -132,7 +146,7 @@ void DesktopWidget::paintWeatherCard(QPainter& painter, const QRectF& card) cons
                                    labelWidth, half),
                             Qt::AlignCenter, label.mid(1, 1));
             painter.setFont(weatherFont(valueFontRatio, QFont::Normal));
-            painter.setPen(QColor(235, 240, 247, 225));
+            painter.setPen(CardInk::chrome(QColor(235, 240, 247, 225)));
             ResponsiveLayout::drawSingleLine(painter, QRectF(box.left() + labelWidth + unit * .006,
                                    box.top(), box.width() - labelWidth,
                                    box.height()),
@@ -148,13 +162,13 @@ void DesktopWidget::paintWeatherCard(QPainter& painter, const QRectF& card) cons
 
     if (m_cardVariant == 0) {
         painter.setFont(weatherFont(.075, QFont::DemiBold));
-        painter.setPen(QColor(240, 244, 250, 228));
+        painter.setPen(CardInk::chrome(QColor(240, 244, 250, 228)));
         drawLocation(QRectF(content.left(), content.top(), w, h * .105),
                      m_weatherLocation);
 
         // 紧凑天气卡片依次排列地点、温度、天气状态和高低温。
         painter.setFont(weatherFont(.22, QFont::Normal));
-        painter.setPen(QColor(248, 250, 253, 242));
+        painter.setPen(CardInk::chrome(QColor(248, 250, 253, 242)));
         const QRectF temperatureArea(content.left(), content.top() + h * .17,
                                      w, h * .27);
         const QRectF temperatureBounds = ResponsiveLayout::drawSingleLine(
@@ -174,7 +188,7 @@ void DesktopWidget::paintWeatherCard(QPainter& painter, const QRectF& card) cons
                         m_weatherNight, m_weatherCode);
         painter.setFont(weatherFont(kWeatherCompactConditionFontRatio,
                               QFont::DemiBold));
-        painter.setPen(QColor(235, 239, 246, 220));
+        painter.setPen(CardInk::chrome(QColor(235, 239, 246, 220)));
         // 短天气描述居中于图标列，长描述从同一前沿展开。
         const qreal measuredDescriptionWidth =
             QFontMetricsF(painter.font()).tightBoundingRect(description).width();
@@ -192,11 +206,11 @@ void DesktopWidget::paintWeatherCard(QPainter& painter, const QRectF& card) cons
 
     if (m_cardVariant == 1) {
         painter.setFont(weatherFont(.068, QFont::DemiBold));
-        painter.setPen(QColor(240, 244, 250, 228));
+        painter.setPen(CardInk::chrome(QColor(240, 244, 250, 228)));
         drawLocation(QRectF(content.left(), content.top(), w * .56, h * .105),
                      m_weatherLocation);
         painter.setFont(weatherFont(.205, QFont::Normal));
-        painter.setPen(QColor(248, 250, 253, 242));
+        painter.setPen(CardInk::chrome(QColor(248, 250, 253, 242)));
         ResponsiveLayout::drawSingleLine(painter, QRectF(content.left(), content.top() + h * .17,
                                w * .43, h * .27),
                         Qt::AlignLeft | Qt::AlignVCenter, temp);
@@ -213,7 +227,7 @@ void DesktopWidget::paintWeatherCard(QPainter& painter, const QRectF& card) cons
             painter, summaryIcon, m_weatherNight, m_weatherCode);
         painter.setFont(weatherFont(kWeatherWideConditionFontRatio,
                               QFont::DemiBold));
-        painter.setPen(QColor(232, 237, 245, 220));
+        painter.setPen(CardInk::chrome(QColor(232, 237, 245, 220)));
         const qreal conditionTextTop = paintedSummaryIcon.bottom()
                                        + unit * kWeatherConditionGapRatio;
         const QRectF conditionText(
@@ -237,7 +251,7 @@ void DesktopWidget::paintWeatherCard(QPainter& painter, const QRectF& card) cons
                 const QRectF cell(content.left() + cellW * i, stripTop,
                                   cellW, stripHeight);
                 painter.setFont(weatherFont(.060, QFont::Normal));
-                painter.setPen(QColor(193, 204, 222, 190));
+                painter.setPen(CardInk::chrome(QColor(193, 204, 222, 190)));
                 ResponsiveLayout::drawSingleLine(painter, QRectF(cell.left(), cell.top(), cell.width(),
                                        stripHeight * .18),
                                 Qt::AlignCenter, hour.time);
@@ -247,7 +261,7 @@ void DesktopWidget::paintWeatherCard(QPainter& painter, const QRectF& card) cons
                                           icon, icon * .84),
                                 hour.night, hour.code);
                 painter.setFont(weatherFont(.060, QFont::DemiBold));
-                painter.setPen(QColor(235, 240, 247, 218));
+                painter.setPen(CardInk::chrome(QColor(235, 240, 247, 218)));
                 ResponsiveLayout::drawSingleLine(painter, QRectF(cell.left(),
                                        cell.top() + stripHeight * .88,
                                        cell.width(), stripHeight * .18),
@@ -260,11 +274,11 @@ void DesktopWidget::paintWeatherCard(QPainter& painter, const QRectF& card) cons
     }
 
     painter.setFont(weatherFont(kWeatherLargeLocationFontRatio, QFont::DemiBold));
-    painter.setPen(QColor(241, 245, 251, 232));
+    painter.setPen(CardInk::chrome(QColor(241, 245, 251, 232)));
     drawLocation(QRectF(content.left(), content.top(), w * .56, unit * .11),
                  m_weatherLocation);
     painter.setFont(weatherFont(kWeatherLargeTemperatureFontRatio, QFont::Normal));
-    painter.setPen(QColor(249, 251, 254, 242));
+    painter.setPen(CardInk::chrome(QColor(249, 251, 254, 242)));
     ResponsiveLayout::drawSingleLine(painter, QRectF(content.left(), content.top() + unit * .155,
                            w * .45, unit * .25),
                     Qt::AlignLeft | Qt::AlignVCenter, temp);
@@ -281,7 +295,7 @@ void DesktopWidget::paintWeatherCard(QPainter& painter, const QRectF& card) cons
     const QRectF paintedSummaryIcon = drawWeatherIcon(
         painter, summaryIcon, m_weatherNight, m_weatherCode);
     painter.setFont(weatherFont(kWeatherLargeConditionFontRatio, QFont::Normal));
-    painter.setPen(QColor(202, 211, 226, 195));
+    painter.setPen(CardInk::chrome(QColor(202, 211, 226, 195)));
     const qreal conditionTextTop = paintedSummaryIcon.bottom()
                                    + unit * kWeatherConditionGapRatio;
     const QRectF conditionText(conditionColumn.left(), conditionTextTop,
@@ -310,7 +324,7 @@ void DesktopWidget::paintWeatherCard(QPainter& painter, const QRectF& card) cons
             const QRectF cell(content.left() + cellW * i, hourlyTop,
                               cellW, cardHeight * .20);
             painter.setFont(weatherFont(kWeatherLargeHourlyFontRatio, QFont::Normal));
-            painter.setPen(QColor(196, 206, 222, 195));
+            painter.setPen(CardInk::chrome(QColor(196, 206, 222, 195)));
             ResponsiveLayout::drawSingleLine(painter, QRectF(cell.left(), cell.top(), cell.width(),
                                    cardHeight * .055),
                             Qt::AlignCenter, hour.time);
@@ -321,7 +335,7 @@ void DesktopWidget::paintWeatherCard(QPainter& painter, const QRectF& card) cons
                                       icon, icon * .82),
                             hour.night, hour.code);
             painter.setFont(weatherFont(kWeatherLargeHourlyFontRatio, QFont::DemiBold));
-            painter.setPen(QColor(241, 245, 251, 225));
+            painter.setPen(CardInk::chrome(QColor(241, 245, 251, 225)));
             ResponsiveLayout::drawSingleLine(painter, QRectF(cell.left(),
                                    hourlyTop + cardHeight
                                                * kWeatherHourlyTemperatureOffsetRatio,
@@ -334,13 +348,13 @@ void DesktopWidget::paintWeatherCard(QPainter& painter, const QRectF& card) cons
     ResponsiveLayout::drawLine(
         painter, weatherMetrics, QPointF(content.left(), summaryDividerY),
         QPointF(content.right(), summaryDividerY),
-        QColor(255, 255, 255, 105), .003);
+        CardInk::chrome(QColor(255, 255, 255, 105)), .003);
     const qreal dividerY = card.top()
                            + cardHeight * kWeatherDailyDividerRatio;
     ResponsiveLayout::drawLine(
         painter, weatherMetrics, QPointF(content.left(), dividerY),
         QPointF(content.right(), dividerY),
-        QColor(255, 255, 255, 105), .003);
+        CardInk::chrome(QColor(255, 255, 255, 105)), .003);
     const int dayStart = !m_weatherDays.isEmpty()
                          && m_weatherDays.first().label == QStringLiteral("今天")
                        ? 1 : 0;
@@ -384,7 +398,7 @@ void DesktopWidget::paintWeatherCard(QPainter& painter, const QRectF& card) cons
         const QRectF row(content.left(), rowTop + rowH * i, content.width(), rowH);
         painter.setFont(weatherFont(kWeatherLargeDailyLabelFontRatio,
                               QFont::DemiBold));
-        painter.setPen(QColor(226, 232, 242, 210));
+        painter.setPen(CardInk::chrome(QColor(226, 232, 242, 210)));
         ResponsiveLayout::drawSingleLine(painter, QRectF(row.left(), row.top(), w * .12, row.height()),
                         Qt::AlignLeft | Qt::AlignVCenter,
                         normalizedWeekdayLabel(day.label));
@@ -395,7 +409,7 @@ void DesktopWidget::paintWeatherCard(QPainter& painter, const QRectF& card) cons
                         day.night, day.code);
         painter.setFont(weatherFont(kWeatherLargeDailyTemperatureFontRatio,
                               QFont::DemiBold));
-        painter.setPen(QColor(219, 227, 239, 204));
+        painter.setPen(CardInk::chrome(QColor(219, 227, 239, 204)));
         ResponsiveLayout::drawSingleLine(painter, QRectF(row.left() + w * .30, row.top(),
                                w * .12, row.height()),
                         Qt::AlignLeft | Qt::AlignVCenter,
@@ -415,16 +429,16 @@ void DesktopWidget::paintWeatherCard(QPainter& painter, const QRectF& card) cons
                 ? .5 : (high - scaleMinimum) / temperatureSpan;
             ResponsiveLayout::drawRangeBar(
                 painter, weatherMetrics, rangeArea, lowRatio, highRatio,
-                QColor(255, 255, 255, 28),
-                QColor(238, 242, 248, 185), .010, .035);
+                CardInk::chrome(QColor(255, 255, 255, 28)),
+                CardInk::chrome(QColor(238, 242, 248, 185)), .010, .035);
         } else {
             ResponsiveLayout::drawLine(
                 painter, weatherMetrics,
                 QPointF(rangeArea.left(), rangeArea.center().y()),
                 QPointF(rangeArea.right(), rangeArea.center().y()),
-                QColor(255, 255, 255, 28), .010);
+                CardInk::chrome(QColor(255, 255, 255, 28)), .010);
         }
-        painter.setPen(QColor(219, 227, 239, 204));
+        painter.setPen(CardInk::chrome(QColor(219, 227, 239, 204)));
         ResponsiveLayout::drawSingleLine(painter, QRectF(row.right() - w * .11, row.top(),
                                w * .11, row.height()),
                         Qt::AlignRight | Qt::AlignVCenter,

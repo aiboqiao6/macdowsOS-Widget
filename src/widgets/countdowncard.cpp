@@ -1,4 +1,5 @@
 #include "widgets/countdowncard.h"
+#include "widgets/cardink.h"
 #include "app/fontsettings.h"
 #include "rendering/responsivelayout.h"
 #include <QFontMetrics>
@@ -31,9 +32,9 @@ void paint(QPainter& painter, const QRectF& bounds, const Event& event, const QD
     const State value = state(event, today);
     const ResponsiveLayout::Metrics m(bounds);
     const bool wide = bounds.width() > bounds.height() * 1.5;
-    const QColor primary(250, 250, 252, 245);
-    const QColor secondary(235, 237, 242, 160);
-    const QColor accent(255, 114, 121);
+    const QColor primary = CardInk::chrome(QColor(250, 250, 252, 245));
+    const QColor secondary = CardInk::chrome(QColor(235, 237, 242, 160));
+    const QColor accent = CardInk::accent(QColor(255, 114, 121));
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, GraphicsQuality::enabled());
     const auto text = [&](const QRectF& area, const QString& label, qreal size,

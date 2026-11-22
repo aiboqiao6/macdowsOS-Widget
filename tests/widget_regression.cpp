@@ -2877,6 +2877,62 @@ private slots:
         QCOMPARE(defaults.materialParameters().noise, LiquidGlassStyle::kNoiseAmount);
     }
 
+    void ios18BlurStyleUsesFlatFrostMaterial() {
+        // 样式编号写入设置后，新场景按样式取默认参数；液态玻璃的常量保持不变。
+        AppSettings().setValue("material/style",
+            LiquidGlassStyle::styleIndex(LiquidGlassStyle::Style::Ios18Blur));
+        QtGlassFlowScene frosted;
+        QCOMPARE(frosted.materialStyle(), LiquidGlassStyle::Style::Ios18Blur);
+        const auto optics = LiquidGlassStyle::optics(LiquidGlassStyle::Style::Ios18Blur, false);
+        QCOMPARE(frosted.m_blurRadius, optics.blurRadius);
+        QCOMPARE(frosted.m_blurIterations, optics.blurIterations);
+        QCOMPARE(frosted.m_frost, optics.frost);
+        QCOMPARE(frosted.m_saturation, optics.saturation);
+        QCOMPARE(frosted.m_hairline, optics.hairline);
+        // iOS 18 材质没有折射透镜，因此边缘反光与曲面变形都不参与绘制。
+        QCOMPARE(frosted.m_fPower, 0.0f);
+        // 亮暗模式只改变洗色与描边强度，不影响可调参数。
+        frosted.setDarkModeEnabled(true);
+        QCOMPARE(frosted.m_frost,
+            LiquidGlassStyle::optics(LiquidGlassStyle::Style::Ios18Blur, true).frost);
+        // 切回液态玻璃还原原有的折射与模糊，且不再叠加洗色和描边。
+        frosted.setMaterialStyle(LiquidGlassStyle::Style::LiquidGlass);
+        frosted.setMaterialParameters(
+            QtGlassFlowScene::styleParameters(LiquidGlassStyle::Style::LiquidGlass, true));
+        QCOMPARE(frosted.m_fPower, LiquidGlassStyle::kRefractionPower);
+        QCOMPARE(frosted.m_blurRadius, LiquidGlassStyle::kBlurRadius);
+        QCOMPARE(frosted.m_frost, 0.0f);
+        QCOMPARE(frosted.m_hairline, 0.0f);
+    }
+
+    void materialStylePickerAppliesPresetToEverySurface() {
+        DesktopWidget widget(nullptr, DesktopWidget::CardKind::Clock, false);
+        QtGlassFlowScene other;
+        bool applied = false;
+        QTimer::singleShot(0, &widget, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            auto close = qScopeGuard([dialog] { if (dialog->isVisible()) dialog->reject(); });
+            auto* style = dialog->findChild<QComboBox*>("materialStyle");
+            auto* refraction = dialog->findChild<QDoubleSpinBox*>("materialRefraction");
+            if (!style || !refraction) return;
+            style->setCurrentIndex(style->findData(
+                LiquidGlassStyle::styleIndex(LiquidGlassStyle::Style::Ios18Blur)));
+            applied = widget.materialStyle() == LiquidGlassStyle::Style::Ios18Blur
+                && other.materialStyle() == LiquidGlassStyle::Style::Ios18Blur
+                && widget.materialParameters().refraction == 0.0f
+                && !refraction->isEnabled();
+            dialog->accept();
+        });
+        widget.showSettingsDialog();
+        QVERIFY(applied);
+        QCOMPARE(AppSettings().value("material/style").toInt(),
+                 LiquidGlassStyle::styleIndex(LiquidGlassStyle::Style::Ios18Blur));
+        // 新场景重新启动后沿用保存的样式。
+        QtGlassFlowScene restored;
+        QCOMPARE(restored.materialStyle(), LiquidGlassStyle::Style::Ios18Blur);
+    }
+
     void unifiedGlassUsesSingleOpticalMaterialWithoutOverlayMasks() {
         AppSettings().setValue("appearance/liveBackdrop", false);
         DesktopWidget card(nullptr, DesktopWidget::CardKind::Weather, false,

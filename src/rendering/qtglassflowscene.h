@@ -77,6 +77,18 @@ public:
     bool darkModeEnabled() const { return m_darkModeEnabled; }
     MaterialParameters materialParameters() const;
     void setMaterialParameters(const MaterialParameters& parameters);
+    // 材质样式只切换表面光学模型；可调参数仍由 MaterialParameters 覆盖。
+    void setMaterialStyle(LiquidGlassStyle::Style style);
+    LiquidGlassStyle::Style materialStyle() const { return m_materialStyle; }
+    // 只有卡片使用亮色表面；面板保持深色表面，避免浅色文字失去对比。
+    void setLightSurface(bool light);
+    bool lightSurface() const { return m_lightSurface; }
+    // 覆盖样式的描边强度：右键菜单这类面板不画外描边。
+    void setHairlineAmount(float amount);
+    // 重新从设置读取材质样式与参数；菜单等每次弹出都会重建的表面在显示前调用。
+    void reloadMaterialFromSettings();
+    // 风格的默认值，供设置页填充控件和“恢复默认材质”使用。
+    static MaterialParameters styleParameters(LiquidGlassStyle::Style style, bool darkMode);
     void setRefreshInterval(int intervalMs);
     int refreshInterval() const { return m_refreshInterval; }
     // 由宿主处理窗口拖动时，仍可启用交互刷新节奏。
@@ -186,6 +198,13 @@ private:
     float m_blurRadius;
     int m_blurIterations;
     float m_noiseAmount;
+    // 由材质样式决定、不对外暴露的表面参数。
+    LiquidGlassStyle::Style m_materialStyle = LiquidGlassStyle::kDefaultStyle;
+    bool m_lightSurface = false;
+    float m_frost = 0.0f;
+    float m_saturation = 1.0f;
+    float m_hairline = 0.0f;
+    float m_milk = 0.0f;
     float m_attractionDist;
     float m_globalPower;
 

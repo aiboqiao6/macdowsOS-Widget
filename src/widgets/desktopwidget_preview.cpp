@@ -66,13 +66,13 @@ QImage DesktopWidget::renderPreview(CardKind kind, int variant, const QSize& siz
     const qreal radius = LiquidGlassStyle::kCardCornerRadius * preview.m_widgetScale;
     QLinearGradient rim(card.topLeft(), card.bottomRight());
     rim.setColorAt(0, preview.darkModeEnabled() ? QColor(143, 194, 204, 92)
-                                             : QColor(209, 240, 250, 122));
+                                            : QColor(122, 130, 142, 64));
     rim.setColorAt(.48, QColor(143, 194, 204, 22));
     rim.setColorAt(1, preview.darkModeEnabled() ? QColor(143, 194, 204, 48)
-                                             : QColor(209, 240, 250, 66));
+                                            : QColor(122, 130, 142, 32));
     painter.setPen(QPen(QBrush(rim), 1.0));
     painter.setBrush(preview.darkModeEnabled() ? QColor(3, 16, 19, 250)
-                                             : QColor(18, 35, 40, 245));
+                                             : QColor(248, 250, 253, 246));
     painter.drawRoundedRect(card.adjusted(.5 / dpr, .5 / dpr, -.5 / dpr, -.5 / dpr),
                             radius, radius);
     preview.paintOverlay(painter);

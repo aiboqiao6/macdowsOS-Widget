@@ -2,6 +2,7 @@
 
 #include "rendering/desktopcapture.h"
 #include <QDialog>
+#include <QPixmap>
 #include <QPointer>
 #include <QVector>
 
@@ -12,6 +13,8 @@ class QPushButton;
 class QStackedWidget;
 class UpdateChecker;
 class SettingsFrameClock;
+class SettingsPageCurtain;
+namespace SettingsAppearance { class SelectorPopup; }
 
 class SettingsDialog final : public QDialog
 {
@@ -41,6 +44,11 @@ private:
     void updateInterfaceScale();
     void refreshNavigationInk();
     void showPage(int index);
+    void animateNavigation(QPushButton* button, bool selected);
+    void beginPageTransition();
+    void finishPageTransition();
+    SettingsAppearance::SelectorPopup* selectorPopup(QObject* object) const;
+    void closeSelectorPopups();
     void navigateHistory(int offset);
     void filterPages(const QString& query);
     void buildAboutPage();
@@ -49,6 +57,7 @@ private:
     QWidget* m_blur;
     QWidget* m_sidebar;
     QStackedWidget* m_stack;
+    SettingsPageCurtain* m_curtain = nullptr;
     QLabel* m_title;
     QPushButton* m_back;
     QPushButton* m_forward;
@@ -57,9 +66,11 @@ private:
     QVector<QVBoxLayout*> m_pages;
     QVector<QPushButton*> m_navigation;
     QVector<QPointer<QWidget>> m_rowControls;
+    QVector<QPointer<QWidget>> m_selectorPopups;
     QVector<int> m_pageHistory;
     int m_historyPosition = -1;
     bool m_dark = false;
+    bool m_pageMotionArmed = false;
     bool m_capturePending = false;
     bool m_dragging = false;
     bool m_layoutDirty = true;

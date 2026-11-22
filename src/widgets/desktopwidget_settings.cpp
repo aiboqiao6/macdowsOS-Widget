@@ -101,6 +101,20 @@ void DesktopWidget::showSettingsDialog()
         QStringLiteral("平滑电量圆环、设备图标、时钟指针与图片边缘。调整后立即应用到所有组件。"));
 
     const MaterialParameters originalMaterial = materialParameters();
+    auto* styleBox = new QComboBox(&dialog);
+    styleBox->setObjectName(QStringLiteral("materialStyle"));
+    styleBox->addItem(QStringLiteral("液态玻璃"),
+                      LiquidGlassStyle::styleIndex(LiquidGlassStyle::Style::LiquidGlass));
+    styleBox->addItem(QStringLiteral("磨砂玻璃"),
+                      LiquidGlassStyle::styleIndex(LiquidGlassStyle::Style::Ios18Blur));
+    styleBox->setCurrentIndex(qMax(0, styleBox->findData(
+        LiquidGlassStyle::styleIndex(materialStyle()))));
+    dialog.addRow(materialGroup, QStringLiteral("材质样式"), styleBox,
+        QStringLiteral("液态玻璃有曲面折射与边缘反光；磨砂玻璃是平整的高强度磨砂，"
+                       "只保留一条 1 像素亮边。"));
+    const auto currentStyle = [styleBox]() {
+        return LiquidGlassStyle::styleFromIndex(styleBox->currentData().toInt());
+    };
     const auto addMaterialNumber = [&](const QString& name, const QString& label,
                                        double minimum, double maximum, int decimals,
                                        double step, double value) {
@@ -118,11 +132,13 @@ void DesktopWidget::showSettingsDialog()
     materialOpacity->setSuffix(QStringLiteral(" %"));
     auto* materialRefraction = addMaterialNumber(QStringLiteral("materialRefraction"),
         QStringLiteral("折射强度"), 0, 3, 2, 0.05, originalMaterial.refraction);
+    // iOS 18 材质是平整的磨砂表面，没有折射透镜，这一项对它不生效。
+    materialRefraction->setEnabled(currentStyle() == LiquidGlassStyle::Style::LiquidGlass);
     auto* materialBlur = addMaterialNumber(QStringLiteral("materialBlurRadius"),
-        QStringLiteral("模糊半径"), 0, 12, 2, 0.05, originalMaterial.blurRadius);
+        QStringLiteral("模糊半径"), 0, 32, 2, 0.25, originalMaterial.blurRadius);
     auto* materialIterations = new AppText::SpinBox(&dialog);
     materialIterations->setObjectName(QStringLiteral("materialBlurIterations"));
-    materialIterations->setRange(1, 6);
+    materialIterations->setRange(1, 8);
     materialIterations->setValue(originalMaterial.blurIterations);
     dialog.addRow(materialGroup, QStringLiteral("模糊次数"), materialIterations);
     auto* materialNoise = addMaterialNumber(QStringLiteral("materialNoise"),
@@ -148,7 +164,9 @@ void DesktopWidget::showSettingsDialog()
     };
     const auto applyMaterial = [&]() {
         const MaterialParameters parameters = selectedMaterial();
+        const LiquidGlassStyle::Style style = currentStyle();
         AppSettings settings;
+        settings.setValue(QStringLiteral("material/style"), LiquidGlassStyle::styleIndex(style));
         settings.setValue(QStringLiteral("material/opacity"), parameters.opacity);
         settings.setValue(QStringLiteral("material/refraction"), parameters.refraction);
         settings.setValue(QStringLiteral("material/blurRadius"), parameters.blurRadius);
@@ -157,15 +175,33 @@ void DesktopWidget::showSettingsDialog()
         materialSaveError->setVisible(!settings.sync());
         for (QWidget* widget : QApplication::allWidgets()) {
             auto* surface = qobject_cast<QtGlassFlowScene*>(widget);
-            if (surface)
+            if (surface) {
+                surface->setMaterialStyle(style);
                 surface->setMaterialParameters(parameters);
+            }
         }
     };
+    // 选中样式后把它的预设填回控件，之后仍可单独微调；改回其它样式同样如此。
+    connect(styleBox, &QComboBox::currentIndexChanged, &dialog, [&] {
+        const LiquidGlassStyle::Style style = currentStyle();
+        const MaterialParameters preset = QtGlassFlowScene::styleParameters(style, darkModeEnabled());
+        const QSignalBlocker opacityBlock(materialOpacity), refractionBlock(materialRefraction),
+            blurBlock(materialBlur), iterationsBlock(materialIterations), noiseBlock(materialNoise);
+        materialOpacity->setValue(preset.opacity * 100.0);
+        materialRefraction->setValue(preset.refraction);
+        materialBlur->setValue(preset.blurRadius);
+        materialIterations->setValue(preset.blurIterations);
+        materialNoise->setValue(preset.noise);
+        materialRefraction->setEnabled(style == LiquidGlassStyle::Style::LiquidGlass);
+        applyMaterial();
+    });
     for (QDoubleSpinBox* number : {materialOpacity, materialRefraction, materialBlur, materialNoise})
         connect(number, &QDoubleSpinBox::valueChanged, &dialog, applyMaterial);
     connect(materialIterations, &QSpinBox::valueChanged, &dialog, applyMaterial);
     connect(resetMaterial, &QPushButton::clicked, &dialog, [&]() {
-        const MaterialParameters defaults;
+        // 还原到当前样式的预设，而不是固定还原成液态玻璃。
+        const MaterialParameters defaults =
+            QtGlassFlowScene::styleParameters(currentStyle(), darkModeEnabled());
         const QSignalBlocker opacityBlock(materialOpacity), refractionBlock(materialRefraction),
             blurBlock(materialBlur), iterationsBlock(materialIterations), noiseBlock(materialNoise);
         materialOpacity->setValue(defaults.opacity * 100.0);

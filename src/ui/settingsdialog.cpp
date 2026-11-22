@@ -2,6 +2,7 @@
 #include "settingsdialog.h"
 #include "settingsappearance.h"
 #include "settingscontrolpaint.h"
+#include "settingspopup.h"
 #include "settingsbackdrop.h"
 #include "scaleselector.h"
 #include "app/fontsettings.h"
@@ -40,6 +41,7 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWindow>
+#include <QtMath>
 #include <cmath>
 #include <atomic>
 
@@ -147,9 +149,9 @@ namespace {
 using namespace SettingsAppearance;
 constexpr qreal kSettingsScaleBoost = 1.3;
 const QStringList kTitles = {QStringLiteral("通用"), QStringLiteral("外观与显示"),
-    QStringLiteral("液态玻璃"), QStringLiteral("天气"), QStringLiteral("自定义小组件"), QStringLiteral("关于")};
+    QStringLiteral("材质设置"), QStringLiteral("天气"), QStringLiteral("自定义小组件"), QStringLiteral("关于")};
 const QStringList kCaptions = {QStringLiteral("设置小组件的桌面交互与登录启动方式。"), QStringLiteral("选择小组件的外观、显示大小与渲染效果。"),
-    QStringLiteral("调整玻璃表面的透明度、折射与模糊效果。"), QStringLiteral("选择天气小组件显示的地区。"),
+    QStringLiteral("选择材质样式，并调整透明度、折射与模糊。"), QStringLiteral("选择天气小组件显示的地区。"),
     QStringLiteral("创建和管理自己的桌面小组件。"), QStringLiteral("查看应用信息、版本号与软件更新。")};
 QIcon pageIcon(int index, const QWidget* theme)
 {
@@ -222,6 +224,59 @@ QIcon searchIcon(const QColor& ink)
     return QIcon(pixmap);
 }
 }
+
+// Covers the page stack with the outgoing page while it dissolves, so a page
+// change never flashes an empty canvas between two fully painted pages.
+class SettingsPageCurtain final : public QWidget
+{
+public:
+    explicit SettingsPageCurtain(QWidget* parent) : QWidget(parent), m_fade(this)
+    {
+        setObjectName(QStringLiteral("settingsPageCurtain"));
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setAttribute(Qt::WA_NoSystemBackground);
+        setFocusPolicy(Qt::NoFocus);
+        hide();
+        m_fade.finished = [this] { hide(); };
+    }
+
+    void begin(const QPixmap& snapshot, int duration)
+    {
+        m_snapshot = snapshot;
+        m_fade.snap(0);
+        if (duration <= 0) {
+            m_snapshot = {};
+            hide();
+            return;
+        }
+        show();
+        raise();
+        m_fade.to(1, duration, QEasingCurve::OutQuad);
+        update();
+    }
+
+    void finish()
+    {
+        m_fade.snap(1);
+        m_snapshot = {};
+        hide();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        if (m_snapshot.isNull()) return;
+        const qreal progress = qBound(qreal(0), m_fade.value(), qreal(1));
+        if (progress >= 1) return;
+        QPainter painter(this);
+        painter.setOpacity(1 - progress);
+        painter.drawPixmap(0, 0, m_snapshot);
+    }
+
+private:
+    SettingsAppearance::Tween m_fade;
+    QPixmap m_snapshot;
+};
 
 SettingsDialog::SettingsDialog(bool darkMode)
     : QDialog(nullptr, Qt::Window | Qt::FramelessWindowHint), m_blur(new SettingsBackdrop(this))
@@ -379,6 +434,9 @@ SettingsDialog::SettingsDialog(bool darkMode)
         side->addWidget(button);
         m_navigation.append(button);
         connect(button, &QPushButton::clicked, this, [this, i] { selectPage(i); });
+        connect(button, &QPushButton::toggled, this, [this, button](bool selected) {
+            animateNavigation(button, selected);
+        });
         auto* scroll = new QScrollArea(m_stack);
         scroll->setWidgetResizable(true);
         scroll->setFrameShape(QFrame::NoFrame);
@@ -391,8 +449,10 @@ SettingsDialog::SettingsDialog(bool darkMode)
         page->addStretch();
         m_pages.append(page);
         scroll->setWidget(body);
+        new SettingsAppearance::SmoothScroll(scroll);
         m_stack->addWidget(scroll);
     }
+    m_curtain = new SettingsPageCurtain(content);
     m_noResults = caption(QStringLiteral("没有匹配的设置"), m_sidebar);
     m_noResults->setContentsMargins(px(this, "navigationInset"), px(this, "controlInset"), 0, 0);
     m_noResults->hide();
@@ -513,11 +573,25 @@ void SettingsDialog::addRow(QVBoxLayout* group, const QString& label, QWidget* c
             toggle->setText({});
             SettingsAppearance::height(toggle, "controlHeight");
             toggle->setProperty("themeWidth", QStringLiteral("toggleWidth"));
+            auto* channels = SettingsAppearance::motionFor(toggle);
+            channels->state.snap(toggle->isChecked() ? 1 : 0);
+            connect(toggle, &QCheckBox::toggled, this, [this, toggle](bool on) {
+                auto* knob = SettingsAppearance::motionFor(toggle);
+                const int duration = SettingsAppearance::motion(this, SettingsAppearance::Motion::state);
+                if (!isVisible()) knob->state.snap(on ? 1 : 0);
+                else knob->state.to(on ? 1 : 0, duration, QEasingCurve::OutCubic);
+            });
         }
         if (qobject_cast<QComboBox*>(control) || qobject_cast<QCheckBox*>(control)) {
             control->setProperty("settingsPaint", qobject_cast<QComboBox*>(control)
                 ? QStringLiteral("selector") : QStringLiteral("toggle"));
             control->installEventFilter(this);
+            if (auto* combo = qobject_cast<QComboBox*>(control)) {
+                auto* popup = new SettingsAppearance::SelectorPopup(this, combo);
+                control->setProperty("settingsSelectorPopup",
+                    QVariant::fromValue<quintptr>(reinterpret_cast<quintptr>(popup)));
+                m_selectorPopups.append(popup);
+            }
         }
         layout->addWidget(control);
         title->setBuddy(control);
@@ -537,6 +611,12 @@ void SettingsDialog::setDarkAppearance(bool dark)
     m_search->setPalette(searchPalette);
     refreshLayout();
     refreshNavigationInk();
+    // The popup material is keyed on the theme, so an open menu has to be redrawn
+    // as well - otherwise it keeps the previous theme's glass.
+    for (const auto& guarded : m_selectorPopups) {
+        if (!guarded) continue;
+        static_cast<SettingsAppearance::SelectorPopup*>(guarded.data())->refresh();
+    }
     update();
 }
 
@@ -609,11 +689,64 @@ void SettingsDialog::navigateHistory(int offset)
 
 void SettingsDialog::showPage(int index)
 {
+    if (index < 0 || index >= m_pages.size()) return;
+    const bool moving = m_stack->currentIndex() != index;
+    if (moving) closeSelectorPopups();
+    if (moving) beginPageTransition();
     m_stack->setCurrentIndex(index);
     m_title->setText(kTitles[index]);
     for (int i = 0; i < m_navigation.size(); ++i) m_navigation[i]->setChecked(i == index);
     m_back->setEnabled(m_historyPosition > 0);
     m_forward->setEnabled(m_historyPosition + 1 < m_pageHistory.size());
+}
+
+void SettingsDialog::animateNavigation(QPushButton* button, bool selected)
+{
+    auto* channels = SettingsAppearance::motionFor(button);
+    const int duration = SettingsAppearance::motion(this, SettingsAppearance::Motion::state);
+    // The first page is applied before the window appears; it must not fade in
+    // from nothing on the frame the window is first painted.
+    if (!m_pageMotionArmed || duration <= 0) channels->state.snap(selected ? 1 : 0);
+    else channels->state.to(selected ? 1 : 0, duration, QEasingCurve::OutQuad);
+}
+
+void SettingsDialog::beginPageTransition()
+{
+    if (!m_curtain || !m_pageMotionArmed || !isVisible() || isMinimized()) return;
+    if (!m_stack->isVisible() || m_stack->size().isEmpty()) return;
+    QWidget* outgoing = m_stack->currentWidget();
+    if (!outgoing || outgoing->size().isEmpty()) return;
+    const qreal dpr = devicePixelRatioF();
+    QPixmap snapshot(QSize(qCeil(outgoing->width() * dpr), qCeil(outgoing->height() * dpr)));
+    snapshot.setDevicePixelRatio(dpr);
+    // The page itself is transparent over the canvas; the snapshot has to carry
+    // that canvas or the outgoing rows would dissolve against the wrong colour.
+    snapshot.fill(SettingsAppearance::color(this, "canvas"));
+    outgoing->render(&snapshot);
+    m_curtain->setGeometry(m_stack->geometry());
+    m_curtain->begin(snapshot, SettingsAppearance::motion(this, SettingsAppearance::Motion::page));
+}
+
+void SettingsDialog::finishPageTransition()
+{
+    if (m_curtain) m_curtain->finish();
+}
+
+SettingsAppearance::SelectorPopup* SettingsDialog::selectorPopup(QObject* object) const
+{
+    auto* widget = qobject_cast<QWidget*>(object);
+    if (!widget) return nullptr;
+    const quintptr stored = widget->property("settingsSelectorPopup").value<quintptr>();
+    return stored ? reinterpret_cast<SettingsAppearance::SelectorPopup*>(stored) : nullptr;
+}
+
+void SettingsDialog::closeSelectorPopups()
+{
+    for (const auto& guarded : m_selectorPopups) {
+        if (!guarded) continue;
+        auto* popup = static_cast<SettingsAppearance::SelectorPopup*>(guarded.data());
+        if (popup->isOpen()) popup->close();
+    }
 }
 
 void SettingsDialog::filterPages(const QString& query)
@@ -770,6 +903,8 @@ void SettingsDialog::showEvent(QShowEvent* event)
     }
     refreshLayout();
     QDialog::showEvent(event);
+    // Later page changes cross-fade; the page that appears with the window does not.
+    m_pageMotionArmed = true;
     ++m_generation;
     m_registeredWindow = winId();
     if (!m_screenConnection)
@@ -898,6 +1033,8 @@ void SettingsDialog::changeEvent(QEvent* event)
 void SettingsDialog::hideEvent(QHideEvent* event)
 {
     m_dragging = false;
+    finishPageTransition();
+    closeSelectorPopups();
     m_frameClock->setInteracting(false);
     if (auto* grabber = QWidget::mouseGrabber(); grabber && grabber->window() == this)
         grabber->releaseMouse();
@@ -916,6 +1053,9 @@ void SettingsDialog::hideEvent(QHideEvent* event)
 void SettingsDialog::resizeEvent(QResizeEvent* event)
 {
     QDialog::resizeEvent(event);
+    // The curtain holds a snapshot of the old geometry; a resize invalidates it.
+    finishPageTransition();
+    closeSelectorPopups();
     if (event->spontaneous() && !m_updatingScale && !isMaximized() && property("settingsReady").toBool())
         m_unscaledWindowSize = QSizeF(size()) / m_effectiveScale;
     refreshLayout();
@@ -1009,6 +1149,28 @@ void SettingsDialog::paintEvent(QPaintEvent*)
 
 bool SettingsDialog::eventFilter(QObject* object, QEvent* event)
 {
+    // Selectors own their popup. Swallowing the press keeps Qt's native popup
+    // closed so the glass panel is the only thing that appears.
+    if (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonRelease
+        || event->type() == QEvent::MouseButtonDblClick) {
+        if (auto* popup = selectorPopup(object)) {
+            // The press position becomes the centre the popup grows out of.
+            if (event->type() == QEvent::MouseButtonPress)
+                popup->toggle(static_cast<QMouseEvent*>(event)->globalPosition().toPoint());
+            return true;
+        }
+    }
+    if (event->type() == QEvent::KeyPress) {
+        if (auto* popup = selectorPopup(object)) {
+            auto* key = static_cast<QKeyEvent*>(event);
+            if (popup->isOpen()) return false;   // the popup's own filter handles it
+            if (key->key() == Qt::Key_Space || key->key() == Qt::Key_F4
+                || (key->key() == Qt::Key_Down && (key->modifiers() & Qt::AltModifier))) {
+                popup->toggle();
+                return true;
+            }
+        }
+    }
     if (object == m_search && (event->type() == QEvent::FocusIn || event->type() == QEvent::FocusOut)) {
         auto* field = m_search->parentWidget();
         field->setProperty("focused", event->type() == QEvent::FocusIn);

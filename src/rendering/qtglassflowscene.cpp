@@ -72,13 +72,7 @@ QtGlassFlowScene::QtGlassFlowScene(QWidget *parent)
     AppSettings settings;
     m_darkModeEnabled = settings.value(QStringLiteral("appearance/darkMode"), false).toBool();
     m_imageAntialiasingEnabled = settings.value(QStringLiteral("appearance/imageAntialiasing"), true).toBool();
-    MaterialParameters material;
-    material.opacity = settings.value(QStringLiteral("material/opacity"), material.opacity).toFloat();
-    material.refraction = settings.value(QStringLiteral("material/refraction"), material.refraction).toFloat();
-    material.blurRadius = settings.value(QStringLiteral("material/blurRadius"), material.blurRadius).toFloat();
-    material.blurIterations = settings.value(QStringLiteral("material/blurIterations"), material.blurIterations).toInt();
-    material.noise = settings.value(QStringLiteral("material/noise"), material.noise).toFloat();
-    setMaterialParameters(material);
+    reloadMaterialFromSettings();
     setMouseTracking(true);
     setAttribute(Qt::WA_OpaquePaintEvent, true);
 
@@ -248,6 +242,13 @@ void QtGlassFlowScene::setDarkModeEnabled(bool enabled)
     if (m_darkModeEnabled == enabled)
         return;
     m_darkModeEnabled = enabled;
+    // 亮暗模式改变样式的洗色与描边强度；可调参数由用户持有，不在这里重设。
+    const LiquidGlassStyle::StyleOptics optics =
+        LiquidGlassStyle::optics(m_materialStyle, enabled, m_lightSurface);
+    m_frost = optics.frost;
+    m_saturation = optics.saturation;
+    m_hairline = optics.hairline;
+    m_milk = optics.milk;
     // 只更新材质参数，背景纹理与模糊结果继续复用。
     update();
 }
@@ -329,10 +330,78 @@ void QtGlassFlowScene::setRenderScale(float scale)
     update();
 }
 
+void QtGlassFlowScene::reloadMaterialFromSettings()
+{
+    AppSettings settings;
+    // 样式先于参数恢复：预设提供默认值，用户保存过的材质参数仍然优先。
+    const LiquidGlassStyle::Style style = LiquidGlassStyle::styleFromIndex(
+        settings.value(QStringLiteral("material/style"),
+                       LiquidGlassStyle::styleIndex(LiquidGlassStyle::kDefaultStyle)).toInt());
+    setMaterialStyle(style);
+    MaterialParameters material = styleParameters(style, m_darkModeEnabled);
+    material.opacity = settings.value(QStringLiteral("material/opacity"), material.opacity).toFloat();
+    material.refraction = settings.value(QStringLiteral("material/refraction"), material.refraction).toFloat();
+    material.blurRadius = settings.value(QStringLiteral("material/blurRadius"), material.blurRadius).toFloat();
+    material.blurIterations = settings.value(QStringLiteral("material/blurIterations"), material.blurIterations).toInt();
+    material.noise = settings.value(QStringLiteral("material/noise"), material.noise).toFloat();
+    setMaterialParameters(material);
+}
+
 QtGlassFlowScene::MaterialParameters QtGlassFlowScene::materialParameters() const
 {
     return {m_glassOpacity, m_fPower, m_blurRadius, m_blurIterations, m_noiseAmount};
 }
+
+QtGlassFlowScene::MaterialParameters QtGlassFlowScene::styleParameters(LiquidGlassStyle::Style style,
+                                                                     bool darkMode)
+{
+    const LiquidGlassStyle::StyleOptics optics = LiquidGlassStyle::optics(style, darkMode);
+    return {optics.opacity, optics.refraction, optics.blurRadius,
+            optics.blurIterations, optics.noise};
+}
+
+void QtGlassFlowScene::setMaterialStyle(LiquidGlassStyle::Style style)
+{
+    const LiquidGlassStyle::StyleOptics optics =
+        LiquidGlassStyle::optics(style, m_darkModeEnabled, m_lightSurface);
+    m_materialStyle = style;
+    m_frost = optics.frost;
+    m_saturation = optics.saturation;
+    m_hairline = optics.hairline;
+    m_milk = optics.milk;
+    // 表面模型变了，旧的模糊核与合成帧都不能再用。
+    m_blurKernelSigma = -1.0f;
+    m_blurKernelSamples.clear();
+    m_blurCacheDirty = true;
+    update();
+}
+
+void QtGlassFlowScene::setHairlineAmount(float amount)
+{
+    const float next = qBound(0.0f, amount, 1.0f);
+    if (qFuzzyCompare(m_hairline + 1.0f, next + 1.0f))
+        return;
+    m_hairline = next;
+    update();
+}
+
+void QtGlassFlowScene::setLightSurface(bool light)
+{
+    if (m_lightSurface == light)
+        return;
+    m_lightSurface = light;
+    const LiquidGlassStyle::StyleOptics optics =
+        LiquidGlassStyle::optics(m_materialStyle, m_darkModeEnabled, m_lightSurface);
+    m_frost = optics.frost;
+    m_saturation = optics.saturation;
+    m_hairline = optics.hairline;
+    m_milk = optics.milk;
+    m_blurKernelSigma = -1.0f;
+    m_blurKernelSamples.clear();
+    m_blurCacheDirty = true;
+    update();
+}
+
 
 void QtGlassFlowScene::setMaterialParameters(const MaterialParameters& parameters)
 {
@@ -342,8 +411,8 @@ void QtGlassFlowScene::setMaterialParameters(const MaterialParameters& parameter
     };
     setGlassOpacity(bounded(parameters.opacity, 0.05f, 1.0f, defaults.opacity));
     setRefractionPower(bounded(parameters.refraction, 0.0f, 3.0f, defaults.refraction));
-    setBlurRadius(bounded(parameters.blurRadius, 0.0f, 12.0f, defaults.blurRadius));
-    setBlurIterations(qBound(1, parameters.blurIterations, 6));
+    setBlurRadius(bounded(parameters.blurRadius, 0.0f, 32.0f, defaults.blurRadius));
+    setBlurIterations(qBound(1, parameters.blurIterations, 8));
     setNoiseAmount(bounded(parameters.noise, 0.0f, 0.1f, defaults.noise));
 }
 
@@ -723,14 +792,17 @@ void QtGlassFlowScene::runBlurPass()
             scattering = qMax(scattering, 1.0f + (1.0f - curvature) * 2.4f);
         }
     }
-    const float sigma = qBound(0.01f, m_blurRadius * scattering * m_renderScale * 1.95f, 42.0f);
-    const int stride = m_renderScale < .7f ? 4 : m_renderScale < .9f ? 3
-                     : m_renderScale < 1.2f ? 2 : 1;
+    // 模糊半径上限提高到 32、次数到 8 后 sigma 会远超原来的 42；采样表固定 64 项，
+    // 因此步长随半径放大，保证合并后每对采样合计不超过 63 项。
+    const float sigma = qBound(0.01f, m_blurRadius * scattering * m_renderScale * 1.95f, 192.0f);
+    const int radius = qMin(1024, qCeil(sigma * 3.0f));
+    const int baseStride = m_renderScale < .7f ? 4 : m_renderScale < .9f ? 3
+                         : m_renderScale < 1.2f ? 2 : 1;
+    const int stride = qMax(baseStride, qCeil(radius / 126.0));
     if (!qFuzzyCompare(m_blurKernelSigma, sigma) || m_blurKernelStride != stride) {
         m_blurKernelSigma = sigma;
         m_blurKernelStride = stride;
         m_blurKernelSamples.clear();
-        const int radius = qMin(127, qCeil(sigma * 3.0f));
         float total = 1.0f;
         for (int first = 1; first <= radius; first += 2 * stride) {
             const int second = first + stride;
@@ -860,6 +932,12 @@ void QtGlassFlowScene::renderGlassObject(int index)
     m_glassShader->setUniformValue("u_opacity", m_glassOpacity);
     m_glassShader->setUniformValue("u_darkMode", m_darkModeEnabled);
     m_glassShader->setUniformValue("u_devicePixelRatio", dpr);
+    m_glassShader->setUniformValue("u_materialStyle", LiquidGlassStyle::styleIndex(m_materialStyle));
+    m_glassShader->setUniformValue("u_frost", m_frost);
+    m_glassShader->setUniformValue("u_saturation", m_saturation);
+    m_glassShader->setUniformValue("u_hairline", m_hairline);
+    m_glassShader->setUniformValue("u_milk", m_milk);
+    m_glassShader->setUniformValue("u_lightSurface", m_lightSurface);
 
     QVector<QVector2D> centers, halves;
     QVector<float> powers, strengths;

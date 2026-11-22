@@ -1,9 +1,10 @@
 #pragma once
-#include "settingsappearance.h"
+#include "settingsmotion.h"
 #include "rendering/cleartypetext.h"
 #include <QCheckBox>
 #include <QComboBox>
 #include <QAbstractSpinBox>
+#include <QEnterEvent>
 #include <QLineEdit>
 #include <QEvent>
 #include <QFocusEvent>
@@ -125,8 +126,12 @@ inline void paintControl(QWidget* window, QWidget* widget)
         ClearTypeText::draw(painter, baseline, visible);
     };
     if (kind == QStringLiteral("history")) {
-        if (qobject_cast<QPushButton*>(widget)->isDown()) {
-            painter.fillPath(focusOutline(window, widget), color(window, "hover"));
+        // Press ink fades with the pointer instead of appearing on the same frame.
+        const qreal pressed = qBound(qreal(0), motionFor(widget)->press.value(), qreal(1));
+        if (pressed > 0.001) {
+            QColor fill = color(window, "hover");
+            fill.setAlphaF(fill.alphaF() * pressed);
+            painter.fillPath(focusOutline(window, widget), fill);
         }
         QColor c = color(window, "foreground");
         if (!widget->isEnabled()) c.setAlpha(65);
@@ -151,44 +156,87 @@ inline void paintControl(QWidget* window, QWidget* widget)
         if (combo) textAt(textRect, combo->currentText(), true, ink("foreground"));
     } else if (kind == QStringLiteral("toggle")) {
         auto* checkbox = qobject_cast<QCheckBox*>(widget);
+        // The knob travels the track while the accent cross-fades underneath it, so
+        // the switch reads as one movement rather than a jump plus a recolor. A
+        // switch that nobody animates still paints its current state.
+        const qreal on = widget->property("settingsControlMotion").isValid()
+            ? qBound(qreal(0), motionFor(widget)->state.value(), qreal(1))
+            : (checkbox && checkbox->isChecked() ? 1 : 0);
         const QRectF track = toggleRect(window, widget);
+        const qreal radius = track.height() / 2;
         painter.setPen(Qt::NoPen);
-        painter.setBrush(ink(checkbox->isChecked() ? "accent" : "toggleOff"));
-        painter.drawRoundedRect(track, track.height() / 2, track.height() / 2);
+        painter.setBrush(ink("toggleOff"));
+        painter.drawRoundedRect(track, radius, radius);
+        if (on > 0.002) {
+            QColor active = ink("accent");
+            active.setAlphaF(active.alphaF() * on);
+            painter.setBrush(active);
+            painter.drawRoundedRect(track, radius, radius);
+        }
         const qreal inset = em(window) * number(window, "toggleInset");
         const qreal knob = track.height() - inset * 2;
         const qreal knobWidth = qMin(track.width() - inset * 2,
             em(window) * number(window, "toggleKnobWidth"));
-        if (checkbox->isChecked()) {
-            painter.setPen(QPen(ink("onAccent"), stroke * 2, Qt::SolidLine, Qt::RoundCap));
+        if (on > 0.002) {
+            QColor bar = ink("onAccent");
+            bar.setAlphaF(bar.alphaF() * on);
+            painter.setPen(QPen(bar, stroke * 2, Qt::SolidLine, Qt::RoundCap));
             const qreal x = track.left() + (track.width() - knobWidth - inset) / 2;
             painter.drawLine(QPointF(x, track.center().y() - knob * .18),
                 QPointF(x, track.center().y() + knob * .18));
         }
-        const qreal x = checkbox->isChecked() ? track.right() - knobWidth - inset : track.left() + inset;
+        const qreal travel = track.width() - inset * 2 - knobWidth;
+        const qreal x = track.left() + inset + travel * on;
         painter.setPen(Qt::NoPen);
         painter.setBrush(ink("toggleKnob"));
         painter.drawRoundedRect(QRectF(x, track.top() + inset, knobWidth, knob), knob / 2, knob / 2);
     } else if (kind == QStringLiteral("navigation")) {
         auto* button = qobject_cast<QPushButton*>(widget);
-        const bool checked = button->isChecked();
+        auto* channels = motionFor(widget);
+        const qreal selected = qBound(qreal(0), channels->state.value(), qreal(1));
+        const qreal hovered = qBound(qreal(0), channels->hover.value(), qreal(1));
+        // The reference rail swaps its highlight without travelling and fades the
+        // pointer state instead, so the pill only ever cross-fades here.
+        const QRectF pill(widget->rect());
+        const qreal radius = px(window, "navigationRadius");
         painter.setPen(Qt::NoPen);
-        QColor fill = checked ? color(window, "accent") : button->underMouse() ? color(window, "hover") : QColor(Qt::transparent);
-        if (button->isDown()) fill = checked ? fill.darker(115) : color(window, "hover");
-        painter.setBrush(fill);
-        painter.drawRoundedRect(QRectF(widget->rect()), px(window, "navigationRadius"), px(window, "navigationRadius"));
-        const qreal inset = px(window, "navigationInset"), extent = px(window, "navigationIcon");
-        const QRectF icon(inset, (widget->height() - extent) / 2, extent, extent);
+        if (hovered > 0.002) {
+            QColor fill = color(window, "hover");
+            fill.setAlphaF(fill.alphaF() * hovered);
+            painter.setBrush(fill);
+            painter.drawRoundedRect(pill, radius, radius);
+        }
+        if (selected > 0.002) {
+            QColor fill = color(window, "accent");
+            fill.setAlphaF(fill.alphaF() * selected);
+            painter.setBrush(fill);
+            painter.drawRoundedRect(pill, radius, radius);
+        }
+        const qreal iconInset = px(window, "navigationInset"), extent = px(window, "navigationIcon");
+        const QRectF icon(iconInset, (widget->height() - extent) / 2, extent, extent);
         button->icon().paint(&painter, icon.toRect());
         QRectF copy(widget->rect());
         copy.setLeft(icon.right() + px(window, "controlGap"));
-        copy.setRight(copy.right() - inset);
-        QFont textFont = button->font(); textFont.setWeight(checked ? QFont::DemiBold : QFont::Medium);
-        painter.setFont(textFont);
-        const QColor navigationInk = button->property("settingsNavigationInk").value<QColor>();
-        textAt(copy, button->text(), false, checked ? color(window, "onAccent")
-            : navigationInk.isValid() ? navigationInk
-            : color(window, window->property("settingsDark").toBool() ? "navigationLight" : "navigationDark"));
+        copy.setRight(copy.right() - iconInset);
+        QColor navigationInk = button->property("settingsNavigationInk").value<QColor>();
+        if (!navigationInk.isValid())
+            navigationInk = color(window, window->property("settingsDark").toBool() ? "navigationLight" : "navigationDark");
+        if (!qFuzzyIsNull(selected)) {
+            QColor inkColor = color(window, "onAccent");
+            inkColor.setAlphaF(inkColor.alphaF() * selected);
+            QFont selectedFont = button->font();
+            selectedFont.setWeight(QFont::DemiBold);
+            painter.setFont(selectedFont);
+            textAt(copy, button->text(), false, inkColor);
+        }
+        if (selected < 0.998) {
+            QColor inkColor = navigationInk;
+            inkColor.setAlphaF(inkColor.alphaF() * (1 - selected));
+            QFont idleFont = button->font();
+            idleFont.setWeight(QFont::Medium);
+            painter.setFont(idleFont);
+            textAt(copy, button->text(), false, inkColor);
+        }
     } else if (kind == QStringLiteral("traffic")) {
         const char* roles[] = {"trafficClose", "trafficMinimize", "trafficZoom"};
         const int index = widget->property("trafficIndex").toInt();
@@ -215,6 +263,31 @@ public:
     PaintButton(QWidget* theme, QWidget* parent) : QPushButton(parent), m_theme(theme) {}
 protected:
     void paintEvent(QPaintEvent*) override { paintControl(m_theme, this); }
+    // Pointer feedback animates; the button's own model, focus and keyboard
+    // activation are untouched. The rail-style hover curve is OutQuad over
+    // Motion::hover, matching the reference recording.
+    void enterEvent(QEnterEvent* event) override
+    {
+        channels()->hover.to(1, motion(m_theme, Motion::hover), QEasingCurve::OutQuad);
+        QPushButton::enterEvent(event);
+    }
+    void leaveEvent(QEvent* event) override
+    {
+        channels()->hover.to(0, motion(m_theme, Motion::hover), QEasingCurve::OutQuad);
+        channels()->press.to(0, motion(m_theme, Motion::press), QEasingCurve::OutCubic);
+        QPushButton::leaveEvent(event);
+    }
+    void mousePressEvent(QMouseEvent* event) override
+    {
+        if (event->button() == Qt::LeftButton && isEnabled())
+            channels()->press.to(1, motion(m_theme, Motion::press), QEasingCurve::OutCubic);
+        QPushButton::mousePressEvent(event);
+    }
+    void mouseReleaseEvent(QMouseEvent* event) override
+    {
+        channels()->press.to(0, motion(m_theme, Motion::press), QEasingCurve::OutCubic);
+        QPushButton::mouseReleaseEvent(event);
+    }
     void focusInEvent(QFocusEvent* event) override
     {
         setProperty("settingsKeyboardFocus", event->reason() == Qt::TabFocusReason
@@ -229,6 +302,7 @@ protected:
         return circle.contains(position);
     }
 private:
+    ControlMotion* channels() { return motionFor(this); }
     QWidget* m_theme;
 };
 

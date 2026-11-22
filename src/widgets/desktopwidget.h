@@ -132,7 +132,8 @@ private:
     void handleDictionaryReply(QNetworkReply* reply);
     void searchWeatherCity();
     void updateCardGeometry();
-    void drawAnalogClock(QPainter& painter, const QRectF& rect, int hourOffset = 0) const;
+    void drawAnalogClock(QPainter& painter, const QRectF& rect, int hourOffset = 0,
+                         bool darkPlate = false) const;
     void drawClockFace(QPainter& painter, const QRectF& rect, int style,
                        const QString& city = QString(), int hourOffset = 0) const;
     void drawDigitalClock(QPainter& painter, const QRectF& rect,

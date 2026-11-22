@@ -1,4 +1,5 @@
 #include "widgets/desktopwidget.h"
+#include "widgets/cardink.h"
 #include "widgets/cardmetrics.h"
 #include "app/fontsettings.h"
 #include "rendering/responsivelayout.h"
@@ -30,14 +31,14 @@ void drawDeviceIcon(QPainter& painter, const QPointF& center, qreal radius,
     painter.save();
     const ResponsiveLayout::Metrics metrics(QRectF(center.x() - radius,
         center.y() - radius, radius * 2.0, radius * 2.0));
-    const QColor color = connected ? kBatteryForeground : QColor(226, 229, 228, 55);
+    const QColor color = connected ? CardInk::chrome(kBatteryForeground) : CardInk::chrome(QColor(226, 229, 228, 55));
     painter.setPen(QPen(color, metrics.stroke(painter, .0275), Qt::SolidLine,
                        Qt::RoundCap, Qt::RoundJoin));
     painter.setBrush(Qt::NoBrush);
     if (iconKind == 0) {
         const QRectF screen(center.x() - radius * .415, center.y() - radius * .28,
                             radius * .83, radius * .56);
-        painter.setBrush(QColor(226, 229, 228, connected ? 34 : 12));
+        painter.setBrush(CardInk::chrome(QColor(226, 229, 228, connected ? 34 : 12)));
         painter.drawRoundedRect(screen, radius * .035, radius * .035);
         painter.drawLine(QPointF(center.x() - radius * .065, screen.top() + radius * .025),
                          QPointF(center.x() + radius * .065, screen.top() + radius * .025));
@@ -60,7 +61,7 @@ void drawDeviceIcon(QPainter& painter, const QPointF& center, qreal radius,
     } else if (iconKind == 2) {
         const QRectF keyboard(center.x() - radius * .39, center.y() - radius * .21,
                               radius * .78, radius * .42);
-        painter.setBrush(QColor(226, 229, 228, 34));
+        painter.setBrush(CardInk::chrome(QColor(226, 229, 228, 34)));
         painter.drawRoundedRect(keyboard, radius * .07, radius * .07);
         painter.drawLine(keyboard.bottomLeft() + QPointF(radius * .12, -radius * .10),
                          keyboard.bottomRight() + QPointF(-radius * .12, -radius * .10));
@@ -72,7 +73,7 @@ void drawDeviceIcon(QPainter& painter, const QPointF& center, qreal radius,
         painter.drawLine(QPointF(center.x() + radius * .31, center.y()),
                          QPointF(center.x() + radius * .31, center.y() + radius * .28));
     } else if (iconKind >= 0) {
-        painter.setBrush(QColor(226, 229, 228, 34));
+        painter.setBrush(CardInk::chrome(QColor(226, 229, 228, 34)));
         painter.drawRoundedRect(QRectF(center.x() - radius * .24, center.y() - radius * .34,
                                       radius * .48, radius * .68), radius * .10, radius * .10);
     }
@@ -93,9 +94,9 @@ void DesktopWidget::drawBatteryIcon(QPainter& painter, const QRectF& rect, int l
     bodyPath.addRoundedRect(body, radius, radius);
 
     QLinearGradient shell(0, body.top(), 0, body.bottom());
-    shell.setColorAt(0.0, QColor(255, 255, 255, 220));
-    shell.setColorAt(0.45, QColor(221, 227, 236, 165));
-    shell.setColorAt(1.0, QColor(157, 166, 180, 160));
+    shell.setColorAt(0.0, CardInk::chrome(QColor(255, 255, 255, 220)));
+    shell.setColorAt(0.45, CardInk::chrome(QColor(221, 227, 236, 165)));
+    shell.setColorAt(1.0, CardInk::chrome(QColor(157, 166, 180, 160)));
     painter.fillPath(bodyPath, shell);
 
     const qreal inset = metrics.size(.09);
@@ -106,14 +107,14 @@ void DesktopWidget::drawBatteryIcon(QPainter& painter, const QRectF& rect, int l
         levelPath.addRoundedRect(levelRect, radius * 0.68, radius * 0.68);
         QLinearGradient fill(levelRect.topLeft(), levelRect.bottomRight());
         if (level <= 20) {
-            fill.setColorAt(0.0, QColor(255, 142, 91));
-            fill.setColorAt(1.0, QColor(235, 58, 82));
+            fill.setColorAt(0.0, CardInk::accent(QColor(255, 142, 91)));
+            fill.setColorAt(1.0, CardInk::accent(QColor(235, 58, 82)));
         } else if (charging) {
-            fill.setColorAt(0.0, QColor(255, 255, 255, 235));
-            fill.setColorAt(1.0, QColor(255, 255, 255, 235));
+            fill.setColorAt(0.0, CardInk::chrome(QColor(255, 255, 255, 235)));
+            fill.setColorAt(1.0, CardInk::chrome(QColor(255, 255, 255, 235)));
         } else {
-            fill.setColorAt(0.0, QColor(255, 255, 255, 235));
-            fill.setColorAt(1.0, QColor(255, 255, 255, 235));
+            fill.setColorAt(0.0, CardInk::chrome(QColor(255, 255, 255, 235)));
+            fill.setColorAt(1.0, CardInk::chrome(QColor(255, 255, 255, 235)));
         }
         painter.fillPath(levelPath, fill);
     }
@@ -122,10 +123,10 @@ void DesktopWidget::drawBatteryIcon(QPainter& painter, const QRectF& rect, int l
                     body.center().y() - rect.height() * .16,
                     rect.height() * .105, rect.height() * .32);
     painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(208, 215, 225, 190));
+    painter.setBrush(CardInk::chrome(QColor(208, 215, 225, 190)));
     painter.drawRoundedRect(terminal, terminal.width() * .5, terminal.width() * .5);
 
-    painter.setPen(QPen(QColor(255, 255, 255, 160),
+    painter.setPen(QPen(CardInk::chrome(QColor(255, 255, 255, 160)),
                         metrics.stroke(painter, .012)));
     painter.setBrush(Qt::NoBrush);
     painter.drawPath(bodyPath);
@@ -141,7 +142,7 @@ void DesktopWidget::drawBatteryIcon(QPainter& painter, const QRectF& rect, int l
         bolt.lineTo(cx + rect.width() * .12, cy - rect.height() * .055);
         bolt.lineTo(cx + rect.width() * .025, cy - rect.height() * .055);
         bolt.closeSubpath();
-        painter.setBrush(QColor(255, 255, 255, 235));
+        painter.setBrush(CardInk::chrome(QColor(255, 255, 255, 235)));
         painter.setPen(Qt::NoPen);
         painter.drawPath(bolt);
     }
@@ -160,7 +161,7 @@ void DesktopWidget::drawDeviceRing(QPainter& painter, const QPointF& center, qre
     // 两种圆环卡片保持相同粗细，切换外观时不改变布局。
     const qreal stroke = metrics.stroke(painter, .102);
 
-    QPen track(QColor(238, 240, 240, connected ? 48 : 25), stroke,
+    QPen track(CardInk::chrome(QColor(238, 240, 240, connected ? 48 : 25)), stroke,
                Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
     painter.setBrush(Qt::NoBrush);
     painter.setPen(track);
@@ -169,7 +170,7 @@ void DesktopWidget::drawDeviceRing(QPainter& painter, const QPointF& center, qre
     const int clamped = qBound(0, level, 100);
     if (connected && level >= 0 && clamped > 0) {
         const qreal span = -360.0 * clamped / 100.0;
-        QPen progress(kBatteryProgress, stroke,
+        QPen progress(CardInk::chrome(kBatteryProgress), stroke,
                       Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
         painter.setPen(progress);
         constexpr qreal startAngle = 90.0;
@@ -182,7 +183,7 @@ void DesktopWidget::drawDeviceRing(QPainter& painter, const QPointF& center, qre
     // 空槽不显示说明，仅真实连接设备显示文字。
     if (showCaption && (connected || iconKind == 0)) {
         painter.setFont(batteryFont(radius * .60));
-        painter.setPen(connected ? kBatteryForeground : QColor(226, 229, 228, 66));
+        painter.setPen(connected ? CardInk::chrome(kBatteryForeground) : CardInk::chrome(QColor(226, 229, 228, 66)));
         ResponsiveLayout::drawSingleLine(painter, QRectF(center.x() - radius * .72,
                                  center.y() + radius * 1.52,
                                  radius * 1.44, radius * .80),
@@ -232,7 +233,7 @@ void DesktopWidget::paintBatteryCard(QPainter& painter, const QRectF& card) cons
             const qreal s = area.height();
             drawDeviceIcon(painter, QPointF(area.left() + s * .44, area.center().y()),
                            s * .32, iconKind, true);
-            painter.setPen(kBatteryForeground);
+            painter.setPen(CardInk::chrome(kBatteryForeground));
             painter.setFont(batteryFont(s * .20));
             const int nameWidth = qMax(1, qFloor(area.width() - s * 2.55));
             ResponsiveLayout::drawSingleLine(
@@ -241,7 +242,7 @@ void DesktopWidget::paintBatteryCard(QPainter& painter, const QRectF& card) cons
                 Qt::AlignLeft | Qt::AlignVCenter,
                 QFontMetrics(painter.font()).elidedText(name, Qt::ElideRight, nameWidth));
             painter.setFont(batteryFont(s * .19));
-            painter.setPen(kBatteryForeground);
+            painter.setPen(CardInk::chrome(kBatteryForeground));
             ResponsiveLayout::drawSingleLine(
                 painter, QRectF(area.right() - s * 1.59, area.top(),
                           s * .65, area.height()),
@@ -255,12 +256,12 @@ void DesktopWidget::paintBatteryCard(QPainter& painter, const QRectF& card) cons
             const QRectF body = bounds.adjusted(stroke * .5, stroke * .5,
                                                 -height * .24 - stroke * .5, -stroke * .5);
             const qreal radius = height * .20;
-            painter.setPen(QPen(kBatteryForeground, stroke));
+            painter.setPen(QPen(CardInk::chrome(kBatteryForeground), stroke));
             painter.setBrush(Qt::NoBrush);
             painter.drawRoundedRect(body, radius, radius);
             if (level >= 0) {
                 painter.setPen(Qt::NoPen);
-                painter.setBrush(kBatteryProgress);
+                painter.setBrush(CardInk::chrome(kBatteryProgress));
                 const qreal inset = stroke * 1.5;
                 QRectF fill = body.adjusted(inset, inset, -inset, -inset);
                 fill.setWidth(fill.width() * qBound(0, level, 100) / 100.0);
@@ -274,7 +275,7 @@ void DesktopWidget::paintBatteryCard(QPainter& painter, const QRectF& card) cons
                                   bounds.center().y() - height * .18,
                                   height * .14, height * .36);
             painter.setPen(Qt::NoPen);
-            painter.setBrush(kBatteryForeground);
+            painter.setBrush(CardInk::chrome(kBatteryForeground));
             painter.drawRoundedRect(terminal, terminal.width() * .5, terminal.width() * .5);
         };
         // 六行等高，只有真实设备填充内容，剩余行保持空白。
@@ -293,7 +294,7 @@ void DesktopWidget::paintBatteryCard(QPainter& painter, const QRectF& card) cons
                 device.name.isEmpty() ? QStringLiteral("已连接设备") : device.name,
                 device.level, device.iconKind);
         }
-        painter.setPen(QPen(QColor(238, 240, 240, 25),
+        painter.setPen(QPen(CardInk::chrome(QColor(238, 240, 240, 25)),
                       cardMetrics.stroke(painter, .0015)));
         for (int i = 1; i < kBatteryListRows; ++i) {
             const qreal y = card.top() + rowHeight * i;

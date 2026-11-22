@@ -1,4 +1,5 @@
 #include "widgets/desktopwidget.h"
+#include "widgets/cardink.h"
 #include "widgets/cardmetrics.h"
 #include "app/fontsettings.h"
 #include "rendering/responsivelayout.h"
@@ -15,21 +16,21 @@ void DesktopWidget::paintDictionaryCard(QPainter& painter, const QRectF& card) c
     if (m_cardVariant == 0 || m_cardVariant == 2) {
         const QRectF content = card.adjusted(28, 26, -28, -24);
         painter.setFont(displayFont(m_cardVariant == 0 ? 26 : 30, QFont::DemiBold));
-        painter.setPen(QColor(247, 250, 255, 238));
+        painter.setPen(CardInk::chrome(QColor(247, 250, 255, 238)));
         ResponsiveLayout::drawSingleLine(
             painter, QRectF(content.left(), content.top(), content.width(), 42),
             Qt::AlignLeft | Qt::AlignVCenter,
             m_dictionaryWord.isEmpty() ? QStringLiteral("加载中…")
                                        : m_dictionaryWord);
         painter.setFont(displayFont(13, QFont::Normal));
-        painter.setPen(QColor(191, 203, 224, 205));
+        painter.setPen(CardInk::chrome(QColor(191, 203, 224, 205)));
         ResponsiveLayout::drawSingleLine(
             painter, QRectF(content.left(), content.top() + 52, content.width(), 24),
             Qt::AlignLeft | Qt::AlignVCenter,
             m_dictionaryPhonetic.isEmpty() ? QStringLiteral("每日单词")
                                            : m_dictionaryPhonetic);
         painter.setFont(displayFont(11, QFont::Normal));
-        painter.setPen(QColor(170, 184, 211, 185));
+        painter.setPen(CardInk::chrome(QColor(170, 184, 211, 185)));
         ResponsiveLayout::drawSingleLine(
             painter, QRectF(content.left(), content.bottom() - 30,
                       content.width(), 20),
@@ -41,13 +42,13 @@ void DesktopWidget::paintDictionaryCard(QPainter& painter, const QRectF& card) c
     }
     const QRectF content = card.adjusted(32, 26, -30, -24);
     painter.setFont(displayFont(34, QFont::DemiBold));
-    painter.setPen(QColor(244, 247, 254, 232));
+    painter.setPen(CardInk::chrome(QColor(244, 247, 254, 232)));
     ResponsiveLayout::drawSingleLine(
         painter, QRectF(content.left(), content.top(), content.width(), 42),
         Qt::AlignLeft | Qt::AlignVCenter,
         m_dictionaryWord.isEmpty() ? QStringLiteral("加载中…") : m_dictionaryWord);
     painter.setFont(displayFont(18, QFont::Normal));
-    painter.setPen(QColor(218, 226, 242, 220));
+    painter.setPen(CardInk::chrome(QColor(218, 226, 242, 220)));
     const QString phonetic = m_dictionaryPhonetic.isEmpty()
                                  ? QStringLiteral("词典数据") : m_dictionaryPhonetic;
     ResponsiveLayout::drawSingleLine(
@@ -65,12 +66,12 @@ void DesktopWidget::paintDictionaryCard(QPainter& painter, const QRectF& card) c
         QFontMetrics(painter.font()).elidedText(m_dictionaryDefinition,
                                           Qt::ElideRight, int(content.width())));
     painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(198, 210, 238, 105));
+    painter.setBrush(CardInk::chrome(QColor(198, 210, 238, 105)));
     const qreal barWidth = qMin<qreal>(content.width() - 110, 560.0);
     for (int i = 0; i < 20; ++i)
         painter.drawRoundedRect(QRectF(content.left() + i * (barWidth / 20.0),
                                  content.top() + 164, barWidth / 20.0 - 4, 20), 4, 4);
-    painter.setPen(QPen(QColor(215, 226, 250, 180),
+    painter.setPen(QPen(CardInk::chrome(QColor(215, 226, 250, 180)),
                   dictionaryMetrics.stroke(painter, .003)));
     painter.setBrush(Qt::NoBrush);
     painter.drawRoundedRect(QRectF(content.left(), card.bottom() - 52, 82, 32), 6, 6);

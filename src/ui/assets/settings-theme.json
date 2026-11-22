@@ -67,6 +67,7 @@
   "sliderKnob": 0.95,
   "popupWidth": 28,
   "popupHeight": 25,
+  "motionSpeed": 1,
   "resizeEdge": 0.3,
   "stroke": 0.065,
   "dark": {

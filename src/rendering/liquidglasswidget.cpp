@@ -3,11 +3,13 @@
 
 #include "desktopcapture.h"
 #include "nativewindows.h"
+#include "renderdiagnostics.h"
 
 #include <QApplication>
 #include <QMoveEvent>
 #include <QGuiApplication>
 #include <QEvent>
+#include <QElapsedTimer>
 #include <QOperatingSystemVersion>
 #include <QHideEvent>
 #include <QFileInfo>
@@ -37,6 +39,58 @@
 
 namespace {
 constexpr int kWallpaperIdleIntervalMs = 10000; // 关闭实时采样时每十秒刷新一次。
+
+// 换壁纸不会产生窗口层级事件，只能用注册表与文件时间构造签名来发现变化。
+struct DesktopWallpaper {
+    QString path;
+    QString style;
+    QString background;
+    bool tiled = false;
+    QString signature;
+};
+
+DesktopWallpaper readDesktopWallpaper()
+{
+    DesktopWallpaper wallpaper;
+#ifdef Q_OS_WIN
+    QSettings desktop(QStringLiteral("HKEY_CURRENT_USER\\Control Panel\\Desktop"),
+                      QSettings::NativeFormat);
+    wallpaper.path = desktop.value(QStringLiteral("WallPaper")).toString();
+    wallpaper.style = desktop.value(QStringLiteral("WallpaperStyle"), QStringLiteral("10")).toString();
+    wallpaper.tiled = desktop.value(QStringLiteral("TileWallpaper"), QStringLiteral("0")).toString()
+                      == QStringLiteral("1");
+    wallpaper.background = desktop.value(QStringLiteral("Background"),
+                                         QStringLiteral("0 0 0")).toString();
+#else
+    wallpaper.style = QStringLiteral("10");
+    wallpaper.background = QStringLiteral("0 0 0");
+#endif
+    wallpaper.signature = wallpaper.path + QChar('|') + wallpaper.style + QChar('|')
+        + QString::number(wallpaper.tiled) + QChar('|') + wallpaper.background
+        + QChar('|') + QString::number(QFileInfo(wallpaper.path).lastModified().toMSecsSinceEpoch());
+    return wallpaper;
+}
+
+QString s_wallpaperWatchSignature;
+QElapsedTimer s_wallpaperWatchClock;
+quint64 s_wallpaperEpoch = 0;
+
+// 整进程每秒最多读一次注册表，代际号变化即代表壁纸换了。
+quint64 wallpaperEpoch()
+{
+    if (s_wallpaperWatchClock.isValid() && s_wallpaperWatchClock.elapsed() < 1000)
+        return s_wallpaperEpoch;
+    s_wallpaperWatchClock.restart();
+    const QString signature = readDesktopWallpaper().signature;
+    if (signature != s_wallpaperWatchSignature) {
+        const bool known = !s_wallpaperWatchSignature.isEmpty();
+        s_wallpaperWatchSignature = signature;
+        // 首次只记录基线；此后每次变化都让旧的壁纸像素与捕获缓存失效。
+        if (known)
+            ++s_wallpaperEpoch;
+    }
+    return s_wallpaperEpoch;
+}
 
 // 全进程共享壁纸画布，每个组件只保留局部裁剪，减少高 DPI 桌面的内存占用。
 QImage s_sharedWallpaperCanvas;
@@ -492,22 +546,11 @@ void LiquidGlassWidget::moveToDesktopCorner(int margin)
 
 bool LiquidGlassWidget::rebuildWallpaperCanvas(QScreen* screen)
 {
-#ifdef Q_OS_WIN
-    QSettings desktop(QStringLiteral("HKEY_CURRENT_USER\\Control Panel\\Desktop"),
-                      QSettings::NativeFormat);
-    const QString path = desktop.value(QStringLiteral("WallPaper")).toString();
-    const QString style = desktop.value(QStringLiteral("WallpaperStyle"),
-                                        QStringLiteral("10")).toString();
-    const bool tiled = desktop.value(QStringLiteral("TileWallpaper"),
-                                     QStringLiteral("0")).toString() == QStringLiteral("1");
-    const QString background = desktop.value(QStringLiteral("Background"),
-                                             QStringLiteral("0 0 0")).toString();
-#else
-    const QString path;
-    const QString style = QStringLiteral("10");
-    const bool tiled = false;
-    const QString background = QStringLiteral("0 0 0");
-#endif
+    const DesktopWallpaper setting = readDesktopWallpaper();
+    const QString& path = setting.path;
+    const QString& style = setting.style;
+    const bool tiled = setting.tiled;
+    const QString& background = setting.background;
 
     const qreal dpr = screen->devicePixelRatio();
     const QSize nativeSize(qMax(1, qRound(screen->size().width() * dpr)),
@@ -518,10 +561,7 @@ bool LiquidGlassWidget::rebuildWallpaperCanvas(QScreen* screen)
         kBackdropMaxDimension / qreal(qMax(nativeSize.width(), nativeSize.height())));
     const QSize pixelSize(qMax(1, qRound(nativeSize.width() * canvasScale)),
                           qMax(1, qRound(nativeSize.height() * canvasScale)));
-    const qint64 modified = QFileInfo(path).lastModified().toMSecsSinceEpoch();
-    const QString signature = path + QChar('|') + style + QChar('|')
-                              + QString::number(tiled) + QChar('|') + background
-                              + QChar('|') + QString::number(modified);
+    const QString signature = setting.signature;
     if (!m_wallpaperCanvas.isNull() && signature == m_wallpaperSignature
         && screen->name() == m_wallpaperScreenName
         && pixelSize == m_wallpaperPixelSize) {
@@ -626,10 +666,47 @@ void LiquidGlassWidget::updateSystemCaptureMode()
 #ifdef Q_OS_WIN
     if (!isVisible())
         return;
+    // 换壁纸后立即重建背景，不必等下一次低频壁纸刷新。
+    const quint64 epoch = wallpaperEpoch();
+    if (epoch != m_wallpaperEpoch) {
+        m_wallpaperEpoch = epoch;
+        invalidateWallpaperBackdrop();
+        QTimer::singleShot(0, this, &LiquidGlassWidget::captureDesktopBackdrop);
+    }
     // 定时检查作为原生层级事件的后备，仅修复层级错误的卡片。
     updateWindowLayer();
     setSystemCaptureMode(NativeWindows::isSystemCaptureActive());
 #endif
+}
+
+void LiquidGlassWidget::invalidateWallpaperBackdrop()
+{
+    RenderDiagnostics::write(QString("backdrop.wallpaper/0x%1").arg(quintptr(this), 0, 16),
+                             QStringLiteral("changed=1"));
+    // 壁纸属于窗口下方的像素：壁纸画布、验证过的捕获像素、合成裁剪和最后提交的帧
+    // 都建立在旧壁纸上，必须一起作废，否则实时路径会继续沿用旧背景。
+    m_wallpaperCanvas = {};
+    m_wallpaperSignature.clear();
+    m_wallpaperScreenName.clear();
+    m_wallpaperPixelSize = {};
+    m_wallpaperRefreshClock.invalidate();
+    m_backdropCache.clear();
+    m_compositeCanvas = {};
+    m_compositeArea = {};
+    m_compositeCaptureClock.invalidate();
+    m_lastCompositeGeometry = {};
+    m_lastCompositedBackdrop = {};
+    m_lastCropCanvasKey = 0;
+    m_lastCropGeometry = {};
+    m_lastCropSceneRevision = 0;
+    m_lastCropHadLayers = false;
+    m_unchangedCaptures = 0;
+    // 在途捕获拿到的仍是旧壁纸像素，按代际丢弃。
+    ++m_captureGeneration;
+    // 被遮挡而暂停的卡片需要先恢复绘制，否则要等到下一次可见性变化才刷新。
+    setRenderingSuspended(false);
+    updateRefreshRate();
+    update();
 }
 
 void LiquidGlassWidget::setSystemCaptureMode(bool active)
@@ -790,6 +867,12 @@ void LiquidGlassWidget::captureDesktopBackdrop()
 {
     if (!m_desktopCaptureEnabled || !isVisible() || m_systemCaptureActive)
         return;
+    // 换壁纸不会产生窗口层级事件，先确认下方壁纸是否还是同一张。
+    const quint64 epoch = wallpaperEpoch();
+    if (epoch != m_wallpaperEpoch) {
+        m_wallpaperEpoch = epoch;
+        invalidateWallpaperBackdrop();
+    }
     if (desktopDragActive() && !directBackdropDuringDrag())
         return;
     QScreen* screen = QGuiApplication::screenAt(geometry().center());
@@ -922,6 +1005,9 @@ void LiquidGlassWidget::updateWindowLayer()
 #ifdef Q_OS_WIN
     if (!m_desktopLayerEnabled || !isVisible())
         return;
+    // 菜单打开期间这张卡片压在压暗层之上，不能被这里的「回到桌面层」逻辑拽回去。
+    if (m_menuElevated)
+        return;
     const bool actualTopmost = NativeWindows::isTopmost(winId());
     if (m_dragging) {
         if (!m_windowLayerInitialized || !actualTopmost) {
@@ -942,6 +1028,31 @@ void LiquidGlassWidget::updateWindowLayer()
     }
     m_windowLayerInitialized = true;
 #endif
+}
+
+quint64 LiquidGlassWidget::elevateForMenu(WId aboveWindow)
+{
+#ifdef Q_OS_WIN
+    const quint64 serial = ++m_menuElevationSerial;
+    m_menuElevated = true;
+    // 压暗层是置顶窗口，卡片同样进置顶层就会压在它上面（HWND_TOPMOST 每次抬到最前面）。
+    NativeWindows::placeDragging(winId());
+    m_windowLayerInitialized = false;
+    return serial;
+#else
+    Q_UNUSED(aboveWindow);
+    return ++m_menuElevationSerial;
+#endif
+}
+
+void LiquidGlassWidget::dropMenuElevation(quint64 serial)
+{
+    // 只有当前这一次提升才允许收回：菜单连开两下时，先出现的那次回收不能把新打开的压回去。
+    if (!m_menuElevated || serial != m_menuElevationSerial)
+        return;
+    m_menuElevated = false;
+    m_windowLayerInitialized = false;
+    updateWindowLayer();
 }
 
 void LiquidGlassWidget::preparePanelOpening()
@@ -994,7 +1105,9 @@ bool LiquidGlassWidget::nativeEvent(const QByteArray& eventType, void* message, 
         }
         if (native->message == WM_WINDOWPOSCHANGING) {
             auto* position = reinterpret_cast<WINDOWPOS*>(native->lParam);
-            if (position && !(position->flags & SWP_NOZORDER)) {
+            // 菜单打开期间卡片是有意抬到压暗层之上的，这里再改锚点会把 elevateForMenu 的
+            // 层级提升当场撤销（SetWindowPos 的 HWND_TOPMOST / 锚点都会被换成桌面层）。
+            if (position && !(position->flags & SWP_NOZORDER) && !m_menuElevated) {
                 // 拖动与面板之外的卡片只修正插入锚点，避免点击或 Qt 提升窗口时盖住应用。
                 position->hwndInsertAfter = reinterpret_cast<HWND>(
                     NativeWindows::desktopInsertAfter(reinterpret_cast<WId>(native->hwnd)));

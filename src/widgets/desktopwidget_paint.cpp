@@ -1,4 +1,5 @@
 #include "widgets/desktopwidget.h"
+#include "widgets/cardink.h"
 #include "widgets/musiccard.h"
 #include <QPainter>
 #include <QPainterPath>
@@ -9,6 +10,8 @@ void DesktopWidget::paintOverlay(QPainter& painter)
     const qreal scale = qMax<qreal>(0.1, m_widgetScale);
     painter.save();
     GraphicsQuality::Scope imageQuality(imageAntialiasingEnabled());
+    // 卡片内容的墨色跟随外观模式：深玻璃用浅墨，白色磨砂表面用深墨。
+    CardInk::setDark(darkModeEnabled());
     if (darkModeEnabled())
         painter.setOpacity(painter.opacity() * .90);
     painter.scale(scale, scale);
@@ -38,7 +41,7 @@ void DesktopWidget::paintOverlay(QPainter& painter)
     case CardKind::Countdown: CountdownCard::paint(painter, card, m_countdown); break;
     case CardKind::Custom: {
         QFont font(pingFangFontFamily()); font.setPixelSize(12); applyFontSmoothing(font); painter.setFont(font);
-        painter.setPen(QColor(220, 230, 246));
+        painter.setPen(CardInk::chrome(QColor(220, 230, 246)));
         const QString name = m_custom.name.isEmpty() ? QStringLiteral("自定义组件") : m_custom.name;
         ResponsiveLayout::drawSingleLine(painter, QRectF(16, 5, card.width() - 32, 24), Qt::AlignVCenter | Qt::AlignLeft,
             painter.fontMetrics().elidedText(name + QStringLiteral("  ···"), Qt::ElideRight, qRound(card.width() - 32)));
