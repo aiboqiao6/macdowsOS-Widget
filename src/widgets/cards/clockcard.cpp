@@ -1,4 +1,5 @@
 #include "widgets/desktopwidget.h"
+#include "widgets/cardink.h"
 #include "widgets/cardmetrics.h"
 #include "app/fontsettings.h"
 #include "rendering/responsivelayout.h"
@@ -9,28 +10,36 @@
 using namespace CardMetrics;
 using AppFonts::displayFont;
 
-void DesktopWidget::drawAnalogClock(QPainter& painter, const QRectF& rect, int hourOffset) const
+void DesktopWidget::drawAnalogClock(QPainter& painter, const QRectF& rect, int hourOffset,
+                                    bool darkPlate) const
 {
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, GraphicsQuality::enabled());
     const ResponsiveLayout::Metrics metrics(rect);
     const QPointF c = rect.center();
     const qreal r = qMin(rect.width(), rect.height()) * kClockDialRadiusRatio;
-    painter.setPen(QPen(QColor(247, 250, 255, 72), metrics.stroke(painter, .004)));
-    painter.setBrush(QColor(255, 255, 255, 16));
+    // 表盘画在深色底板（多城市、城市时钟）上时保留浅色墨，直接画在玻璃上时随外观模式翻转。
+    const auto ink = [darkPlate](const QColor& color) {
+        return darkPlate ? color : CardInk::chrome(color);
+    };
+    const auto accent = [darkPlate](const QColor& color) {
+        return darkPlate ? color : CardInk::accent(color);
+    };
+    painter.setPen(QPen(ink(QColor(247, 250, 255, 72)), metrics.stroke(painter, .004)));
+    painter.setBrush(ink(QColor(255, 255, 255, 16)));
     painter.drawEllipse(c, r, r);
     for (int i = 0; i < 60; ++i) {
         const qreal a = (i / 60.0) * 2.0 * M_PI - M_PI / 2.0;
         const qreal outer = r - metrics.size(.012);
         const qreal inner = r - metrics.size((i % 5 == 0) ? .052 : .028);
-        painter.setPen(QPen(QColor(245, 249, 255, (i % 5 == 0) ? 210 : 100),
+        painter.setPen(QPen(ink(QColor(245, 249, 255, (i % 5 == 0) ? 210 : 100)),
                       metrics.stroke(painter, (i % 5 == 0) ? .008 : .004),
                       Qt::SolidLine, Qt::RoundCap));
         painter.drawLine(c + QPointF(std::cos(a), std::sin(a)) * inner,
                    c + QPointF(std::cos(a), std::sin(a)) * outer);
     }
     painter.setFont(displayFont(qMax(13, qRound(r * .23)), QFont::DemiBold));
-    painter.setPen(QColor(238, 243, 253, 218));
+    painter.setPen(ink(QColor(238, 243, 253, 218)));
     for (int hour = 1; hour <= 12; ++hour) {
         const qreal a = (hour / 12.0) * 2.0 * M_PI - M_PI / 2.0;
         const QPointF pos = c + QPointF(std::cos(a), std::sin(a))
@@ -50,11 +59,11 @@ void DesktopWidget::drawAnalogClock(QPainter& painter, const QRectF& rect, int h
     const qreal sec = (time.second() + time.msec() / 1000.0) / 60.0 * 2.0 * M_PI - M_PI / 2.0;
     const qreal min = (time.minute() + time.second() / 60.0) / 60.0 * 2.0 * M_PI - M_PI / 2.0;
     const qreal hour = ((time.hour() % 12) + time.minute() / 60.0) / 12.0 * 2.0 * M_PI - M_PI / 2.0;
-    hand(hour, r * .52, metrics.stroke(painter, .020), QColor(250, 252, 255, 230));
-    hand(min, r * .73, metrics.stroke(painter, .013), QColor(250, 252, 255, 220));
-    hand(sec, r * .80, metrics.stroke(painter, .006), QColor(255, 174, 172, 230));
+    hand(hour, r * .52, metrics.stroke(painter, .020), ink(QColor(250, 252, 255, 230)));
+    hand(min, r * .73, metrics.stroke(painter, .013), ink(QColor(250, 252, 255, 220)));
+    hand(sec, r * .80, metrics.stroke(painter, .006), accent(QColor(255, 174, 172, 230)));
     painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(255, 195, 194, 240));
+    painter.setBrush(accent(QColor(255, 195, 194, 240)));
     painter.drawEllipse(c, metrics.size(.016), metrics.size(.016));
     painter.restore();
 }
@@ -69,16 +78,19 @@ void DesktopWidget::drawDigitalClock(QPainter& painter, const QRectF& rect,
     const qreal faceInset = metrics.size(kClockFaceInsetRatio);
     const QRectF face = rect.adjusted(faceInset, faceInset,
                                       -faceInset, -faceInset);
+    // 不透明白色表盘随外观模式翻转；表盘上的字色必须同时翻转，否则会和底板同色。
+    const bool lightPlate = !transparentFace && !CardInk::dark();
     if (!transparentFace) {
-        painter.setPen(QPen(QColor(255, 255, 255, 150), metrics.stroke(painter, .004)));
-        painter.setBrush(QColor(248, 249, 251, 238));
+        painter.setPen(QPen(CardInk::chrome(QColor(255, 255, 255, 150)), metrics.stroke(painter, .004)));
+        painter.setBrush(CardInk::chrome(QColor(248, 249, 251, 238)));
         painter.drawRoundedRect(face, qMin(face.width(), face.height()) * .16,
                           qMin(face.width(), face.height()) * .16);
     }
     const QDateTime value = QDateTime::currentDateTime().addSecs(hourOffset * 3600);
     const bool wideLayout = face.width() >= face.height() * 1.35;
-    painter.setPen(transparentFace ? QColor(246, 249, 255, 238)
-                             : QColor(14, 18, 24, 240));
+    painter.setPen(transparentFace ? CardInk::chrome(QColor(246, 249, 255, 238))
+                             : (lightPlate ? QColor(246, 249, 255, 238)
+                                           : QColor(14, 18, 24, 240)));
     painter.setFont(displayFont(qMax(22, qRound(face.height()
                                           * (wideLayout ? .38 : .23))),
                           QFont::DemiBold));
@@ -90,8 +102,9 @@ void DesktopWidget::drawDigitalClock(QPainter& painter, const QRectF& rect,
                         -face.width() * .08, -face.height() * .22);
     ResponsiveLayout::drawSingleLine(painter, timeArea, Qt::AlignCenter,
                                      value.toString(QStringLiteral("HH:mm")));
-    painter.setPen(transparentFace ? QColor(220, 229, 244, 220)
-                             : QColor(111, 119, 133, 210));
+    painter.setPen(transparentFace ? CardInk::chrome(QColor(220, 229, 244, 220))
+                             : (lightPlate ? QColor(220, 229, 244, 220)
+                                           : QColor(111, 119, 133, 210)));
     painter.setFont(displayFont(qMax(8, qRound(face.height()
                                          * (wideLayout ? .085 : .075))),
                           QFont::Normal));
@@ -107,9 +120,10 @@ void DesktopWidget::drawDigitalClock(QPainter& painter, const QRectF& rect,
         painter.restore();
         return;
     }
-    painter.setPen(QPen(transparentFace ? QColor(235, 242, 255, 150)
-                                 : QColor(74, 81, 92, 130), metrics.stroke(painter, .003),
-                  Qt::SolidLine, Qt::RoundCap));
+    painter.setPen(QPen(transparentFace ? CardInk::chrome(QColor(235, 242, 255, 150))
+                                 : (lightPlate ? QColor(235, 242, 255, 150)
+                                               : QColor(74, 81, 92, 130)),
+                  metrics.stroke(painter, .003), Qt::SolidLine, Qt::RoundCap));
     for (int i = 0; i < 48; ++i) {
         const qreal angle = (i / 48.0) * 2.0 * M_PI - M_PI / 2.0;
         const qreal outer = qMin(face.width(), face.height()) * .43;
@@ -146,7 +160,7 @@ void DesktopWidget::drawClockFace(QPainter& painter, const QRectF& rect, int sty
             painter.setBrush(QColor(32, 37, 48, style == 7 ? 198 : 182));
             painter.drawRoundedRect(cell, qMin(cellW, cellH) * .16, qMin(cellW, cellH) * .16);
             drawAnalogClock(painter, cell.adjusted(cellW * .08, cellH * .08,
-                                             -cellW * .08, -cellH * .08), offsets[i]);
+                                             -cellW * .08, -cellH * .08), offsets[i], true);
             painter.setPen(QColor(225, 232, 244, 185));
             painter.setFont(displayFont(qMax(8, qRound(cellH * .07)), QFont::Normal));
             ResponsiveLayout::drawSingleLine(painter, QRectF(cell.left(), cell.bottom() - cellH * .19,
@@ -180,10 +194,10 @@ void DesktopWidget::drawClockFace(QPainter& painter, const QRectF& rect, int sty
     const QRectF dial = style == 1 || style == 4
         ? dialArea.adjusted(dialInset, dialInset, -dialInset, -dialInset)
         : dialArea;
-    drawAnalogClock(painter, dial, hourOffset);
+    drawAnalogClock(painter, dial, hourOffset, style == 1 || style == 4);
     if (!city.isEmpty()) {
         painter.setPen(style == 1 || style == 4 ? QColor(235, 239, 247, 205)
-                                         : QColor(89, 98, 112, 205));
+                                         : CardInk::chrome(QColor(89, 98, 112, 205)));
         painter.setFont(displayFont(qMax(8, qRound(rect.height() * .065)), QFont::DemiBold));
         ResponsiveLayout::drawSingleLine(painter, cityArea, Qt::AlignCenter, city);
     }

@@ -1,4 +1,5 @@
 #include "widgets/musiccard.h"
+#include "widgets/cardink.h"
 #include "app/fontsettings.h"
 #include "rendering/liquidglassstyle.h"
 #include "rendering/responsivelayout.h"
@@ -86,7 +87,7 @@ void paint(QPainter& painter, const QRectF& bounds, const MediaSnapshot& media)
     // 整面材质由宿主液态玻璃提供，专辑图像仅绘制在封面区域。
 
     painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(0, 0, 0, 32));
+    painter.setBrush(CardInk::chrome(QColor(0, 0, 0, 32)));
     painter.drawRoundedRect(regions.artwork.translated(0, m.size(.012)), artworkRadius, artworkRadius);
     QPainterPath artworkClip;
     artworkClip.addRoundedRect(regions.artwork, artworkRadius, artworkRadius);
@@ -99,8 +100,8 @@ void paint(QPainter& painter, const QRectF& bounds, const MediaSnapshot& media)
         GraphicsQuality::drawImage(painter, regions.artwork, media.artwork, source);
     } else {
         QLinearGradient placeholder(regions.artwork.topLeft(), regions.artwork.bottomLeft());
-        placeholder.setColorAt(0, QColor(255, 83, 116));
-        placeholder.setColorAt(1, QColor(228, 39, 78));
+        placeholder.setColorAt(0, CardInk::accent(QColor(255, 83, 116)));
+        placeholder.setColorAt(1, CardInk::accent(QColor(228, 39, 78)));
         painter.fillRect(regions.artwork, placeholder);
         const qreal inset = regions.artwork.width() * .18;
         note(painter, regions.artwork.adjusted(inset, inset, -inset, -inset), Qt::white);
@@ -118,11 +119,11 @@ void paint(QPainter& painter, const QRectF& bounds, const MediaSnapshot& media)
     };
     if (wide) {
         const QRectF symbol(regions.branding.topLeft(), QSizeF(m.size(.065), m.size(.065)));
-        note(painter, symbol, QColor(255, 255, 255, 235));
+        note(painter, symbol, CardInk::chrome(QColor(255, 255, 255, 235)));
         text(regions.branding.adjusted(m.size(.077), 0, 0, 0), QStringLiteral("Music"), .046,
-             QColor(255, 255, 255, 235), QFont::DemiBold);
+             CardInk::chrome(QColor(255, 255, 255, 235)), QFont::DemiBold);
     } else {
-        note(painter, regions.branding, QColor(255, 255, 255, 235));
+        note(painter, regions.branding, CardInk::chrome(QColor(255, 255, 255, 235)));
     }
     const QString title = media.available
         ? (media.title.isEmpty() ? QStringLiteral("未知曲目") : media.title)
@@ -130,34 +131,35 @@ void paint(QPainter& painter, const QRectF& bounds, const MediaSnapshot& media)
     const QString artist = media.available
         ? (media.artist.isEmpty() ? QStringLiteral("未知艺术家") : media.artist)
         : (!media.error.isEmpty() ? QStringLiteral("暂时无法读取音乐") : QStringLiteral("打开音乐播放器"));
-    text(regions.title, title, .068, Qt::white, QFont::DemiBold);
-    text(regions.artist, artist, .043, QColor(255, 255, 255, 166));
+    text(regions.title, title, .068, CardInk::chrome(Qt::white), QFont::DemiBold);
+    text(regions.artist, artist, .043, CardInk::chrome(QColor(255, 255, 255, 166)));
 
     if (wide) {
         const qint64 position = qBound<qint64>(0, media.positionMs, qMax<qint64>(0, media.durationMs));
         const qreal progress = media.durationMs > 0 ? position / qreal(media.durationMs) : 0;
         const qreal y = regions.progress.center().y();
-        painter.setPen(QPen(QColor(255, 255, 255, 48), m.size(.009), Qt::SolidLine, Qt::RoundCap));
+        painter.setPen(QPen(CardInk::chrome(QColor(255, 255, 255, 48)), m.size(.009), Qt::SolidLine, Qt::RoundCap));
         painter.drawLine(QPointF(regions.progress.left(), y), QPointF(regions.progress.right(), y));
         if (progress > 0) {
-            painter.setPen(QPen(QColor(255, 255, 255, 210), m.size(.009), Qt::SolidLine, Qt::RoundCap));
+            painter.setPen(QPen(CardInk::chrome(QColor(255, 255, 255, 210)), m.size(.009), Qt::SolidLine, Qt::RoundCap));
             painter.drawLine(QPointF(regions.progress.left(), y), QPointF(regions.progress.left() + regions.progress.width() * progress, y));
         }
         const bool hasTime = media.available && media.durationMs > 0;
-        text(regions.elapsed, hasTime ? timeLabel(position) : QStringLiteral("–:––"), .027, QColor(255, 255, 255, 145));
+        text(regions.elapsed, hasTime ? timeLabel(position) : QStringLiteral("–:––"), .027, CardInk::chrome(QColor(255, 255, 255, 145)));
         text(regions.remaining, hasTime ? QLatin1Char('-') + timeLabel(media.durationMs - position) : QStringLiteral("–:––"),
-             .027, QColor(255, 255, 255, 145), QFont::Normal, Qt::AlignRight | Qt::AlignVCenter);
+             .027, CardInk::chrome(QColor(255, 255, 255, 145)), QFont::Normal, Qt::AlignRight | Qt::AlignVCenter);
     }
     const auto control = [&](const QRectF& area, bool enabled, int direction) {
         if (area.isEmpty())
             return;
         const ResponsiveLayout::Metrics b(area);
         painter.setPen(Qt::NoPen);
-        QColor ink(255, 255, 255, enabled ? 255 : 80);
+        QColor ink = CardInk::chrome(QColor(255, 255, 255, enabled ? 255 : 80));
         if (direction == 0) {
-            painter.setBrush(QColor(255, 255, 255, enabled ? 245 : 45));
+            painter.setBrush(CardInk::chrome(QColor(255, 255, 255, enabled ? 245 : 45)));
             painter.drawEllipse(area);
-            ink = enabled ? QColor(30, 34, 40) : QColor(255, 255, 255, 100);
+            ink = enabled ? (CardInk::dark() ? QColor(30, 34, 40) : QColor(255, 255, 255, 245))
+                          : CardInk::chrome(QColor(255, 255, 255, enabled ? 245 : 100));
         }
         painter.setBrush(ink);
         if (direction == 0 && media.playing) {
@@ -205,12 +207,12 @@ MediaSnapshot previewSnapshot()
         hills.moveTo(-30, 375);
         hills.cubicTo(150, 160, 210, 400, 540, 238);
         hills.lineTo(540, 540); hills.lineTo(-30, 540); hills.closeSubpath();
-        painter.fillPath(hills, QColor(59, 49, 69));
+        painter.fillPath(hills, CardInk::chrome(QColor(59, 49, 69)));
         QPainterPath foreground;
         foreground.moveTo(-30, 420);
         foreground.cubicTo(200, 280, 310, 510, 540, 370);
         foreground.lineTo(540, 540); foreground.lineTo(-30, 540); foreground.closeSubpath();
-        painter.fillPath(foreground, QColor(30, 34, 49));
+        painter.fillPath(foreground, CardInk::chrome(QColor(30, 34, 49)));
         return image;
     }();
     MediaSnapshot media;

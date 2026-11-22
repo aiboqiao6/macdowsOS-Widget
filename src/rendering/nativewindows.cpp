@@ -416,6 +416,8 @@ void NativeWindows::placeDragging(WId id, WId panelAbove)
 {
 #ifdef Q_OS_WIN
     constexpr UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+    // HWND_TOPMOST 每次都把窗口抬到置顶层最前面，调用顺序就是最终的上下顺序；
+    // 计数相邻窗口再插锚点在置顶/普通两层的交界处并不稳定，所以这里不再用锚点。
     SetWindowPos(reinterpret_cast<HWND>(id), HWND_TOPMOST, 0, 0, 0, 0, flags);
     if (panelAbove && IsWindowVisible(reinterpret_cast<HWND>(panelAbove)))
         SetWindowPos(reinterpret_cast<HWND>(id), reinterpret_cast<HWND>(panelAbove), 0, 0, 0, 0, flags);

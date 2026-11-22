@@ -149,9 +149,9 @@ namespace {
 using namespace SettingsAppearance;
 constexpr qreal kSettingsScaleBoost = 1.3;
 const QStringList kTitles = {QStringLiteral("通用"), QStringLiteral("外观与显示"),
-    QStringLiteral("液态玻璃"), QStringLiteral("天气"), QStringLiteral("自定义小组件"), QStringLiteral("关于")};
+    QStringLiteral("材质设置"), QStringLiteral("天气"), QStringLiteral("自定义小组件"), QStringLiteral("关于")};
 const QStringList kCaptions = {QStringLiteral("设置小组件的桌面交互与登录启动方式。"), QStringLiteral("选择小组件的外观、显示大小与渲染效果。"),
-    QStringLiteral("调整玻璃表面的透明度、折射与模糊效果。"), QStringLiteral("选择天气小组件显示的地区。"),
+    QStringLiteral("选择材质样式，并调整透明度、折射与模糊。"), QStringLiteral("选择天气小组件显示的地区。"),
     QStringLiteral("创建和管理自己的桌面小组件。"), QStringLiteral("查看应用信息、版本号与软件更新。")};
 QIcon pageIcon(int index, const QWidget* theme)
 {

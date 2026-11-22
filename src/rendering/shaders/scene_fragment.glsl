@@ -30,6 +30,15 @@ uniform float u_connStrength[8];
 
 uniform float u_opacity;
 
+// === 材质样式 ===
+// 0 为液态玻璃，1 为 iOS 18 模糊；后三个只在该样式下使用。
+uniform int u_materialStyle;
+uniform float u_frost;        // 中性色洗强度
+uniform float u_saturation;   // 磨砂背景的饱和度倍率
+uniform float u_hairline;     // 轮廓内 1 设备像素描边的不透明度
+uniform float u_milk;         // 亮色模式把表面抬成白色磨砂的强度
+uniform bool u_lightSurface;  // 只有卡片使用亮色表面，面板保持深色
+
 // 超椭圆 SDF —— 形状基础
 float sdSuperellipse(vec2 p, float n, float r) {
     vec2 p_abs = abs(p);
@@ -125,6 +134,36 @@ void main() {
 
     // 统一的柔化透光避免清晰原图与模糊图混合后出现双重边缘。
     vec4 color = texture2D(u_blurredTex, texCoord);
+
+    // 反光带与解析覆盖率只与距离场有关，两种材质共用；提前算好以便分层。
+    float fw = max(edgeWidth, 0.0003);
+    float rimDepth = depthPx / max(u_devicePixelRatio, 1.0);
+
+    // 白色表面只在“卡片 + 亮色”这一种组合下成立，暗色模式必须回到深色表面。
+    bool whiteSurface = u_lightSurface && !u_darkMode;
+
+    if (u_materialStyle == 1) {
+        // iOS 18 材质：磨砂之上只叠一层中性色洗，没有曲面折射与边缘反光。
+        // 先按亮度放大色差，让壁纸的冷暖在被磨平之后仍然可辨。
+        float luma = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
+        color.rgb = clamp(vec3(luma) + (color.rgb - vec3(luma)) * u_saturation, 0.0, 1.0);
+        vec3 washColor = whiteSurface ? vec3(0.972, 0.976, 0.984)
+                                      : (u_darkMode ? vec3(0.055, 0.058, 0.067)
+                                                    : vec3(0.086, 0.094, 0.110));
+        color.rgb = mix(color.rgb, washColor, u_frost);
+        if (u_noise > 0.0) {
+            vec4 noiseVal = vec4(vec3(rand(gl_FragCoord.xy) - 0.5), 0.0);
+            color.rgb += noiseVal.rgb * u_noise;
+        }
+        // 描边按距离场贴住轮廓内侧，宽度固定为一设备像素；亮色表面上改用深描边。
+        float hairline = 1.0 - smoothstep(0.35, 1.15, rimDepth * u_devicePixelRatio);
+        vec3 hairColor = whiteSurface ? vec3(0.24, 0.25, 0.28) : vec3(1.0);
+        color.rgb = mix(color.rgb, hairColor, hairline * u_hairline);
+        color.a = smoothstep(-fw, fw, dist) * u_opacity;
+        gl_FragColor = color;
+        return;
+    }
+
     if (u_fPower != 0.0) {
         // 固定的环境反射压缩背景明暗，保留色彩差异，形成参考玻璃的灰阶与厚度。
         float luminance = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
@@ -137,14 +176,15 @@ void main() {
                               + vec3(0.129, 0.147, 0.159), 0.0, 1.0);
         }
     }
+    // 亮色模式：磨砂背景再抬成半透明白色表面，文字与描边同时换成深色墨。
+    if (whiteSurface && u_milk > 0.0)
+        color.rgb = mix(color.rgb, vec3(0.972, 0.976, 0.984), u_milk);
     if (u_noise > 0.0) {
         vec4 noiseVal = vec4(vec3(rand(gl_FragCoord.xy) - 0.5), 0.0);
         color += noiseVal * u_noise;
     }
 
     // 方向性反光只占原生像素轮廓，不在整个玻璃表面叠加明暗遮罩。
-    float fw = max(edgeWidth, 0.0003);
-    float rimDepth = depthPx / max(u_devicePixelRatio, 1.0);
     float outerRim = exp(-pow((rimDepth - 0.70) / 0.80, 2.0));
     float innerRim = exp(-pow((rimDepth - 2.0) / 0.65, 2.0));
     float directionalLight = dot(normal, normalize(vec2(-0.55, 0.84)));

@@ -63,6 +63,8 @@ DesktopWidget::DesktopWidget(QWidget* parent, CardKind kind, bool ownsTray,
     AppSettings settings;
     m_widgetScale = qBound<qreal>(0.40, settings.value(QStringLiteral("appearance/scale"), 1.0).toDouble(), 2.0);
     setGlassMargins(0);
+    // 卡片是唯一使用亮色磨砂表面的宿主；右键菜单、图库等面板保持深色表面。
+    setLightSurface(true);
     if (m_cardKind == CardKind::Custom)
         setWindowFlag(Qt::WindowDoesNotAcceptFocus, false);
     const int initialCell = qMax(1, qRound(kGridBaseCell * m_widgetScale));
