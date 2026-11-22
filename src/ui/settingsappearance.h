@@ -70,7 +70,10 @@ inline void load(QWidget* window)
                     const double n = it.value().toDouble();
                     // Structural validation, independent of the reference's design values.
                     if (std::isfinite(n) && n >= 0 && n <= 200
-                        && (n > 0 || theme.value(it.key()).toDouble() == 0)
+                        && (n > 0 || theme.value(it.key()).toDouble() == 0
+                            // Motion speed is the one metric where zero is meaningful:
+                            // it is the documented way to switch animation off.
+                            || it.key() == QStringLiteral("motionSpeed"))
                         && (it.key() != QStringLiteral("sidebarRatio") || n < 0.5)
                         && (it.key() != QStringLiteral("sidebarCaptureOverscan") || n <= 1)
                         && (it.key() != QStringLiteral("fontScale") || (n >= 0.5 && n <= 3)))
